@@ -1,0 +1,1653 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Oysterun</title>
+    <script src="./oysterun-capacitor-bootstrap-config.js"></script>
+    <script src="./jsQR.js"></script>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        background: #f7f7f3;
+        color: #1d2428;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f7f7f3;
+      }
+
+      .shell {
+        min-height: 100vh;
+        padding: calc(env(safe-area-inset-top) + 28px) 20px calc(env(safe-area-inset-bottom) + 28px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .panel {
+        width: min(100%, 430px);
+      }
+
+      .brand {
+        margin: 0 0 6px;
+        font-size: 31px;
+        line-height: 1.08;
+        font-weight: 760;
+        letter-spacing: 0;
+      }
+
+      .subhead {
+        margin: 0 0 24px;
+        font-size: 15px;
+        line-height: 1.45;
+        color: #526066;
+      }
+
+      .section {
+        display: grid;
+        gap: 14px;
+      }
+
+      .restore-check {
+        display: grid;
+        gap: 8px;
+        margin: 22px 0 18px;
+        padding: 14px;
+        border: 1px solid #d6dddf;
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      .restore-check-title {
+        color: #233238;
+        font-size: 14px;
+        font-weight: 740;
+      }
+
+      .restore-check-message {
+        margin: 0;
+        color: #5b686e;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      label {
+        display: grid;
+        gap: 7px;
+        font-size: 13px;
+        font-weight: 670;
+        color: #29353a;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid #cbd5d8;
+        border-radius: 8px;
+        background: #fff;
+        color: #142025;
+        font: inherit;
+        font-size: 16px;
+        line-height: 1.35;
+        padding: 12px 13px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 92px;
+        resize: vertical;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: #315f8c;
+        box-shadow: 0 0 0 3px rgba(49, 95, 140, 0.16);
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .row > * {
+        flex: 1 1 auto;
+      }
+
+      .saved-panel {
+        display: none;
+        margin-top: 14px;
+        border: 1px solid #d6dddf;
+        border-radius: 8px;
+        background: #fff;
+        overflow: hidden;
+      }
+
+      .saved-panel.open {
+        display: block;
+      }
+
+      .saved-option {
+        width: 100%;
+        min-height: 0;
+        padding: 13px;
+        border: 0;
+        border-bottom: 1px solid #edf0ef;
+        border-radius: 0;
+        background: #fff;
+        color: #17242a;
+        text-align: left;
+        display: grid;
+        gap: 4px;
+      }
+
+      .saved-option:last-child {
+        border-bottom: 0;
+      }
+
+      .saved-name {
+        font-size: 14px;
+        font-weight: 720;
+      }
+
+      .saved-url {
+        color: #647176;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      button {
+        border: 1px solid #1f2d34;
+        border-radius: 8px;
+        background: #1f2d34;
+        color: #fff;
+        min-height: 44px;
+        padding: 0 14px;
+        font: inherit;
+        font-size: 15px;
+        font-weight: 720;
+      }
+
+      button.secondary {
+        background: #fff;
+        color: #203039;
+        border-color: #c3cdd0;
+      }
+
+      button.ghost {
+        background: transparent;
+        color: #37505b;
+        border-color: transparent;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+      }
+
+      .status {
+        min-height: 21px;
+        margin: 13px 0 0;
+        font-size: 13px;
+        line-height: 1.45;
+        color: #4c5c63;
+        overflow-wrap: anywhere;
+      }
+
+      .status.error {
+        color: #a13b2d;
+      }
+
+      .status.ok {
+        color: #266844;
+      }
+
+      .host-guidance {
+        display: grid;
+        gap: 8px;
+        margin-top: -2px;
+      }
+
+      .host-health-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        flex-wrap: wrap;
+        color: #526066;
+        font-size: 12px;
+        line-height: 1.42;
+      }
+
+      .host-health-label {
+        color: #29353a;
+        font-weight: 700;
+      }
+
+      .host-health-link {
+        flex: 1 1 210px;
+        min-width: 0;
+        color: #235b8a;
+        overflow-wrap: anywhere;
+      }
+
+      .host-health-copy {
+        flex: 0 0 auto;
+        min-height: 28px;
+        padding: 0 10px;
+        border-color: #c3cdd0;
+        background: #fff;
+        color: #203039;
+        font-size: 12px;
+        font-weight: 720;
+      }
+
+      .host-validation-message {
+        margin: 0;
+        color: #a13b2d;
+        font-size: 12px;
+        line-height: 1.42;
+        overflow-wrap: anywhere;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      .divider {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 22px 0;
+        color: #7a8589;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .divider::before,
+      .divider::after {
+        content: '';
+        height: 1px;
+        background: #d8dedd;
+        flex: 1;
+      }
+
+      .qr-scanner-view {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        background: #111;
+      }
+
+      .qr-scanner-view.open {
+        display: block;
+      }
+
+      .qr-scanner-view video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        border-radius: 0;
+        background: #111;
+        object-fit: cover;
+      }
+
+      .scanner-back-button {
+        position: absolute;
+        top: calc(env(safe-area-inset-top) + 12px);
+        left: 12px;
+        z-index: 2;
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        border-color: rgba(255, 255, 255, 0.36);
+        background: rgba(18, 25, 28, 0.72);
+        color: #fff;
+        backdrop-filter: blur(10px);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .scanner-back-button svg {
+        width: 22px;
+        height: 22px;
+      }
+
+      canvas {
+        display: none;
+      }
+
+      .hint {
+        margin: 0;
+        color: #657277;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel" aria-labelledby="title">
+        <h1 id="title" class="brand">Oysterun</h1>
+        <p class="subhead">
+          Connect this app to your Host. Use the Host URL from setup, or use a setup QR token.
+        </p>
+
+        <div id="restore-check" class="restore-check" role="status" aria-live="polite">
+          <div class="restore-check-title">Opening Oysterun...</div>
+          <p id="restore-check-message" class="restore-check-message">Checking saved session...</p>
+        </div>
+
+        <form id="connect-form" class="section" hidden inert aria-hidden="true">
+          <label>
+            Host URL or IP:port
+            <input
+              id="host-url"
+              name="host-url"
+              autocomplete="url"
+              placeholder="Host URL from setup"
+              inputmode="url"
+            />
+          </label>
+          <div id="host-guidance" class="host-guidance" aria-live="polite">
+            <p id="host-helper" class="hint">
+              Use the Host URL shown by oysterun setup, or paste your Host IP / IP:port. Bare IPs use port 8802.
+            </p>
+            <div id="host-health-row" class="host-health-row" hidden>
+              <span class="host-health-label">Health URL:</span>
+              <a
+                id="host-health-link"
+                class="host-health-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+              ></a>
+              <button id="host-health-copy" class="host-health-copy" type="button">Copy</button>
+            </div>
+            <p id="host-validation-message" class="host-validation-message" hidden></p>
+          </div>
+          <label>
+            Host password
+            <input
+              id="host-password"
+              name="host-password"
+              type="password"
+              autocomplete="current-password"
+              placeholder="Host password"
+            />
+          </label>
+          <div class="row">
+            <button id="connect-button" type="submit">Connect</button>
+            <button id="open-saved-button" class="secondary" type="button">Open Saved</button>
+          </div>
+        </form>
+
+        <div id="saved-panel" class="saved-panel" aria-live="polite"></div>
+
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+
+        <div id="login-divider" class="divider" hidden>or</div>
+
+        <section id="qr-section" class="section" hidden inert aria-hidden="true">
+          <button id="scan-qr-button" class="secondary" type="button">Scan QR code</button>
+        </section>
+      </section>
+    </main>
+
+    <div id="qr-scanner-view" class="qr-scanner-view" aria-hidden="true">
+      <video id="qr-video" playsinline muted></video>
+      <canvas id="qr-canvas"></canvas>
+      <button
+        id="qr-back-button"
+        class="scanner-back-button"
+        type="button"
+        aria-label="Previous page"
+        title="Previous page"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M19 12H5"></path>
+          <path d="m12 19-7-7 7-7"></path>
+        </svg>
+      </button>
+    </div>
+
+    <script>
+      (function oysterunCapacitorBootstrap() {
+        const config = window.OYSTERUN_CAPACITOR_BOOTSTRAP_CONFIG || {};
+        const targetKey = config.hostTargetStorageKey || 'oysterun.stage1.host_target.v1';
+        const statusEl = document.getElementById('status');
+        const restoreCheck = document.getElementById('restore-check');
+        const restoreCheckMessage = document.getElementById('restore-check-message');
+        const connectForm = document.getElementById('connect-form');
+        const hostInput = document.getElementById('host-url');
+        const passwordInput = document.getElementById('host-password');
+        const hostHelper = document.getElementById('host-helper');
+        const hostHealthRow = document.getElementById('host-health-row');
+        const hostHealthLink = document.getElementById('host-health-link');
+        const hostHealthCopy = document.getElementById('host-health-copy');
+        const hostValidationMessage = document.getElementById('host-validation-message');
+        const connectButton = document.getElementById('connect-button');
+        const openSavedButton = document.getElementById('open-saved-button');
+        const savedPanel = document.getElementById('saved-panel');
+        const loginDivider = document.getElementById('login-divider');
+        const qrSection = document.getElementById('qr-section');
+        const scanQrButton = document.getElementById('scan-qr-button');
+        const qrScannerView = document.getElementById('qr-scanner-view');
+        const video = document.getElementById('qr-video');
+        const canvas = document.getElementById('qr-canvas');
+        const HOST_URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+        const DEFAULT_DIRECT_HOST_PORT = '8802';
+        const SAVED_RESTORE_CONNECTIVITY_RETRY_MS = 3000;
+        let scanStream = null;
+        let scanTimer = null;
+        let savedRestoreRetryTimer = null;
+
+        function setStatus(message, kind) {
+          statusEl.textContent = message || '';
+          statusEl.className = `status${kind ? ` ${kind}` : ''}`;
+        }
+
+        function setBusy(isBusy) {
+          connectButton.disabled = isBusy;
+          openSavedButton.disabled = isBusy;
+          scanQrButton.disabled = isBusy;
+        }
+
+        function setInteractiveHidden(element, isHidden) {
+          if (!element) return;
+          element.hidden = isHidden;
+          element.toggleAttribute('inert', isHidden);
+          element.setAttribute('aria-hidden', isHidden ? 'true' : 'false');
+        }
+
+        function setConnectSurfaceVisible(isVisible) {
+          setInteractiveHidden(connectForm, !isVisible);
+          setInteractiveHidden(savedPanel, !isVisible);
+          setInteractiveHidden(qrSection, !isVisible);
+          if (loginDivider) loginDivider.hidden = !isVisible;
+          if (!isVisible) savedPanel.classList.remove('open');
+          if (restoreCheck) {
+            restoreCheck.hidden = isVisible;
+            restoreCheck.setAttribute('aria-hidden', isVisible ? 'true' : 'false');
+          }
+          if (isVisible) {
+            setBusy(false);
+          }
+        }
+
+        function showSavedRestoreCheckingState(message) {
+          setConnectSurfaceVisible(false);
+          if (restoreCheckMessage) {
+            restoreCheckMessage.textContent = message || 'Checking saved session...';
+          }
+          setStatus('');
+        }
+
+        function showConnectSurfaceForSavedRestoreDecision(reason, message, kind) {
+          if (savedRestoreRetryTimer) {
+            window.clearTimeout(savedRestoreRetryTimer);
+            savedRestoreRetryTimer = null;
+          }
+          setConnectSurfaceVisible(true);
+          document.body.dataset.oysterunBootstrapRestoreDecision = reason;
+          if (message !== undefined) {
+            setStatus(message, kind);
+          }
+        }
+
+        function scheduleSavedDashboardRestoreRetry() {
+          if (savedRestoreRetryTimer) return;
+          savedRestoreRetryTimer = window.setTimeout(() => {
+            savedRestoreRetryTimer = null;
+            void restoreSavedDashboardSession();
+          }, SAVED_RESTORE_CONNECTIVITY_RETRY_MS);
+        }
+
+        function describeNavigationTarget(targetUrl) {
+          try {
+            const url = new URL(targetUrl);
+            return {
+              target_origin: url.origin,
+              target_pathname: url.pathname,
+              target_search: url.search,
+              target_hash_present: Boolean(url.hash),
+            };
+          } catch {
+            return {
+              target_origin: null,
+              target_pathname: null,
+              target_search: null,
+              target_hash_present: false,
+            };
+          }
+        }
+
+        function recordCapacitorBootstrapDiagnostic(origin, stage, extra = {}) {
+          try {
+            const normalizedOrigin = normalizeHostOrigin(origin);
+            const payload = {
+              event: 'capacitor_bootstrap_stage',
+              stage,
+              href: window.location.href,
+              pathname: window.location.pathname,
+              search: window.location.search,
+              hash_present: Boolean(window.location.hash),
+              visibility_state: document.visibilityState,
+              app_name: config.appName || null,
+              start_path: config.startPath || '/app',
+              host_origin: normalizedOrigin,
+              saved_host_count: loadSavedTargets().length,
+              capacitor_runtime: Boolean(
+                window.Capacitor &&
+                  typeof window.Capacitor.isNativePlatform === 'function' &&
+                  window.Capacitor.isNativePlatform()
+              ),
+              ...extra,
+              raw_secret_material_exposed: false,
+            };
+            void fetch(new URL('/routec/matrix/client-auth-loss-diagnostic', normalizedOrigin), {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(payload),
+              keepalive: true,
+            }).catch(() => {});
+          } catch {
+            // Bootstrap diagnostics must never block Host login or navigation.
+          }
+        }
+
+        function createHostInputError(message, code) {
+          const error = new Error(message);
+          error.code = code || 'host_input_invalid';
+          return error;
+        }
+
+        function isEmailLikeHostTarget(raw) {
+          return !HOST_URL_SCHEME_RE.test(raw) && raw.includes('@');
+        }
+
+        function isIpv4Address(host) {
+          const parts = String(host || '').split('.');
+          if (parts.length !== 4) return false;
+          return parts.every((part) => {
+            if (!/^\d+$/.test(part)) return false;
+            const value = Number(part);
+            return value >= 0 && value <= 255;
+          });
+        }
+
+        function isDirectHostWithoutScheme(host) {
+          const normalized = String(host || '').toLowerCase();
+          return (
+            normalized === 'localhost' || isIpv4Address(normalized) || normalized.includes(':')
+          );
+        }
+
+        function normalizeBarePort(port) {
+          if (!port) return '';
+          if (!/^\d+$/.test(port)) {
+            throw createHostInputError(
+              'Host port must be a number between 1 and 65535.',
+              'host_port_invalid'
+            );
+          }
+          const value = Number(port);
+          if (value < 1 || value > 65535) {
+            throw createHostInputError(
+              'Host port must be a number between 1 and 65535.',
+              'host_port_invalid'
+            );
+          }
+          return String(value);
+        }
+
+        function parseBareHostTarget(raw) {
+          const bare = raw.replace(/\/+$/, '');
+          if (!bare) {
+            throw createHostInputError('Host URL is required.', 'host_required');
+          }
+          if (/[/?#\\]/.test(bare)) {
+            throw createHostInputError(
+              'Add http:// or https:// when the Host URL includes a path.',
+              'host_scheme_required_for_path'
+            );
+          }
+          if (bare.startsWith('[')) {
+            const closeIndex = bare.indexOf(']');
+            if (closeIndex <= 1) {
+              throw createHostInputError(
+                'IPv6 Host URLs must use brackets, for example http://[::1]:8802.',
+                'host_ipv6_invalid'
+              );
+            }
+            const host = bare.slice(1, closeIndex);
+            const rest = bare.slice(closeIndex + 1);
+            if (rest && !rest.startsWith(':')) {
+              throw createHostInputError('Host URL is invalid.', 'host_invalid');
+            }
+            return {
+              host,
+              hostForUrl: `[${host}]`,
+              port: normalizeBarePort(rest ? rest.slice(1) : ''),
+            };
+          }
+          const colonCount = (bare.match(/:/g) || []).length;
+          if (colonCount > 1) {
+            throw createHostInputError(
+              'IPv6 Host URLs must use brackets, for example http://[::1]:8802.',
+              'host_ipv6_invalid'
+            );
+          }
+          if (colonCount === 1) {
+            const [host, port] = bare.split(':');
+            if (!host || !port) {
+              throw createHostInputError('Host URL is invalid.', 'host_invalid');
+            }
+            return {
+              host,
+              hostForUrl: host,
+              port: normalizeBarePort(port),
+            };
+          }
+          return {
+            host: bare,
+            hostForUrl: bare,
+            port: '',
+          };
+        }
+
+        function coerceHostUrlInput(value) {
+          const raw = String(value || '').trim();
+          if (!raw) throw new Error('Host URL is required.');
+          if (isEmailLikeHostTarget(raw)) {
+            throw createHostInputError(
+              'This looks like an email address. Enter a Host URL, not an email address.',
+              'host_email_like'
+            );
+          }
+          if (HOST_URL_SCHEME_RE.test(raw)) return raw;
+
+          const parsedBare = parseBareHostTarget(raw);
+          if (isDirectHostWithoutScheme(parsedBare.host)) {
+            const port = parsedBare.port || DEFAULT_DIRECT_HOST_PORT;
+            return `http://${parsedBare.hostForUrl}:${port}`;
+          }
+          if (parsedBare.port) {
+            throw createHostInputError(
+              'Add http:// or https:// to this Host URL.',
+              'host_scheme_required_for_domain_port'
+            );
+          }
+          return `https://${parsedBare.hostForUrl}`;
+        }
+
+        function normalizeHostTarget(value) {
+          const parsed = new URL(coerceHostUrlInput(value));
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('Host URL must use http or https.');
+          }
+          if (!parsed.hostname) throw new Error('Host URL is missing a host.');
+          if (parsed.username || parsed.password) {
+            throw createHostInputError(
+              'This looks like an email address. Enter a Host URL, not an email address.',
+              'host_userinfo_not_allowed'
+            );
+          }
+          const path = parsed.pathname || '/';
+          if (path !== '/' && path !== '/app' && path !== '/app/') {
+            throw createHostInputError(
+              'Use only the Host root or /app URL.',
+              'host_path_unsupported'
+            );
+          }
+          parsed.pathname = '';
+          parsed.search = '';
+          parsed.hash = '';
+          return {
+            origin: parsed.origin,
+            healthUrl: new URL('/health', parsed.origin).toString(),
+          };
+        }
+
+        function normalizeHostOrigin(value) {
+          return normalizeHostTarget(value).origin;
+        }
+
+        function getHostHealthUrl(origin) {
+          return normalizeHostTarget(origin).healthUrl;
+        }
+
+        function getHostInputGuidanceTarget() {
+          return normalizeHostTarget(hostInput.value);
+        }
+
+        function updateHostGuidance() {
+          const raw = String(hostInput.value || '').trim();
+          hostValidationMessage.hidden = true;
+          hostValidationMessage.textContent = '';
+          hostHealthRow.hidden = true;
+          hostHealthLink.removeAttribute('href');
+          hostHealthLink.textContent = '';
+
+          if (!raw) {
+            hostHelper.textContent =
+              'Use the Host URL shown by oysterun setup, or paste your Host IP / IP:port. Bare IPs use port 8802.';
+            return;
+          }
+
+          try {
+            const target = getHostInputGuidanceTarget();
+            hostHelper.textContent =
+              'Open the Health URL in a browser to verify this Host is reachable.';
+            hostHealthLink.href = target.healthUrl;
+            hostHealthLink.textContent = target.healthUrl;
+            hostHealthRow.hidden = false;
+          } catch (err) {
+            hostHelper.textContent =
+              'Use the Host URL shown by oysterun setup, or paste your Host IP / IP:port. Bare IPs use port 8802.';
+            hostValidationMessage.textContent = err.message || 'Host URL is invalid.';
+            hostValidationMessage.hidden = false;
+          }
+        }
+
+        async function copyText(value) {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            return;
+          }
+          const textarea = document.createElement('textarea');
+          textarea.value = value;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.left = '-9999px';
+          document.body.append(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }
+
+        function openExternalHealthUrl(url) {
+          const opened = window.open(url, '_blank', 'noopener,noreferrer');
+          if (!opened) {
+            window.location.assign(url);
+          }
+        }
+
+        function buildHostUnreachableMessage(origin) {
+          return `Cannot reach an Oysterun Host at ${origin}. To verify, open ${getHostHealthUrl(
+            origin
+          )} in a browser.`;
+        }
+
+        function buildNonOysterunHostMessage(origin) {
+          return `This address is reachable but does not appear to be an Oysterun Host. To verify, open ${getHostHealthUrl(
+            origin
+          )} in a browser.`;
+        }
+
+        function getDefaultHostDisplayNameForOrigin(origin) {
+          const displayName =
+            typeof config.defaultHostDisplayName === 'string'
+              ? config.defaultHostDisplayName.trim()
+              : '';
+          if (!displayName) return '';
+          try {
+            const defaultOrigin = normalizeHostOrigin(config.defaultHostOrigin);
+            return defaultOrigin === origin ? displayName : '';
+          } catch {
+            return '';
+          }
+        }
+
+        function normalizeSavedTarget(value) {
+          if (!value || typeof value !== 'object') return null;
+          if (typeof value.direct_host_url !== 'string') return null;
+          try {
+            const origin = normalizeHostOrigin(value.direct_host_url);
+            const storedDisplayName =
+              typeof value.display_name === 'string' ? value.display_name.trim() : '';
+            const defaultDisplayName = getDefaultHostDisplayNameForOrigin(origin);
+            const displayName =
+              !storedDisplayName || storedDisplayName === origin
+                ? defaultDisplayName || origin
+                : storedDisplayName;
+            return {
+              direct_host_url: origin,
+              display_name: displayName,
+              last_successful_login_at:
+                typeof value.last_successful_login_at === 'string'
+                  ? value.last_successful_login_at
+                  : '',
+            };
+          } catch {
+            return null;
+          }
+        }
+
+        function loadSavedTargets() {
+          try {
+            const raw = localStorage.getItem(targetKey);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            const values = Array.isArray(parsed) ? parsed : [parsed];
+            const targets = [];
+            const seen = new Set();
+            for (const value of values) {
+              const target = normalizeSavedTarget(value);
+              if (!target || seen.has(target.direct_host_url)) continue;
+              seen.add(target.direct_host_url);
+              targets.push(target);
+            }
+            return targets;
+          } catch {
+            return [];
+          }
+        }
+
+        function loadSavedTarget() {
+          return loadSavedTargets()[0] || null;
+        }
+
+        function writeSavedTargets(targets) {
+          localStorage.setItem(targetKey, JSON.stringify(targets.slice(0, 10)));
+        }
+
+        function saveTarget(origin, displayName) {
+          const normalizedOrigin = normalizeHostOrigin(origin);
+          const defaultDisplayName = getDefaultHostDisplayNameForOrigin(normalizedOrigin);
+          const normalizedName =
+            typeof displayName === 'string' && displayName.trim()
+              ? displayName.trim()
+              : defaultDisplayName || normalizedOrigin;
+          const target = {
+            direct_host_url: normalizedOrigin,
+            display_name: normalizedName,
+            last_successful_login_at: new Date().toISOString(),
+          };
+          const nextTargets = [
+            target,
+            ...loadSavedTargets().filter((entry) => entry.direct_host_url !== normalizedOrigin),
+          ];
+          writeSavedTargets(nextTargets);
+          renderSavedHosts();
+        }
+
+        function renderSavedHosts() {
+          const targets = loadSavedTargets();
+          savedPanel.replaceChildren();
+          if (!targets.length) {
+            savedPanel.classList.remove('open');
+            return;
+          }
+          for (const target of targets) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'saved-option';
+            button.setAttribute('data-host-url', target.direct_host_url);
+            const name = document.createElement('span');
+            name.className = 'saved-name';
+            name.textContent = target.display_name;
+            const url = document.createElement('span');
+            url.className = 'saved-url';
+            url.textContent = target.direct_host_url;
+            button.append(name, url);
+            button.addEventListener('click', () => {
+              hostInput.value = target.direct_host_url;
+              updateHostGuidance();
+              savedPanel.classList.remove('open');
+              setStatus('Saved Host selected. Enter the Host password or use a setup QR.', 'ok');
+            });
+            savedPanel.append(button);
+          }
+        }
+
+        function toggleSavedHosts() {
+          renderSavedHosts();
+          const targets = loadSavedTargets();
+          if (!targets.length) {
+            setStatus('No saved Hosts on this device yet.', 'error');
+            return;
+          }
+          savedPanel.classList.toggle('open');
+          setStatus(
+            savedPanel.classList.contains('open') ? 'Choose a saved Host to fill the Host URL.' : ''
+          );
+        }
+
+        function openSavedHost() {
+          toggleSavedHosts();
+        }
+
+        function getInitialHostOrigin() {
+          const saved = loadSavedTarget();
+          if (saved?.direct_host_url) return saved.direct_host_url;
+          if (typeof config.defaultHostOrigin === 'string') {
+            return config.defaultHostOrigin;
+          }
+          return '';
+        }
+
+        function buildAppUrl(origin, token, route) {
+          const appPath =
+            typeof route === 'string' && route.startsWith('/app')
+              ? route
+              : config.startPath || '/app';
+          const url = new URL(appPath, origin);
+          if (token) {
+            const params = new URLSearchParams(url.hash.replace(/^#/, ''));
+            params.set('oysterun_token', token);
+            params.set('oysterun_bootstrap', '1');
+            url.hash = params.toString();
+          }
+          return url.toString();
+        }
+
+        function isLoggedOutReturn() {
+          try {
+            return new URLSearchParams(window.location.search).get('logged_out') === '1';
+          } catch {
+            return false;
+          }
+        }
+
+        function getDashboardAuthStore() {
+          const plugin = window.Capacitor?.Plugins?.OysterunDashboardAuth;
+          if (
+            plugin &&
+            typeof plugin.load === 'function' &&
+            typeof plugin.save === 'function' &&
+            typeof plugin.clear === 'function'
+          ) {
+            return plugin;
+          }
+          return null;
+        }
+
+        function getDashboardTokenStorageKey(origin) {
+          return `${targetKey}.dashboard_token.${encodeURIComponent(origin)}`;
+        }
+
+        async function saveDashboardToken(origin, token) {
+          const normalizedOrigin = normalizeHostOrigin(origin);
+          const normalizedToken = String(token || '').trim();
+          if (!normalizedToken) throw new Error('Dashboard token is required.');
+          const store = getDashboardAuthStore();
+          if (store) {
+            await store.save({
+              origin: normalizedOrigin,
+              token: normalizedToken,
+            });
+            return true;
+          }
+          localStorage.setItem(getDashboardTokenStorageKey(normalizedOrigin), normalizedToken);
+          return false;
+        }
+
+        async function loadDashboardToken(origin) {
+          const normalizedOrigin = normalizeHostOrigin(origin);
+          const store = getDashboardAuthStore();
+          if (store) {
+            const result = await store.load({ origin: normalizedOrigin });
+            return typeof result?.token === 'string' ? result.token.trim() : '';
+          }
+          return (localStorage.getItem(getDashboardTokenStorageKey(normalizedOrigin)) || '').trim();
+        }
+
+        async function clearDashboardToken(origin) {
+          const normalizedOrigin = normalizeHostOrigin(origin);
+          const store = getDashboardAuthStore();
+          if (store) {
+            await store.clear({ origin: normalizedOrigin });
+          }
+          localStorage.removeItem(getDashboardTokenStorageKey(normalizedOrigin));
+        }
+
+        async function readJson(response) {
+          try {
+            return await response.json();
+          } catch {
+            return {};
+          }
+        }
+
+        async function loginWithPassword(origin, password) {
+          if (!password) throw new Error('Host password is required.');
+          let response;
+          try {
+            response = await fetch(new URL('/auth/login', origin), {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ username: 'admin', password }),
+            });
+          } catch {
+            throw new Error(buildHostUnreachableMessage(origin));
+          }
+          const data = await readJson(response);
+          if (response.status === 401 || response.status === 403) {
+            throw new Error('Host reached, but the password was rejected.');
+          }
+          if (!response.ok || typeof data.token !== 'string') {
+            throw new Error(data.error || buildNonOysterunHostMessage(origin));
+          }
+          return data.token;
+        }
+
+        async function validateDashboardToken(origin, token) {
+          if (!token) {
+            return {
+              valid: false,
+              invalidAuth: false,
+              displayName: '',
+              status: 0,
+            };
+          }
+          try {
+            const response = await fetch(new URL('/dev/preferences', origin), {
+              headers: {
+                Accept: 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+            });
+            if (!response.ok) {
+              return {
+                valid: false,
+                invalidAuth: response.status === 401 || response.status === 403,
+                displayName: '',
+                status: response.status,
+              };
+            }
+            const data = await readJson(response);
+            const name = data?.preferences?.display_name || data?.display_name;
+            return {
+              valid: true,
+              invalidAuth: false,
+              displayName: typeof name === 'string' ? name.trim() : '',
+              status: response.status,
+            };
+          } catch {
+            return {
+              valid: false,
+              invalidAuth: false,
+              displayName: '',
+              status: 0,
+            };
+          }
+        }
+
+        async function fetchHostDisplayName(origin, token) {
+          if (!token) return '';
+          try {
+            const response = await fetch(new URL('/dev/preferences', origin), {
+              headers: {
+                Accept: 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+            });
+            if (!response.ok) return '';
+            const data = await readJson(response);
+            const name = data?.preferences?.display_name || data?.display_name;
+            return typeof name === 'string' ? name.trim() : '';
+          } catch {
+            return '';
+          }
+        }
+
+        async function loginWithBootstrapToken(origin, bootstrapToken) {
+          let response;
+          try {
+            response = await fetch(new URL('/auth/login', origin), {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ bootstrap_token: bootstrapToken }),
+            });
+          } catch {
+            throw new Error(buildHostUnreachableMessage(origin));
+          }
+          const data = await readJson(response);
+          if (response.status === 401 || response.status === 403) {
+            throw new Error('Host reached, but this setup QR was rejected or expired.');
+          }
+          if (!response.ok || typeof data.token !== 'string') {
+            throw new Error(data.error || buildNonOysterunHostMessage(origin));
+          }
+          return data.token;
+        }
+
+        function parseQrPayload(value) {
+          const raw = String(value || '').trim();
+          if (!raw) throw new Error('QR payload is required.');
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            throw new Error('QR payload must be JSON.');
+          }
+          const payload =
+            parsed && typeof parsed === 'object' && parsed.qr_payload ? parsed.qr_payload : parsed;
+          const host = payload.u || payload.direct_host_url || payload.host_url || payload.url;
+          const bootstrapToken = payload.b || payload.bootstrap_token;
+          if (!host || !bootstrapToken) {
+            throw new Error('QR payload is missing Host URL or login token.');
+          }
+          return {
+            origin: normalizeHostOrigin(host),
+            bootstrapToken: String(bootstrapToken),
+          };
+        }
+
+        async function persistDashboardTokenForLogin(origin, token, stage) {
+          try {
+            const usedNativeStore = await saveDashboardToken(origin, token);
+            recordCapacitorBootstrapDiagnostic(origin, `${stage}_dashboard_token_store_saved`, {
+              native_auth_store_available: usedNativeStore,
+              dashboard_token_saved: true,
+            });
+          } catch (err) {
+            recordCapacitorBootstrapDiagnostic(
+              origin,
+              `${stage}_dashboard_token_store_save_failed`,
+              {
+                native_auth_store_available: Boolean(getDashboardAuthStore()),
+                error_message: err.message || String(err),
+              }
+            );
+          }
+        }
+
+        async function openAppWithStoredDashboardToken(origin, route, stage) {
+          const normalizedOrigin = normalizeHostOrigin(origin);
+          const token = await loadDashboardToken(normalizedOrigin);
+          recordCapacitorBootstrapDiagnostic(normalizedOrigin, `${stage}_dashboard_token_loaded`, {
+            dashboard_token_present: Boolean(token),
+            native_auth_store_available: Boolean(getDashboardAuthStore()),
+          });
+          if (!token) {
+            return {
+              opened: false,
+              tokenPresent: false,
+              invalidAuth: false,
+              connectivityUnknown: false,
+              validationStatus: null,
+            };
+          }
+
+          const validation = await validateDashboardToken(normalizedOrigin, token);
+          recordCapacitorBootstrapDiagnostic(
+            normalizedOrigin,
+            `${stage}_dashboard_token_validation_done`,
+            {
+              dashboard_token_valid: validation.valid,
+              dashboard_token_invalid_auth: validation.invalidAuth,
+              validation_status: validation.status || null,
+              display_name_present: Boolean(validation.displayName),
+            }
+          );
+          if (!validation.valid) {
+            if (validation.invalidAuth) {
+              await clearDashboardToken(normalizedOrigin);
+            }
+            return {
+              opened: false,
+              tokenPresent: true,
+              invalidAuth: validation.invalidAuth,
+              connectivityUnknown: !validation.invalidAuth,
+              validationStatus: validation.status || null,
+            };
+          }
+
+          saveTarget(normalizedOrigin, validation.displayName);
+          const appUrl = buildAppUrl(normalizedOrigin, token, route);
+          recordCapacitorBootstrapDiagnostic(
+            normalizedOrigin,
+            `${stage}_before_dashboard_navigation`,
+            describeNavigationTarget(appUrl)
+          );
+          window.location.assign(appUrl);
+          return {
+            opened: true,
+            tokenPresent: true,
+            invalidAuth: false,
+            connectivityUnknown: false,
+            validationStatus: validation.status || null,
+          };
+        }
+
+        function showConnectSurfaceForDashboardOpenDecision(result, opts = {}) {
+          if (!result.tokenPresent) {
+            showConnectSurfaceForSavedRestoreDecision(
+              'no_saved_candidate',
+              opts.noTokenMessage || '',
+              opts.noTokenKind || ''
+            );
+            return true;
+          }
+          if (result.invalidAuth) {
+            showConnectSurfaceForSavedRestoreDecision(
+              'confirmed_invalid_auth',
+              opts.invalidAuthMessage || 'Login again to continue.',
+              opts.invalidAuthKind || 'error'
+            );
+            return true;
+          }
+          return false;
+        }
+
+        function showConnectSurfaceForPushRouteLoginDecision(result) {
+          return showConnectSurfaceForDashboardOpenDecision(
+            result || {
+              tokenPresent: false,
+              invalidAuth: false,
+            },
+            {
+              noTokenMessage: 'Login again to open this notification.',
+              noTokenKind: 'error',
+              invalidAuthMessage: 'Login again to open this notification.',
+              invalidAuthKind: 'error',
+            }
+          );
+        }
+
+        async function restoreSavedDashboardSession() {
+          const savedTarget = loadSavedTarget();
+          let origin = '';
+          try {
+            origin = normalizeHostOrigin(hostInput.value || getInitialHostOrigin());
+          } catch {
+            showConnectSurfaceForSavedRestoreDecision('no_saved_candidate', '', '');
+            return;
+          }
+          const loggedOutReturn = isLoggedOutReturn();
+          showSavedRestoreCheckingState('Checking saved session...');
+          recordCapacitorBootstrapDiagnostic(origin, 'bootstrap_loaded', {
+            logged_out_return: loggedOutReturn,
+            saved_host_present: Boolean(savedTarget?.direct_host_url),
+            native_auth_store_available: Boolean(getDashboardAuthStore()),
+          });
+          if (loggedOutReturn) {
+            showConnectSurfaceForSavedRestoreDecision(
+              'explicit_logout',
+              'Login again to continue.',
+              'ok'
+            );
+            return;
+          }
+          try {
+            const result = await openAppWithStoredDashboardToken(
+              origin,
+              config.startPath || '/app',
+              'dashboard_token_restore'
+            );
+            if (result.opened) return;
+            if (
+              showConnectSurfaceForDashboardOpenDecision(result, {
+                noTokenMessage: savedTarget?.direct_host_url
+                  ? 'Saved Host selected. Enter the Host password or use a setup QR.'
+                  : '',
+                noTokenKind: savedTarget?.direct_host_url ? 'ok' : '',
+                invalidAuthMessage: 'Login again to continue.',
+                invalidAuthKind: 'error',
+              })
+            ) {
+              return;
+            }
+            recordCapacitorBootstrapDiagnostic(origin, 'dashboard_token_restore_connectivity_unknown', {
+              validation_status: result.validationStatus || null,
+            });
+            showSavedRestoreCheckingState('Connection interrupted. Retrying saved session...');
+            scheduleSavedDashboardRestoreRetry();
+          } catch (err) {
+            recordCapacitorBootstrapDiagnostic(origin, 'dashboard_token_restore_error', {
+              error_message: err.message || String(err),
+            });
+            showSavedRestoreCheckingState('Connection interrupted. Retrying saved session...');
+            scheduleSavedDashboardRestoreRetry();
+          }
+        }
+
+        async function connectWithPassword() {
+          setBusy(true);
+          setStatus('Connecting...');
+          let origin = '';
+          try {
+            origin = normalizeHostOrigin(hostInput.value);
+            recordCapacitorBootstrapDiagnostic(origin, 'password_submit');
+            const token = await loginWithPassword(origin, passwordInput.value);
+            recordCapacitorBootstrapDiagnostic(origin, 'password_login_success', {
+              dashboard_token_received: true,
+            });
+            const displayName = await fetchHostDisplayName(origin, token);
+            await persistDashboardTokenForLogin(origin, token, 'password');
+            recordCapacitorBootstrapDiagnostic(origin, 'host_display_name_fetch_done', {
+              display_name_present: Boolean(displayName),
+            });
+            saveTarget(origin, displayName);
+            setStatus('Opening Oysterun...', 'ok');
+            const appUrl = buildAppUrl(origin, token);
+            recordCapacitorBootstrapDiagnostic(
+              origin,
+              'before_dashboard_navigation',
+              describeNavigationTarget(appUrl)
+            );
+            window.location.assign(appUrl);
+            window.setTimeout(() => {
+              recordCapacitorBootstrapDiagnostic(
+                origin,
+                'dashboard_navigation_still_on_bootstrap',
+                describeNavigationTarget(appUrl)
+              );
+            }, 2500);
+          } catch (err) {
+            if (origin) {
+              recordCapacitorBootstrapDiagnostic(origin, 'password_login_error', {
+                error_message: err.message || String(err),
+              });
+            }
+            setStatus(err.message || 'Could not connect to Host.', 'error');
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        async function connectWithQrPayload(value) {
+          setBusy(true);
+          setStatus('Connecting with setup QR...');
+          let origin = '';
+          try {
+            const payload = parseQrPayload(value);
+            origin = payload.origin;
+            hostInput.value = payload.origin;
+            updateHostGuidance();
+            recordCapacitorBootstrapDiagnostic(origin, 'qr_submit');
+            const token = await loginWithBootstrapToken(payload.origin, payload.bootstrapToken);
+            recordCapacitorBootstrapDiagnostic(origin, 'qr_login_success', {
+              dashboard_token_received: true,
+            });
+            const displayName = await fetchHostDisplayName(payload.origin, token);
+            await persistDashboardTokenForLogin(payload.origin, token, 'qr');
+            recordCapacitorBootstrapDiagnostic(origin, 'host_display_name_fetch_done', {
+              display_name_present: Boolean(displayName),
+            });
+            saveTarget(payload.origin, displayName);
+            setStatus('Opening Oysterun...', 'ok');
+            const appUrl = buildAppUrl(payload.origin, token);
+            recordCapacitorBootstrapDiagnostic(
+              origin,
+              'before_dashboard_navigation',
+              describeNavigationTarget(appUrl)
+            );
+            window.location.assign(appUrl);
+            window.setTimeout(() => {
+              recordCapacitorBootstrapDiagnostic(
+                origin,
+                'dashboard_navigation_still_on_bootstrap',
+                describeNavigationTarget(appUrl)
+              );
+            }, 2500);
+          } catch (err) {
+            if (origin) {
+              recordCapacitorBootstrapDiagnostic(origin, 'qr_login_error', {
+                error_message: err.message || String(err),
+              });
+            }
+            setStatus(err.message || 'Could not use setup QR.', 'error');
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        function stopScanner() {
+          if (scanTimer) {
+            cancelAnimationFrame(scanTimer);
+            scanTimer = null;
+          }
+          if (scanStream) {
+            for (const track of scanStream.getTracks()) track.stop();
+            scanStream = null;
+          }
+          video.srcObject = null;
+        }
+
+        function openScannerView() {
+          qrScannerView.classList.add('open');
+          qrScannerView.setAttribute('aria-hidden', 'false');
+        }
+
+        function closeScannerView() {
+          stopScanner();
+          qrScannerView.classList.remove('open');
+          qrScannerView.setAttribute('aria-hidden', 'true');
+          setBusy(false);
+        }
+
+        function getQrDecoderStatus() {
+          return {
+            hasBarcodeDetector: 'BarcodeDetector' in window,
+            hasJsQr: typeof window.jsQR === 'function',
+          };
+        }
+
+        function createBarcodeDetector() {
+          if (!('BarcodeDetector' in window)) return null;
+          try {
+            return new BarcodeDetector({ formats: ['qr_code'] });
+          } catch {
+            return null;
+          }
+        }
+
+        function decodeQrFrameWithJsQr() {
+          if (typeof window.jsQR !== 'function') return '';
+          const width = video.videoWidth || 0;
+          const height = video.videoHeight || 0;
+          if (width <= 0 || height <= 0) return '';
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext('2d', {
+            willReadFrequently: true,
+          });
+          if (!context) return '';
+          context.drawImage(video, 0, 0, width, height);
+          const imageData = context.getImageData(0, 0, width, height);
+          const code = window.jsQR(imageData.data, width, height, {
+            inversionAttempts: 'dontInvert',
+          });
+          return typeof code?.data === 'string' ? code.data : '';
+        }
+
+        async function decodeQrFrame(detector) {
+          if (detector) {
+            try {
+              const codes = await detector.detect(video);
+              const rawValue = codes?.[0]?.rawValue;
+              if (rawValue) return rawValue;
+            } catch {
+              // Fall back to jsQR for WebViews without reliable BarcodeDetector.
+            }
+          }
+          return decodeQrFrameWithJsQr();
+        }
+
+        async function startScanner() {
+          const decoderStatus = getQrDecoderStatus();
+          setStatus('');
+          openScannerView();
+          setBusy(true);
+          if (!navigator.mediaDevices?.getUserMedia) {
+            closeScannerView();
+            setStatus('Camera access is unavailable on this device.', 'error');
+            return;
+          }
+          if (!decoderStatus.hasBarcodeDetector && !decoderStatus.hasJsQr) {
+            closeScannerView();
+            setStatus('QR decoding is unavailable on this device.', 'error');
+            return;
+          }
+          try {
+            const detector = createBarcodeDetector();
+            scanStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'environment' },
+              audio: false,
+            });
+            video.srcObject = scanStream;
+            await video.play();
+            const scan = async () => {
+              try {
+                const rawValue = await decodeQrFrame(detector);
+                if (rawValue) {
+                  closeScannerView();
+                  await connectWithQrPayload(rawValue);
+                  return;
+                }
+              } catch {
+                // Keep scanning until user stops or a payload is found.
+              }
+              scanTimer = requestAnimationFrame(scan);
+            };
+            scanTimer = requestAnimationFrame(scan);
+            setStatus(
+              decoderStatus.hasBarcodeDetector
+                ? 'Point the camera at the Oysterun setup QR.'
+                : 'Point the camera at the Oysterun setup QR. Using software QR decoding.'
+            );
+          } catch (err) {
+            closeScannerView();
+            setStatus(err.message || 'Camera QR scanning failed.', 'error');
+          }
+        }
+
+        function bindPushTapRouting() {
+          const capacitor = window.Capacitor;
+          const push = capacitor?.Plugins?.PushNotifications;
+          if (!push || typeof push.addListener !== 'function') return;
+          push.addListener('pushNotificationActionPerformed', async (event) => {
+            const data = event?.notification?.data || {};
+            const route =
+              typeof data.url === 'string'
+                ? data.url
+                : typeof data.oysterun_route === 'string'
+                ? data.oysterun_route
+                : '';
+            if (!route) return;
+            const saved = loadSavedTarget();
+            if (!saved?.direct_host_url) {
+              showConnectSurfaceForSavedRestoreDecision(
+                'no_saved_candidate',
+                'Host is not paired on this device.',
+                'error'
+              );
+              return;
+            }
+            if (route.startsWith('http://') || route.startsWith('https://')) {
+              try {
+                const parsed = new URL(route);
+                const savedOrigin = normalizeHostOrigin(saved.direct_host_url);
+                if (parsed.origin === savedOrigin && parsed.pathname.startsWith('/app')) {
+                  try {
+                    const result = await openAppWithStoredDashboardToken(
+                      savedOrigin,
+                      `${parsed.pathname}${parsed.search}`,
+                      'push_route'
+                    );
+                    if (result.opened) return;
+                    if (result.tokenPresent && result.connectivityUnknown) {
+                      setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
+                      return;
+                    }
+                    if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
+                  } catch {
+                    // Fall through to the restore-decision prompt below.
+                  }
+                  showConnectSurfaceForPushRouteLoginDecision();
+                  return;
+                }
+              } catch {
+                // Fall through to the platform URL policy below.
+              }
+              window.location.assign(route);
+              return;
+            }
+            if (route.startsWith('/app')) {
+              try {
+                const result = await openAppWithStoredDashboardToken(
+                  saved.direct_host_url,
+                  route,
+                  'push_route'
+                );
+                if (result.opened) return;
+                if (result.tokenPresent && result.connectivityUnknown) {
+                  setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
+                  return;
+                }
+                if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
+              } catch {
+                // Fall through to the restore-decision prompt below.
+              }
+              showConnectSurfaceForPushRouteLoginDecision();
+            }
+          });
+        }
+
+        document.getElementById('connect-form').addEventListener('submit', (event) => {
+          event.preventDefault();
+          connectWithPassword();
+        });
+        document.getElementById('open-saved-button').addEventListener('click', openSavedHost);
+        document.getElementById('scan-qr-button').addEventListener('click', startScanner);
+        document.getElementById('qr-back-button').addEventListener('click', closeScannerView);
+        hostInput.addEventListener('input', updateHostGuidance);
+        hostHealthLink.addEventListener('click', (event) => {
+          event.preventDefault();
+          try {
+            const target = getHostInputGuidanceTarget();
+            openExternalHealthUrl(target.healthUrl);
+          } catch (err) {
+            setStatus(err.message || 'Could not open Health URL.', 'error');
+          }
+        });
+        hostHealthCopy.addEventListener('click', async () => {
+          try {
+            const target = getHostInputGuidanceTarget();
+            await copyText(target.healthUrl);
+            setStatus('Copied Health URL.', 'ok');
+          } catch (err) {
+            setStatus(err.message || 'Could not copy Health URL.', 'error');
+          }
+        });
+
+        hostInput.value = getInitialHostOrigin();
+        updateHostGuidance();
+        renderSavedHosts();
+        bindPushTapRouting();
+        void restoreSavedDashboardSession();
+      })();
+    </script>
+  </body>
+</html>

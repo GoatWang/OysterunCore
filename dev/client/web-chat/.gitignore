@@ -1,0 +1,11 @@
+experiment
+dist
+node_modules
+devAssets
+capacitor.config.json
+ios/oysterun.local.xcconfig
+capacitor-bootstrap/jsQR.js
+capacitor-bootstrap/oysterun-capacitor-bootstrap-config.js
+
+.DS_Store
+.idea

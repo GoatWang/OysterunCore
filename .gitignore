@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+.env
+.env.*
+*.log
+*.db
+*.sqlite
+coverage/
+dev/client/web-chat/capacitor.config.json
+dev/client/web-chat/ios/oysterun.local.xcconfig
