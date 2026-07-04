@@ -1,0 +1,22 @@
+{
+  "scripts": {
+    "setup": "node host-service/setup.mjs --release-setup",
+    "service:install": "tool_scripts/oysterun_release_service.sh install",
+    "service:start": "tool_scripts/oysterun_release_service.sh start",
+    "service:stop": "tool_scripts/oysterun_release_service.sh stop",
+    "service:restart": "tool_scripts/oysterun_release_service.sh restart",
+    "service:status": "tool_scripts/oysterun_release_service.sh status",
+    "service:logs": "tool_scripts/oysterun_release_service.sh logs",
+    "package:npm": "node tool_scripts/package_oysterun_npm.mjs",
+    "publish:beta:prepare": "node tool_scripts/prepare_oysterun_beta_publish.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "yaml": "^2.8.3"
+  }
+}
