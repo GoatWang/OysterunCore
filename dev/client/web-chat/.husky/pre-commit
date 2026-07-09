@@ -1,3 +1,0 @@
-# These are commented until we enable lint and typecheck
-# npx tsc -p tsconfig.json --noEmit
-# npx lint-staged

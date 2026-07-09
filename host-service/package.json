@@ -1,6 +1,6 @@
 {
   "name": "oysterun-host-service",
-  "version": "1.3.0-beta.5",
+  "version": "1.4.5",
   "type": "module",
   "description": "Oysterun host service — runs on Mac mini, manages Claude Code sessions",
   "scripts": {
@@ -12,10 +12,12 @@
     "service:restart": "../tool_scripts/oysterun_release_service.sh restart",
     "service:status": "../tool_scripts/oysterun_release_service.sh status",
     "service:logs": "../tool_scripts/oysterun_release_service.sh logs",
+    "service:uninstall": "../tool_scripts/oysterun_release_service.sh uninstall",
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
     "cli": "node cli.mjs",
-    "test": "node test-jwt-auth.mjs && node test-host-boundary.mjs && node test-apns-push.mjs"
+    "test": "node test-jwt-auth.mjs && node test-host-boundary.mjs && node test-apns-push.mjs && node test-host-telemetry.mjs",
+    "test:telemetry": "node test-host-telemetry.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.44.0",

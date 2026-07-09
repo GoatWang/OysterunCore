@@ -1,0 +1,11 @@
+{
+  "name": "oysterun-github-tracker",
+  "display_name": "Oysterun GitHub Tracker",
+  "interface_type": "coding",
+  "provider": "codex",
+  "model": "",
+  "metadata": {
+    "template": "oysterun-github-tracker",
+    "public_safe": true
+  }
+}

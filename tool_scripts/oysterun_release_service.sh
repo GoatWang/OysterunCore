@@ -20,6 +20,7 @@ Usage:
   tool_scripts/oysterun_release_service.sh restart [--restore-sessions]
   tool_scripts/oysterun_release_service.sh status
   tool_scripts/oysterun_release_service.sh logs [--follow]
+  tool_scripts/oysterun_release_service.sh uninstall [--stack production|staging|all]
 
 Release service commands target the production stack by default. Override only
 for development with OYSTERUN_RELEASE_STACK=<stack>.
@@ -41,9 +42,8 @@ print_login_qr_after_service_ready() {
     fi
     configure_stack_runtime
     local node_bin
-    node_bin="$(resolve_command_path node)"
-    if [[ -z "${node_bin}" ]]; then
-      echo "[oysterun-service] node not found; cannot print login QR" >&2
+    if ! node_bin="$(require_node_runtime "post-start login QR")"; then
+      echo "[oysterun-service] node not available; cannot print login QR" >&2
       exit 1
     fi
     cd "${ROOT_DIR}"
@@ -145,6 +145,9 @@ case "${COMMAND}" in
       exec tail -n 200 -f "${HOST_LOG}"
     fi
     exec tail -n 200 "${HOST_LOG}"
+    ;;
+  uninstall)
+    exec "${SCRIPT_DIR}/uninstall_oysterun_launch_agents.sh" --stack "${STACK_NAME}" "$@"
     ;;
   ""|-h|--help|help)
     usage

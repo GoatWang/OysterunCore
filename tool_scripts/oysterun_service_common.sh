@@ -18,6 +18,7 @@ BACKEND_PID_FILE=""
 HOST_PID_FILE=""
 BACKEND_LOG=""
 HOST_LOG=""
+SERVICE_CONTROL_AUDIT_FILE=""
 BACKEND_LABEL=""
 HOST_LABEL=""
 HOST_ORIGIN_FILE=""
@@ -75,6 +76,94 @@ is_macos() {
 
 is_linux() {
   [[ "$(uname -s)" == "Linux" ]]
+}
+
+json_escape_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "${value}"
+}
+
+append_service_control_audit() {
+  local action="$1"
+  local outcome="${2:-attempt}"
+  local detail="${3:-}"
+  local audit_file="${SERVICE_CONTROL_AUDIT_FILE:-}"
+  local audit_dir=""
+  local recorded_at=""
+  local cwd=""
+  local command_line=""
+  local parent_command=""
+  local launch_pid=""
+
+  if [[ -z "${audit_file}" ]]; then
+    return 0
+  fi
+
+  audit_dir="$(dirname "${audit_file}")"
+  mkdir -p "${audit_dir}" 2>/dev/null || return 0
+
+  recorded_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
+  cwd="$(pwd -P 2>/dev/null || pwd 2>/dev/null || true)"
+  command_line="$(ps -p "$$" -o command= 2>/dev/null | sed 's/^[[:space:]]*//' || true)"
+  parent_command="$(ps -p "${PPID:-}" -o command= 2>/dev/null | sed 's/^[[:space:]]*//' || true)"
+  if is_macos && [[ -n "${HOST_LABEL:-}" ]]; then
+    launch_pid="$(launchctl_pid_for_label "${HOST_LABEL}" 2>/dev/null || true)"
+  fi
+
+  printf '{"recorded_at":"%s","action":"%s","outcome":"%s","detail":"%s","stack_name":"%s","host_label":"%s","host_port":"%s","host_url":"%s","config_dir":"%s","run_dir":"%s","log_dir":"%s","host_log":"%s","home":"%s","cwd":"%s","script":"%s","pid":"%s","ppid":"%s","parent_command":"%s","command_line":"%s","launch_pid":"%s"}\n' \
+    "$(json_escape_string "${recorded_at}")" \
+    "$(json_escape_string "${action}")" \
+    "$(json_escape_string "${outcome}")" \
+    "$(json_escape_string "${detail}")" \
+    "$(json_escape_string "${STACK_NAME:-}")" \
+    "$(json_escape_string "${HOST_LABEL:-}")" \
+    "$(json_escape_string "${HOST_PORT:-}")" \
+    "$(json_escape_string "${HOST_URL:-}")" \
+    "$(json_escape_string "${CONFIG_DIR:-}")" \
+    "$(json_escape_string "${RUN_DIR:-}")" \
+    "$(json_escape_string "${LOG_DIR:-}")" \
+    "$(json_escape_string "${HOST_LOG:-}")" \
+    "$(json_escape_string "${HOME:-}")" \
+    "$(json_escape_string "${cwd}")" \
+    "$(json_escape_string "${0:-}")" \
+    "$(json_escape_string "$$")" \
+    "$(json_escape_string "${PPID:-}")" \
+    "$(json_escape_string "${parent_command}")" \
+    "$(json_escape_string "${command_line}")" \
+    "$(json_escape_string "${launch_pid}")" \
+    >> "${audit_file}" 2>/dev/null || true
+}
+
+prepare_host_log_for_service_start() {
+  local log_file="$1"
+  local label="${2:-Host service}"
+  local rotated_log=""
+  local timestamp=""
+
+  mkdir -p "$(dirname "${log_file}")"
+  if [[ -s "${log_file}" ]]; then
+    timestamp="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || date +%s)"
+    rotated_log="${log_file}.${timestamp}"
+    local suffix=0
+    while [[ -e "${rotated_log}" ]]; do
+      suffix=$((suffix + 1))
+      rotated_log="${log_file}.${timestamp}.${suffix}"
+    done
+    mv "${log_file}" "${rotated_log}"
+    append_service_control_audit "host_log_rotate" "done" "label=${label};rotated_log=${rotated_log}"
+    {
+      echo "[oysterun-service] Previous ${label} log preserved at ${rotated_log}"
+      echo "[oysterun-service] New ${label} log started at $(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"
+    } > "${log_file}"
+  else
+    : > "${log_file}"
+    append_service_control_audit "host_log_prepare" "done" "label=${label};created_or_empty=${log_file}"
+  fi
 }
 
 parse_common_args() {
@@ -277,9 +366,13 @@ cleanup_legacy_routec_spike0_synapse_processes_if_present() {
       continue
     fi
     echo "[oysterun-service] Cleaning up legacy Route C spike0 Synapse PID ${pid}"
+    append_service_control_audit "process_signal" "attempt" "signal=TERM;reason=legacy_routec_spike0_synapse_cleanup;pid=${pid}"
     kill "${pid}" 2>/dev/null || true
+    append_service_control_audit "process_signal" "done" "signal=TERM;reason=legacy_routec_spike0_synapse_cleanup;pid=${pid}"
     if ! wait_for_exit "${pid}"; then
+      append_service_control_audit "process_signal" "attempt" "signal=KILL;reason=legacy_routec_spike0_synapse_cleanup;pid=${pid}"
       kill -9 "${pid}" 2>/dev/null || true
+      append_service_control_audit "process_signal" "done" "signal=KILL;reason=legacy_routec_spike0_synapse_cleanup;pid=${pid}"
       wait_for_exit "${pid}" || true
     fi
     if pid_is_running "${pid}"; then
@@ -495,6 +588,7 @@ configure_stack_runtime() {
   fi
 
   STACK_READINESS_FILE="${RUN_DIR}/stack_readiness.json"
+  SERVICE_CONTROL_AUDIT_FILE="${LOG_DIR}/service-control.jsonl"
   ROUTEC_RUNTIME_ENV_FILE="${CONFIG_DIR}/routec-runtime-env.sh"
   ROUTEC_RUNTIME_ENV_JSON_FILE="${CONFIG_DIR}/routec-runtime-env.json"
   ROUTEC_LEGACY_RUNTIME_ENV_QUARANTINE_DIR="${CONFIG_DIR}/legacy-routec-runtime-env-quarantine"
@@ -572,6 +666,57 @@ resolve_command_path() {
   printf '%s' "${resolved}"
 }
 
+resolve_node_command_path() {
+  local override="${OYSTERUN_NODE_BIN:-}"
+  if [[ -n "${override}" ]]; then
+    if [[ -x "${override}" && ! -d "${override}" ]]; then
+      printf '%s' "${override}"
+      return 0
+    fi
+    echo "[oysterun-service] error: OYSTERUN_NODE_BIN is set but is not an executable file: ${override}" >&2
+    echo "[oysterun-service] error: reinstall/update the service or set OYSTERUN_NODE_BIN to a Node.js >=20 executable." >&2
+    return 1
+  fi
+
+  resolve_command_path node
+}
+
+require_node_runtime() {
+  local context="${1:-Oysterun service}"
+  local node_bin=""
+  local version_output=""
+  local node_version=""
+  local node_major=""
+
+  if ! node_bin="$(resolve_node_command_path)"; then
+    return 1
+  fi
+  if [[ -z "${node_bin}" ]]; then
+    echo "[oysterun-service] error: Node.js >=20 is required for ${context}; node was not found." >&2
+    echo "[oysterun-service] error: install Node.js >=20 or set OYSTERUN_NODE_BIN to an executable Node.js path." >&2
+    return 1
+  fi
+  if ! version_output="$("${node_bin}" --version 2>&1)"; then
+    echo "[oysterun-service] error: Node.js >=20 is required for ${context}; failed to run ${node_bin} --version." >&2
+    echo "[oysterun-service] error: ${version_output}" >&2
+    return 1
+  fi
+
+  node_version="${version_output%%$'\n'*}"
+  node_major="${node_version#v}"
+  node_major="${node_major%%.*}"
+  if ! [[ "${node_major}" =~ ^[0-9]+$ ]]; then
+    echo "[oysterun-service] error: Node.js >=20 is required for ${context}; could not parse version from ${node_bin}: ${node_version}" >&2
+    return 1
+  fi
+  if (( node_major < 20 )); then
+    echo "[oysterun-service] error: Node.js >=20 is required for ${context}; resolved ${node_bin} reports ${node_version}." >&2
+    return 1
+  fi
+
+  printf '%s' "${node_bin}"
+}
+
 append_unique_launch_dir() {
   local candidate="$1"
   if [[ -z "${candidate}" ]]; then
@@ -594,7 +739,11 @@ build_launch_path() {
   local command_name=""
   local resolved_command=""
   for command_name in claude codex node; do
-    resolved_command="$(resolve_command_path "${command_name}")"
+    if [[ "${command_name}" == "node" ]]; then
+      resolved_command="$(resolve_node_command_path 2>/dev/null || true)"
+    else
+      resolved_command="$(resolve_command_path "${command_name}")"
+    fi
     if [[ -n "${resolved_command}" ]]; then
       append_unique_launch_dir "$(dirname "${resolved_command}")"
     fi
@@ -756,7 +905,13 @@ bootstrap_launch_agent_plist() {
     echo "[oysterun-service] error: launchd bootstrap is only available on macOS" >&2
     return 1
   fi
-  launchctl bootstrap "$(launchd_gui_domain)" "${plist_path}"
+  append_service_control_audit "launchctl_bootstrap" "attempt" "plist_path=${plist_path}"
+  if launchctl bootstrap "$(launchd_gui_domain)" "${plist_path}"; then
+    append_service_control_audit "launchctl_bootstrap" "done" "plist_path=${plist_path}"
+    return 0
+  fi
+  append_service_control_audit "launchctl_bootstrap" "failed" "plist_path=${plist_path}"
+  return 1
 }
 
 bootout_launch_agent_service() {
@@ -767,9 +922,17 @@ bootout_launch_agent_service() {
   fi
   plist_path="$(launch_agent_plist_path_for_label "${label}")"
 
-  launchctl bootout "$(launchd_gui_domain)/${label}" >/dev/null 2>&1 \
-    || launchctl bootout "$(launchd_gui_domain)" "${plist_path}" >/dev/null 2>&1 \
-    || true
+  append_service_control_audit "launchctl_bootout" "attempt" "label=${label};plist_path=${plist_path}"
+  if launchctl bootout "$(launchd_gui_domain)/${label}" >/dev/null 2>&1; then
+    append_service_control_audit "launchctl_bootout" "done" "label=${label};method=label"
+    return 0
+  fi
+  if launchctl bootout "$(launchd_gui_domain)" "${plist_path}" >/dev/null 2>&1; then
+    append_service_control_audit "launchctl_bootout" "done" "label=${label};method=plist;plist_path=${plist_path}"
+    return 0
+  fi
+  append_service_control_audit "launchctl_bootout" "ignored_failure" "label=${label};plist_path=${plist_path}"
+  return 0
 }
 
 kickstart_launch_agent_service() {
@@ -778,7 +941,13 @@ kickstart_launch_agent_service() {
     echo "[oysterun-service] error: launchd kickstart is only available on macOS" >&2
     return 1
   fi
-  launchctl kickstart -k "$(launchd_gui_domain)/${label}"
+  append_service_control_audit "launchctl_kickstart" "attempt" "label=${label}"
+  if launchctl kickstart -k "$(launchd_gui_domain)/${label}"; then
+    append_service_control_audit "launchctl_kickstart" "done" "label=${label}"
+    return 0
+  fi
+  append_service_control_audit "launchctl_kickstart" "failed" "label=${label}"
+  return 1
 }
 
 ensure_runtime_dirs() {
@@ -798,10 +967,8 @@ sync_host_stack_port_config() {
   local node_bin
 
   require_host_port_configured
-  node_bin="$(resolve_command_path node)"
-  if [[ -z "${node_bin}" ]]; then
-    echo "[oysterun-service] error: node is required but was not found in PATH" >&2
-    exit 1
+  if ! node_bin="$(require_node_runtime "stack config sync")"; then
+    return 1
   fi
   (
     cd "${ROOT_DIR}"
@@ -918,12 +1085,21 @@ ensure_process_not_running() {
   clear_stale_pid_file "${pid_file}" "${label}"
 
   if launchctl_label_exists "${launch_label}"; then
+    if is_macos && ! launch_agent_is_installed_for_label "${launch_label}"; then
+      append_service_control_audit "launchctl_remove" "blocked" "reason=loaded_label_without_visible_plist;label=${launch_label};expected_plist=$(launch_agent_plist_path_for_label "${launch_label}")"
+      echo "[oysterun-service] error: ${label} launchctl label exists but the LaunchAgent plist is not visible from HOME=${HOME}" >&2
+      echo "[oysterun-service] error: refusing to remove ${launch_label} and restart it as a transient job." >&2
+      echo "[oysterun-service] error: run from the correct user HOME or use 'oysterun service:restart' after verifying the LaunchAgent plist path." >&2
+      exit 1
+    fi
     pid="$(launchctl_pid_for_label "${launch_label}")"
     if [[ -n "${pid}" ]] && pid_is_running "${pid}"; then
       echo "[oysterun-service] error: ${label} is already running with PID ${pid}" >&2
       exit 1
     fi
+    append_service_control_audit "launchctl_remove" "attempt" "reason=ensure_process_not_running;label=${launch_label};pid=${pid}"
     launchctl remove "${launch_label}" >/dev/null 2>&1 || true
+    append_service_control_audit "launchctl_remove" "done" "reason=ensure_process_not_running;label=${launch_label};pid=${pid}"
     rm -f "${pid_file}"
     echo "[oysterun-service] Removed stale launchctl job for ${label}"
   fi
@@ -1008,7 +1184,13 @@ submit_launchctl_job() {
     return 1
   fi
 
-  launchctl submit -l "${launch_label}" -o "${log_file}" -e "${log_file}" -- /bin/zsh -lc "${command_string}"
+  append_service_control_audit "launchctl_submit" "attempt" "label=${launch_label};log_file=${log_file};command_redacted=true"
+  if launchctl submit -l "${launch_label}" -o "${log_file}" -e "${log_file}" -- /bin/zsh -lc "${command_string}"; then
+    append_service_control_audit "launchctl_submit" "done" "label=${launch_label};log_file=${log_file};command_redacted=true"
+    return 0
+  fi
+  append_service_control_audit "launchctl_submit" "failed" "label=${launch_label};log_file=${log_file};command_redacted=true"
+  return 1
 }
 
 wait_for_exit() {
@@ -1133,12 +1315,16 @@ stop_stale_stack_host_state_holders() {
 
   echo "[oysterun-service] Stopping stale stack ${STACK_NAME} Host process(es) holding state files (${reason}): ${candidates[*]}"
   for pid in "${candidates[@]}"; do
+    append_service_control_audit "process_signal" "attempt" "signal=TERM;reason=stale_stack_host_state_holder:${reason};pid=${pid}"
     kill "${pid}" 2>/dev/null || true
+    append_service_control_audit "process_signal" "done" "signal=TERM;reason=stale_stack_host_state_holder:${reason};pid=${pid}"
   done
   for pid in "${candidates[@]}"; do
     if pid_is_running "${pid}" && ! wait_for_exit "${pid}"; then
       echo "[oysterun-service] Stale Host process ${pid} did not stop in time; sending SIGKILL"
+      append_service_control_audit "process_signal" "attempt" "signal=KILL;reason=stale_stack_host_state_holder:${reason};pid=${pid}"
       kill -9 "${pid}" 2>/dev/null || true
+      append_service_control_audit "process_signal" "done" "signal=KILL;reason=stale_stack_host_state_holder:${reason};pid=${pid}"
       wait_for_exit "${pid}" || true
     fi
   done
@@ -1242,9 +1428,7 @@ run_routec_stack_readiness() {
     return 1
   fi
 
-  node_bin="$(resolve_command_path node)"
-  if [[ -z "${node_bin}" ]]; then
-    echo "[oysterun-service] error: node is required for stack readiness but was not found in PATH" >&2
+  if ! node_bin="$(require_node_runtime "stack readiness")"; then
     return 1
   fi
 
@@ -1315,7 +1499,9 @@ stop_managed_process() {
   if [[ -z "${pid}" ]]; then
     if launchctl_label_exists "${launch_label}"; then
       echo "[oysterun-service] Removing stale ${label} launchctl job"
+      append_service_control_audit "launchctl_remove" "attempt" "reason=stop_managed_process_no_pid;label=${launch_label}"
       launchctl remove "${launch_label}" >/dev/null 2>&1 || true
+      append_service_control_audit "launchctl_remove" "done" "reason=stop_managed_process_no_pid;label=${launch_label}"
     fi
     rm -f "${pid_file}"
     echo "[oysterun-service] ${label} is not running"
@@ -1324,7 +1510,9 @@ stop_managed_process() {
 
   if ! pid_is_running "${pid}"; then
     if launchctl_label_exists "${launch_label}"; then
+      append_service_control_audit "launchctl_remove" "attempt" "reason=stop_managed_process_stale_pid;label=${launch_label};pid=${pid}"
       launchctl remove "${launch_label}" >/dev/null 2>&1 || true
+      append_service_control_audit "launchctl_remove" "done" "reason=stop_managed_process_stale_pid;label=${launch_label};pid=${pid}"
     fi
     rm -f "${pid_file}"
     echo "[oysterun-service] Removed stale ${label} PID file (${pid})"
@@ -1334,14 +1522,20 @@ stop_managed_process() {
   echo "[oysterun-service] Stopping ${label} (PID ${pid})..."
 
   if launchctl_label_exists "${launch_label}"; then
+    append_service_control_audit "launchctl_remove" "attempt" "reason=stop_managed_process_running;label=${launch_label};pid=${pid}"
     launchctl remove "${launch_label}" >/dev/null 2>&1 || true
+    append_service_control_audit "launchctl_remove" "done" "reason=stop_managed_process_running;label=${launch_label};pid=${pid}"
   else
+    append_service_control_audit "process_signal" "attempt" "signal=TERM;label=${launch_label};pid=${pid}"
     kill "${pid}" 2>/dev/null || true
+    append_service_control_audit "process_signal" "done" "signal=TERM;label=${launch_label};pid=${pid}"
   fi
 
   if ! wait_for_exit "${pid}"; then
     echo "[oysterun-service] ${label} did not stop in time; sending SIGKILL"
+    append_service_control_audit "process_signal" "attempt" "signal=KILL;label=${launch_label};pid=${pid}"
     kill -9 "${pid}" 2>/dev/null || true
+    append_service_control_audit "process_signal" "done" "signal=KILL;label=${launch_label};pid=${pid}"
     wait_for_exit "${pid}" || true
   fi
 

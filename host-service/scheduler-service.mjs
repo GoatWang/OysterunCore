@@ -22,6 +22,10 @@ import {
   SESSION_LOOP_RUNTIME_OWNER,
   SessionLoopDefinitionService,
 } from "./session-loop-definitions.mjs";
+import {
+  recordHostTelemetryCounter,
+  recordHostTelemetryFeature,
+} from "./host-telemetry.mjs";
 
 const SCHEDULER_LOOP_ACTIVE_REASON =
   "P12.2 in-session loop CLI dispatch is enabled";
@@ -46,6 +50,16 @@ const INTERVAL_UNITS_MS = Object.freeze({
   h: 60 * 60 * 1000,
   d: 24 * 60 * 60 * 1000,
 });
+
+function recordSchedulerRunTelemetry(status) {
+  recordHostTelemetryCounter("scheduler_run_count");
+  if (status === "dispatched") {
+    recordHostTelemetryCounter("scheduler_run_success_count");
+  } else if (status === "failed") {
+    recordHostTelemetryCounter("scheduler_run_failed_count");
+  }
+  recordHostTelemetryFeature("scheduler");
+}
 
 function normalizeRequiredString(value, fieldName) {
   if (typeof value !== "string" || !value.trim()) {
@@ -1196,16 +1210,28 @@ export class SchedulerService {
         dispatcher,
       });
       result.runs.push(run);
-      if (run.status === "dispatched") result.dispatched_count += 1;
+      if (run.status === "dispatched") {
+        result.dispatched_count += 1;
+        recordSchedulerRunTelemetry(run.status);
+      }
       if (run.status === "skipped") result.skipped_count += 1;
-      if (run.status === "failed") result.failed_count += 1;
+      if (run.status === "failed") {
+        result.failed_count += 1;
+        recordSchedulerRunTelemetry(run.status);
+      }
     }
     for (const schedule of dueHostSchedules) {
       const run = await this.drainSingleDueSchedule(schedule, { now, dispatcher });
       result.runs.push(run);
-      if (run.status === "dispatched") result.dispatched_count += 1;
+      if (run.status === "dispatched") {
+        result.dispatched_count += 1;
+        recordSchedulerRunTelemetry(run.status);
+      }
       if (run.status === "skipped") result.skipped_count += 1;
-      if (run.status === "failed") result.failed_count += 1;
+      if (run.status === "failed") {
+        result.failed_count += 1;
+        recordSchedulerRunTelemetry(run.status);
+      }
     }
     return result;
   }

@@ -52,11 +52,7 @@ fi
 
 INSTALL_HOST_PORT_OVERRIDE="${HOST_PORT_OVERRIDE}"
 
-NODE_BIN="$(resolve_command_path node)"
-if [[ -z "${NODE_BIN}" ]]; then
-  echo "[oysterun-service] node is required but was not found in PATH" >&2
-  exit 1
-fi
+NODE_BIN="$(require_node_runtime "LaunchAgent install")"
 
 ensure_dashboard_static_app "${NODE_BIN}"
 
@@ -68,6 +64,7 @@ install_stack_agent() {
   configure_stack_runtime
   require_host_port_configured
   ensure_runtime_dirs
+  append_service_control_audit "service_install" "attempt" "script=tool_scripts/install_oysterun_launch_agents.sh;no_start=${NO_START}"
   sync_host_stack_port_config
 
   if ! is_macos; then
@@ -76,6 +73,7 @@ install_stack_agent() {
     echo "[oysterun-service] Host health:           ${HOST_URL}/health"
     if [[ "${NO_START}" -eq 1 ]]; then
       echo "[oysterun-service] Prepared Linux stack config without starting the Host."
+      append_service_control_audit "service_install" "done" "script=tool_scripts/install_oysterun_launch_agents.sh;no_start=1;platform=linux"
       echo
       return
     fi
@@ -85,6 +83,7 @@ install_stack_agent() {
       start_args+=(--port "${HOST_PORT}")
     fi
     "${ROOT_DIR}/tool_scripts/start_oysterun.sh" "${start_args[@]}"
+    append_service_control_audit "service_install" "done" "script=tool_scripts/install_oysterun_launch_agents.sh;platform=linux"
     echo
     return
   fi
@@ -108,6 +107,11 @@ install_stack_agent() {
   </array>
   <key>WorkingDirectory</key>
   <string>${ROOT_DIR}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OYSTERUN_NODE_BIN</key>
+    <string>${NODE_BIN}</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -127,6 +131,7 @@ EOF
     echo "[oysterun-service] LaunchAgent plist installed without starting: ${plist_path}"
     echo "[oysterun-service] Stack:                 ${STACK_NAME}"
     echo "[oysterun-service] Host health:           ${HOST_URL}/health"
+    append_service_control_audit "service_install" "done" "script=tool_scripts/install_oysterun_launch_agents.sh;no_start=1;plist_path=${plist_path}"
     echo
     return
   fi
@@ -138,6 +143,7 @@ EOF
   stop_stale_stack_host_state_holders "during LaunchAgent install"
   clear_host_origin_file
   ensure_port_available "${HOST_PORT}"
+  prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
 
   echo "[oysterun-service] Installing LaunchAgent for ${STACK_NAME} on ${HOST_URL}..."
   bootstrap_launch_agent_plist "${plist_path}"
@@ -153,6 +159,7 @@ EOF
   echo "[oysterun-service] Stack:                 ${STACK_NAME}"
   echo "[oysterun-service] Host health:           ${HOST_URL}/health"
   echo "[oysterun-service] Host PID:              ${host_pid}"
+  append_service_control_audit "service_install" "done" "script=tool_scripts/install_oysterun_launch_agents.sh;plist_path=${plist_path};host_pid=${host_pid}"
   echo
 }
 

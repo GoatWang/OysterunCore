@@ -1,0 +1,1186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Oysterun - Control your AI agents from iPhone</title>
+    <meta
+      name="description"
+      content="Use your iPhone to control Claude Code and Codex running on your own Mac or Linux computer."
+    />
+    <link rel="icon" href="assets/oysterun_logo_v5.PNG" type="image/png" />
+    <link rel="stylesheet" href="assets/site.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="./" data-landing-nav="brand">
+          <img src="assets/oysterun_logo_v5.PNG" width="40" height="40" alt="" />
+          <span>Oysterun</span>
+        </a>
+        <nav class="nav" aria-label="Primary navigation">
+          <a href="#how" data-i18n="nav.how" data-landing-nav="how">How it works</a>
+          <a href="#architecture" data-i18n="nav.architecture" data-landing-nav="architecture">Architecture</a>
+          <a href="#install" data-i18n="nav.install" data-landing-nav="install">Install</a>
+          <a href="#features" data-i18n="nav.features" data-landing-nav="features">Features</a>
+          <a href="#faq" data-i18n="nav.faq" data-landing-nav="faq">FAQ</a>
+          <a href="https://github.com/GoatWang/OysterunCore" target="_blank" rel="noopener" data-landing-nav="github" data-landing-github="header" data-landing-external-type="github">GitHub</a>
+          <a href="privacy/index.html" data-i18n="nav.privacy" data-landing-nav="privacy">Privacy</a>
+        </nav>
+        <div class="language-toggle" aria-label="Language">
+          <button type="button" data-language-option="en" aria-pressed="true">EN</button>
+          <button type="button" data-language-option="zh-Hant" aria-pressed="false">繁中</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero" id="hero" data-landing-section="hero" data-section-title="Hero">
+          <div class="hero-copy">
+            <p class="eyebrow" data-i18n="hero.eyebrow">For Claude Code and Codex</p>
+            <h1 data-i18n="hero.title">Control your computer's AI agents from your iPhone.</h1>
+            <p class="lead" data-i18n="hero.lead">
+              Oysterun connects your phone to Claude Code and Codex running on your own Mac
+              or Linux machine. Start sessions, stop runaway work, approve tool
+              calls, browse files, open HTML reports, and get notified when the
+              agent needs you.
+            </p>
+            <div class="actions">
+              <a class="button primary" href="https://apps.apple.com/tw/app/oysterun/id6762069229" data-i18n="cta.download" data-landing-cta="download_ios_hero" data-landing-cta-position="hero" data-landing-install-intent="ios_app" data-landing-source-section="hero" data-landing-external-type="app_store">Download iOS app</a>
+              <a class="button secondary" href="#install" data-i18n="cta.installHost" data-landing-cta="install_host_hero" data-landing-cta-position="hero" data-landing-install-intent="host_install" data-landing-source-section="hero">Install on Computer</a>
+            </div>
+          </div>
+
+          <div class="hero-product" aria-label="Oysterun product screens">
+            <figure class="hero-phone">
+              <img src="assets/screenshots/chat.png" width="1242" height="2688" alt="Oysterun chat session with AI agent controls" />
+              <figcaption data-i18n="hero.screen.chat">Continue a running agent session</figcaption>
+            </figure>
+            <figure class="hero-phone">
+              <img src="assets/screenshots/explorer.png" width="1242" height="2688" alt="Oysterun file explorer" />
+              <figcaption data-i18n="hero.screen.files">Browse files</figcaption>
+            </figure>
+            <figure class="hero-phone">
+              <img src="assets/screenshots/web.png" width="1242" height="2688" alt="Oysterun web report preview" />
+              <figcaption data-i18n="hero.screen.reports">Open reports</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="band compact" id="features" data-landing-section="features" data-section-title="Features">
+          <div class="section-head">
+            <p class="eyebrow" data-i18n="features.eyebrow">Features</p>
+            <h2 data-i18n="features.title">Why not SSH / Telegram / Claude Mobile?</h2>
+          </div>
+          <div class="control-grid">
+            <article class="control-card">
+              <strong data-i18n="features.opensource.kicker">Open Source</strong>
+              <h3 data-i18n="features.opensource.title">Fully open source</h3>
+              <p class="slogan" data-i18n="features.opensource.slogan">Fully control a tool by yourself.</p>
+              <p data-i18n="features.opensource.body">Inspect, fork, and adapt the Host and mobile control layer for your own workflow.</p>
+            </article>
+            <article class="control-card">
+              <strong data-i18n="features.chat.kicker">Chat</strong>
+              <h3 data-i18n="features.chat.title">Keep the session moving</h3>
+              <p class="slogan" data-i18n="features.chat.slogan">Keep an agent working for more than a month.</p>
+              <p data-i18n="features.chat.body">Resume, stop, pin, search, and loop Claude Code or Codex sessions from your iPhone.</p>
+            </article>
+            <article class="control-card">
+              <strong data-i18n="features.scheduler.kicker">Scheduler</strong>
+              <h3 data-i18n="features.scheduler.title">Run recurring work</h3>
+              <p class="slogan" data-i18n="features.scheduler.slogan">Better than loop: outside the session, without constraint.</p>
+              <p data-i18n="features.scheduler.body">Schedule jobs like: every morning, send me a Tesla stock report.</p>
+            </article>
+            <article class="control-card">
+              <strong data-i18n="features.reports.kicker">Report</strong>
+              <h3 data-i18n="features.reports.title">File Preview / Website</h3>
+              <p class="slogan" data-i18n="features.reports.slogan">HTML will make your life easier.</p>
+              <p data-i18n="features.reports.body">Open generated HTML and Markdown reports, or publish richer outputs as agent-built websites.</p>
+            </article>
+            <article class="control-card">
+              <strong data-i18n="features.explorer.kicker">Explorer</strong>
+              <h3 data-i18n="features.explorer.title">Browse local files</h3>
+              <p class="slogan" data-i18n="features.explorer.slogan">Find and refer to files to give context.</p>
+              <p data-i18n="features.explorer.body">Explore folders, inspect project files, and find outputs created by Claude Code or Codex.</p>
+            </article>
+            <article class="control-card">
+              <strong data-i18n="features.notification.kicker">Notification</strong>
+              <h3 data-i18n="features.notification.title">Know when to return</h3>
+              <p class="slogan" data-i18n="features.notification.slogan">Stop babysitting the terminal.</p>
+              <p data-i18n="features.notification.body">Get notified on your iPhone when work finishes, blocks, errors, or needs your approval.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="band how-band" id="how" data-landing-section="how" data-section-title="How it works">
+          <div class="section-head wide">
+            <p class="eyebrow" data-i18n="how.eyebrow">How it works</p>
+            <h2 data-i18n="how.title">Four steps from Claude Code or Codex to phone control.</h2>
+            <p data-i18n="how.body">
+              Claude Code and Codex still run on your computer. Oysterun gives your phone
+              a secure control panel for that machine, so you can step away from
+              the desk without losing the session.
+            </p>
+          </div>
+          <div class="steps-grid setup-flow">
+            <article>
+              <span>1</span>
+              <h3 data-i18n="how.step1.title">Install the Host</h3>
+              <div class="step-visual terminal-mini" aria-hidden="true">
+                <code>npm install -g oysterun@latest</code>
+                <code>oysterun setup</code>
+              </div>
+              <p data-i18n="how.step1.body">Run Oysterun on the same Mac or Linux user that already uses Claude Code or Codex.</p>
+            </article>
+            <article>
+              <span>2</span>
+              <h3 data-i18n="how.step2.title">Download app on phone</h3>
+              <div class="step-visual app-install-mini" aria-hidden="true">
+                <img src="assets/oysterun_logo_v5.PNG" width="72" height="72" alt="" />
+                <strong>Oysterun</strong>
+              </div>
+              <p data-i18n="how.step2.body">Install the iOS app before pairing so your phone can scan the Host login QR.</p>
+              <a class="step-link" href="https://apps.apple.com/tw/app/oysterun/id6762069229" data-i18n="cta.download" data-landing-cta="download_ios_how" data-landing-cta-position="how_step_2" data-landing-install-intent="ios_app" data-landing-source-section="how" data-landing-external-type="app_store">Download iOS app</a>
+            </article>
+            <article>
+              <span>3</span>
+              <h3 data-i18n="how.step3.title">Pair your iPhone</h3>
+              <div class="step-visual qr-scan-mini" aria-hidden="true">
+                <img src="assets/qr-code.png" width="512" height="512" alt="" />
+              </div>
+              <p data-i18n="how.step3.body">Run setup, scan the temporary Host QR, and your phone learns how to reach your computer.</p>
+            </article>
+            <article>
+              <span>4</span>
+              <h3 data-i18n="how.step4.title">Control the agent</h3>
+              <div class="step-visual phone-control-mini" aria-hidden="true">
+                <img src="assets/app-development.png" width="512" height="512" alt="" />
+              </div>
+              <p data-i18n="how.step4.body">Control the agent from phone or computer: Resume sessions, inspect reports/htmls, and receive notifications while the agent keeps working.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="band architecture-band" id="architecture" data-landing-section="architecture" data-section-title="Architecture">
+          <div class="section-head wide">
+            <p class="eyebrow" data-i18n="architecture.eyebrow">Architecture</p>
+            <h2 data-i18n="architecture.title">Your data path is direct to your Host.</h2>
+            <p data-i18n="architecture.body">
+              Oysterun does not route chat, files, websites, or agent messages through
+              Oysterun Cloud. Your phone or browser talks directly to your Host. Cloud is
+              used for notification delivery and the small registration metadata needed
+              for push notifications.
+            </p>
+          </div>
+          <div class="arch-graph" id="archGraph" role="img" aria-label="Oysterun architecture diagram: the Client connects directly to the Host, the Host sends bounded notification metadata to the Cloud, and the Cloud pushes APNs notifications back to the Client."></div>
+        </section>
+
+        <section class="band soft" id="install" data-landing-section="install" data-section-title="Installation">
+          <div class="section-head wide">
+            <p class="eyebrow" data-i18n="install.eyebrow">Installation</p>
+            <h2 data-i18n="install.title">Install the phone app, then install the Host.</h2>
+            <p data-i18n="install.body">
+              Oysterun has two parts: the iOS app on your phone and the Host on
+              the computer that runs Claude Code or Codex. Install the Host as the same
+              computer user that runs Claude Code or Codex.
+            </p>
+            <div class="actions">
+              <a class="button primary" href="https://apps.apple.com/tw/app/oysterun/id6762069229" data-i18n="cta.download" data-landing-cta="download_ios_install" data-landing-cta-position="install_header" data-landing-install-intent="ios_app" data-landing-source-section="install" data-landing-external-type="app_store">Download iOS app</a>
+            </div>
+          </div>
+
+          <div class="install-grid">
+            <article class="panel">
+              <div class="panel-content">
+                <h3 data-i18n="install.linux.title">Linux Host</h3>
+                <p data-i18n="install.linux.body">
+                  Create a dedicated user and install Oysterun into that user's
+                  npm prefix after Claude Code or Codex is installed and logged
+                  in for the same user.
+                </p>
+                <pre class="code-block"><code>sudo adduser oysterun
+sudo usermod -aG sudo oysterun
+su - oysterun
+
+mkdir -p "$HOME/.local/npm"
+npm config set prefix "$HOME/.local/npm"
+printf '\nexport PATH="$HOME/.local/npm/bin:$PATH"\n' >> "$HOME/.profile"
+. "$HOME/.profile"
+
+# Install and log in to Claude Code or Codex as this user first.
+command -v claude || command -v codex
+
+npm install -g oysterun@latest --prefer-online
+oysterun --version
+oysterun setup
+oysterun</code></pre>
+                <p class="note" data-i18n="install.nodeNote">Node.js 20 or newer is required.</p>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-content">
+                <h3 data-i18n="install.macos.title">macOS Host</h3>
+                <p data-i18n="install.macos.body">
+                  With Node.js 20 or newer available, install the Host package
+                  after Claude Code or Codex is installed and logged in, then
+                  run the guided setup.
+                </p>
+                <pre class="code-block"><code># Install and log in to Claude Code or Codex as this user first.
+command -v claude || command -v codex
+
+npm install -g oysterun@latest --prefer-online
+
+oysterun --version
+oysterun setup
+oysterun</code></pre>
+                <p class="note" data-i18n="install.macos.note">The Host starts locally and prints a phone login QR.</p>
+              </div>
+            </article>
+          </div>
+
+          <article class="panel update-panel">
+            <div class="panel-content split-content">
+              <div>
+                <span class="panel-kicker" data-i18n="install.update.kicker">Updates</span>
+                <h3 data-i18n="install.update.title">Keep the Host current</h3>
+                <p data-i18n="install.update.body">
+                  Use the same computer user that runs Oysterun. This installs
+                  the current public Host package, restarts the Host, and keeps
+                  your existing setup.
+                </p>
+              </div>
+              <pre class="code-block"><code>npm install -g oysterun@latest --prefer-online
+oysterun --version
+oysterun service:restart
+oysterun service:status</code></pre>
+            </div>
+          </article>
+        </section>
+
+        <section class="band compact faq-band" id="faq" data-landing-section="faq" data-section-title="FAQ">
+          <div class="section-head">
+            <p class="eyebrow" data-i18n="faq.eyebrow">FAQ</p>
+            <h2 data-i18n="faq.title">The first questions people ask when they see Oysterun.</h2>
+          </div>
+          <div class="faq-list">
+            <article>
+              <h3 data-i18n="faq.host.title">What is a Host?</h3>
+              <p data-i18n="faq.host.body">The Host is the machine running the Oysterun Host and Agent Framework, acting as a bridge between the phone client and the agent provider. Oysterun Host connects your phone to Claude Code, Codex, local files, sessions, websites, and notifications on that machine.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q1.title">Is Oysterun an AI model?</h3>
+              <p data-i18n="faq.q1.body">No. Oysterun is the phone app and Host layer around Claude Code and Codex.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q2.title">Does my agent run on Oysterun's server?</h3>
+              <p data-i18n="faq.q2.body">No. Your agent runs on your own computer. Oysterun gives your iPhone a way to control and inspect that local Host.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q3.title">Does Oysterun store my conversations?</h3>
+              <p data-i18n="faq.q3.body">No. Normal agent conversations and files live on your own machine. Oysterun Cloud is limited to pairing support, notifications, identity, and operational security.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q4.title">Who is this for?</h3>
+              <p data-i18n="faq.q4.body">People who already use coding agents, and anyone who wants useful AI work to continue on their computer while they manage it from their phone.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q5.title">What agent providers are supported now?</h3>
+              <p data-i18n="faq.q5.body">Oysterun currently supports Codex and Claude Code. We plan to evaluate additional agent ecosystems in the future.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q6.title">Why not just use SSH or Telegram?</h3>
+              <p data-i18n="faq.q6.body">SSH and Telegram are useful pipes, but Oysterun adds product surfaces around the work: scheduler, Explorer, File Preview, notifications, search, pinned messages, session management, and agent-published websites.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q7.title">How long can a session run?</h3>
+              <p data-i18n="faq.q7.body">Long-running work is a core use case. In June 2026, I traveled in Europe for a month while my Oysterun Host in Taiwan kept working on this project around the clock. By July 5, 2026, the same project had been running through Oysterun for more than three months.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q8.title">How do HTML reports work?</h3>
+              <p data-i18n="faq.q8.body">You can preview a single HTML file through File Preview. For richer output, every agent can also publish a website under its site folder, and that site can be shared with others with or without a password.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q9.title">What if I do not have a public IP?</h3>
+              <p data-i18n="faq.q9.body">Use Tailscale for now; its free tier is usually enough for a single user. We also plan to provide an Oysterun Tunnel Service in the future.</p>
+            </article>
+            <article>
+              <h3 data-i18n="faq.q10.title">Why not just use Claude Mobile?</h3>
+              <p data-i18n="faq.q10.body">Claude Mobile is useful, but today it does not provide Oysterun's file explorer, agent websites, scheduler, session management, or Host-level workflow controls. Those surfaces are what make it practical to run a full project from a phone. Claude Mobile may add more features over time; Oysterun is focused on the local Host workflow.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="band compact" id="roadmap" data-landing-section="roadmap" data-section-title="Coming soon">
+          <div class="section-head">
+            <p class="eyebrow" data-i18n="roadmap.eyebrow">Coming soon</p>
+            <h2 data-i18n="roadmap.title">The roadmap keeps the same promise: more power, less lock-in.</h2>
+          </div>
+          <div class="roadmap-grid">
+            <article>
+              <h3 data-i18n="roadmap.agenthub.title">AgentHub</h3>
+              <p data-i18n="roadmap.agenthub.body">Share agents with one click and install community-built agents instantly.</p>
+            </article>
+            <article>
+              <h3 data-i18n="roadmap.tunnel.title">Tunnel Service</h3>
+              <p data-i18n="roadmap.tunnel.body">Access your home computer without a public IP through a secure Oysterun Cloud bridge.</p>
+            </article>
+            <article>
+              <h3 data-i18n="roadmap.android.title">Android</h3>
+              <p data-i18n="roadmap.android.body">Bring the mobile agent control surface to native Android devices.</p>
+            </article>
+            <article>
+              <h3 data-i18n="roadmap.more.title">Future agent support</h3>
+              <p data-i18n="roadmap.more.body">Evaluate more AI frameworks, providers, and agent ecosystems for future support.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="band final-cta" id="final-cta" data-landing-section="final-cta" data-section-title="Final CTA">
+          <div>
+            <p class="eyebrow" data-i18n="final.eyebrow">Start with the phone app</p>
+            <h2 data-i18n="final.title">Make your existing agents full-functioned from your iPhone.</h2>
+            <p data-i18n="final.body">
+              Install the app, run the Host on your computer, scan the QR code,
+              and keep your agent session with you.
+            </p>
+            <div class="actions center-actions">
+              <a class="button primary" href="https://apps.apple.com/tw/app/oysterun/id6762069229" data-i18n="cta.download" data-landing-cta="download_ios_final" data-landing-cta-position="final_cta" data-landing-install-intent="ios_app" data-landing-source-section="final-cta" data-landing-external-type="app_store">Download iOS app</a>
+              <a class="button secondary" href="#install" data-i18n="cta.installHost" data-landing-cta="install_host_final" data-landing-cta-position="final_cta" data-landing-install-intent="host_install" data-landing-source-section="final-cta">Install on Computer</a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span data-i18n="footer.tagline">Oysterun. iPhone control for agents on your computer.</span>
+        <span><a href="privacy/index.html" data-i18n="footer.privacy" data-landing-nav="privacy_footer">Privacy Policy</a></span>
+      </footer>
+    </div>
+    <script>
+      (() => {
+        const dictionaries = {
+          "zh-Hant": {
+            "meta.title": "Oysterun - 用 iPhone 控制你的 AI Agent",
+            "meta.description": "用 iPhone 控制在你自己的 Mac 或 Linux 電腦上執行的 Claude Code 與 Codex。",
+            "nav.how": "運作方式",
+            "nav.architecture": "架構",
+            "nav.faq": "FAQ",
+            "nav.install": "安裝",
+            "nav.features": "功能",
+            "nav.privacy": "隱私權",
+            "hero.eyebrow": "適用於 Claude Code 與 Codex",
+            "hero.title": "用 iPhone 控制你電腦上的 AI Agent。",
+            "hero.lead": "Oysterun 讓手機連到在你自己的 Mac 或 Linux 主機上運行的 Claude Code 與 Codex。你可以啟動 session、停止失控工作、核准工具操作、瀏覽檔案、開啟 HTML 報告，並在 Agent 需要你時收到通知。",
+            "cta.download": "下載 iOS App",
+            "cta.installHost": "安裝在電腦上",
+            "hero.screen.chat": "接續正在執行的 Agent session",
+            "hero.screen.files": "瀏覽檔案",
+            "hero.screen.reports": "開啟報告",
+            "how.eyebrow": "運作方式",
+            "how.title": "四個步驟，從 Claude Code 或 Codex 到手機控制。",
+            "how.body": "Claude Code 與 Codex 仍然在你的電腦上執行。Oysterun 讓手機成為這台電腦的安全控制面板，所以你可以離開桌面，但不失去 session。",
+            "how.step1.title": "安裝 Host",
+            "how.step1.body": "在已經使用 Claude Code 或 Codex 的同一個 Mac 或 Linux 使用者帳號下執行 Oysterun。",
+            "how.step2.title": "下載 App",
+            "how.step2.body": "先安裝 iOS App，手機才能掃描 Host 登入 QR code 完成配對。",
+            "how.step3.title": "配對 iPhone",
+            "how.step3.body": "執行 setup、掃描臨時 Host QR，手機就會知道如何連到你的電腦。",
+            "how.step4.title": "控制 Agent",
+            "how.step4.body": "從手機或電腦控制 Agent：接續 session、檢視報告與 HTML，並在 Agent 持續工作時收到通知。",
+            "phone.eyebrow": "手機上可以做什麼",
+            "phone.title": "讓遠端 Agent 工作真正實用的細節控制。",
+            "phone.chat.kicker": "聊天",
+            "phone.chat.title": "接續 session",
+            "phone.chat.body": "不用打開筆電，也能回覆 Claude Code 或 Codex。",
+            "phone.stop.kicker": "停止",
+            "phone.stop.title": "中斷錯誤工作",
+            "phone.stop.body": "指令打錯或看到 Agent 繞圈時，可以直接從手機停止。",
+            "phone.website.kicker": "網站",
+            "phone.website.title": "提供 Agent 建出的網站",
+            "phone.website.body": "發布 Agent 產生的網站，用一般瀏覽器存取，並用不同權限分享給他人。",
+            "phone.files.kicker": "Explorer",
+            "phone.files.title": "瀏覽本機檔案",
+            "phone.files.body": "從 Oysterun 瀏覽電腦上的檔案系統，開啟資料夾、檢視 Agent 輸出，並找到 session 中建立的檔案。",
+            "phone.web.kicker": "檔案預覽",
+            "phone.web.title": "檢視報告與程式碼檔案",
+            "phone.web.body": "Agent 很適合產生 MD/HTML；Oysterun 讓這些報告在 iPhone 上也容易開啟，也能就地預覽程式碼檔案、log 與其他輸出。",
+            "phone.notify.kicker": "通知",
+            "phone.notify.title": "知道何時回來",
+            "phone.notify.body": "工作完成、卡住、出錯，或排程任務需要注意時收到通知。",
+            "workflow.eyebrow": "Oysterun 的日常用法",
+            "workflow.title": "在桌面開始工作，從手機完成決策。",
+            "workflow.body": "你請 Codex 建立一份報告，然後離開桌面。Agent 繼續在你的電腦上運行；需要你決定時，Oysterun 會通知你；完成後，HTML 報告可直接在 iPhone 上開啟。",
+            "workflow.timeline.desk.label": "電腦",
+            "workflow.timeline.desk.body": "在你的電腦上啟動 Agent session。",
+            "workflow.timeline.phone.label": "手機",
+            "workflow.timeline.phone.body": "離開桌面，用 Oysterun 觀看進度。",
+            "workflow.timeline.alert.label": "提醒",
+            "workflow.timeline.alert.body": "需要時核准工具操作，或在任務變更時停止 Agent。",
+            "workflow.timeline.output.label": "成果",
+            "workflow.timeline.output.body": "在 iPhone 上開啟產生的檔案或 HTML 報告。",
+            "agent.eyebrow": "不只為人，也為 Claude Code 與 Codex 設計",
+            "agent.title": "Claude Code 與 Codex 也可以使用 Oysterun。",
+            "agent.body": "Oysterun 的工具設計成可以由人、Claude Code 與 Codex 操作。它們可以搜尋過去脈絡、存取檔案、發布網站、排程工作、送出通知，並檢視輸出成果。",
+            "agent.demo.kicker": "問一次",
+            "agent.demo.prompt": "每天早上 9 點產生一份銷售日報，完成後通知我。",
+            "agent.timeline.start.label": "08:00",
+            "agent.timeline.start.body": "Agent 自動開始",
+            "agent.timeline.context.label": "08:03",
+            "agent.timeline.context.body": "收集資料並檢查脈絡",
+            "agent.timeline.write.label": "08:08",
+            "agent.timeline.write.body": "撰寫報告",
+            "agent.timeline.publish.label": "08:10",
+            "agent.timeline.publish.body": "發布 HTML 頁面",
+            "agent.timeline.notify.label": "08:11",
+            "agent.timeline.notify.body": "送出手機通知",
+            "features.eyebrow": "功能",
+            "features.title": "為什麼不只用 SSH / Telegram / Claude Mobile？",
+            "features.chat.kicker": "聊天",
+            "features.chat.title": "讓 session 持續推進",
+            "features.chat.slogan": "讓 Agent 連續工作超過一個月。",
+            "features.chat.body": "從 iPhone 接續、停止、置頂、搜尋，並管理 Claude Code 或 Codex session loop。",
+            "features.opensource.kicker": "開源",
+            "features.opensource.title": "完全開源",
+            "features.opensource.slogan": "完全掌握自己的工具。",
+            "features.opensource.body": "檢視、fork 並調整 Host 與手機控制層，配合自己的工作流使用。",
+            "features.scheduler.kicker": "Scheduler",
+            "features.scheduler.title": "執行週期性工作",
+            "features.scheduler.slogan": "比 loop 更自由：在 session 外，不受限制。",
+            "features.scheduler.body": "排程工作，例如：每天早上傳一份 Tesla 股票報告給我。",
+            "features.reports.kicker": "報告",
+            "features.reports.title": "檔案預覽 / 網站",
+            "features.reports.slogan": "HTML 會讓你的生活更輕鬆。",
+            "features.reports.body": "開啟產生的 HTML 與 Markdown 報告，或把更完整的輸出發布成 Agent 建出的網站。",
+            "features.explorer.kicker": "Explorer",
+            "features.explorer.title": "瀏覽本機檔案",
+            "features.explorer.slogan": "找到並引用檔案，補足上下文。",
+            "features.explorer.body": "瀏覽資料夾、檢視專案檔案，並找到 Claude Code 或 Codex 建立的輸出。",
+            "features.notification.kicker": "通知",
+            "features.notification.title": "知道何時回來",
+            "features.notification.slogan": "不用一直守著 terminal。",
+            "features.notification.body": "工作完成、卡住、出錯，或需要你核准時，在 iPhone 上收到通知。",
+            "surfaces.eyebrow": "產品介面",
+            "surfaces.title": "不是新的 AI 模型，而是你已使用 Agent 的控制層。",
+            "surfaces.sessions": "找到並接續先前的 sessions。",
+            "surfaces.chat": "從手機接續 Agent 對話。",
+            "surfaces.explorer": "檢視電腦上建立的檔案。",
+            "surfaces.scheduler": "排程週期性的 Agent 工作。",
+            "vision.eyebrow": "為什麼需要 Oysterun",
+            "vision.title": "AI Agent 不應該要求你一直守著 terminal。",
+            "vision.body1": "今天的 Agent 很強大，但工作流程仍然圍繞開發者習慣：terminal、SSH、雲端 dashboard、散落的檔案、長時間工作，以及缺少一個簡單方式知道 Agent 何時需要你。",
+            "vision.body2": "Oysterun 的目標是讓 Agent 成為你能日常使用的工具：執行在自己的電腦上，靠近你的檔案與工具，但能從你隨身攜帶的手機觸及。",
+            "vision.card1.title": "少一點守候",
+            "vision.card1.body": "你離開桌面時，讓 Agent 繼續工作。",
+            "vision.card2.title": "少一點隱藏狀態",
+            "vision.card2.body": "從同一個手機介面開啟 sessions、檔案、報告與排程。",
+            "vision.card3.title": "少一點雲端依賴",
+            "vision.card3.body": "讓 Claude Code 與 Codex 留在你的電腦上，而不是把工作搬到其他地方。",
+            "ownership.eyebrow": "為什麼 local-first 重要",
+            "ownership.title": "你的 Agent 仍然屬於你的電腦。",
+            "ownership.body": "Oysterun 不是要把你的 Agent 搬進中央雲端。你的對話、檔案、工具與 runtime 都留在自己的 Host。Oysterun Cloud 只負責配對支援、身份、通知與營運安全。",
+            "ownership.runtime.kicker": "Runtime",
+            "ownership.runtime.title": "帶上你的 Agent",
+            "ownership.runtime.body": "使用你已經信任的 Claude Code 或 Codex 工作流。",
+            "ownership.machine.kicker": "Machine",
+            "ownership.machine.title": "使用你的電腦",
+            "ownership.machine.body": "Host 在你的 Mac 或 Linux 主機上執行，靠近你的檔案與工具。",
+            "ownership.control.kicker": "Control",
+            "ownership.control.title": "保留決策迴路",
+            "ownership.control.body": "手機提供 review、stop、inspect 與 notification 控制層。",
+            "architecture.eyebrow": "架構",
+            "architecture.title": "你的資料路徑直接連到自己的 Host。",
+            "architecture.body": "Oysterun 不會把聊天、檔案、網站或 Agent 訊息經過 Oysterun Cloud。手機或瀏覽器會直接連到你的 Host。Cloud 只用於通知投遞，以及推播通知所需的少量註冊 metadata。",
+            "architecture.client.kicker": "Client",
+            "architecture.client.title": "iPhone 或瀏覽器",
+            "architecture.client.body": "聊天、Explorer、檔案預覽、網站、session 控制與通知點擊。",
+            "architecture.link.clientHost": "直接連線：聊天、檔案、網站、搜尋、置頂、scheduler、session 控制",
+            "architecture.host.kicker": "Host",
+            "architecture.host.title": "你的 Mac 或 Linux 主機",
+            "architecture.host.body": "執行 Agent、持有檔案、儲存聊天與 session 狀態、提供 /sites 頁面，並排程工作。",
+            "architecture.link.hostCloud": "僅通知候選：有限的 title/body/route metadata",
+            "architecture.cloud.kicker": "Cloud",
+            "architecture.cloud.title": "通知 relay",
+            "architecture.cloud.body": "儲存 APNs 註冊並送出推播通知。它不承載聊天、檔案或 Agent 訊息。",
+            "architecture.link.cloudClient": "APNs 推播；點擊後開啟已儲存的 direct Host URL",
+            "opensource.eyebrow": "完全開源",
+            "opensource.title": "手機與 Agent 之間沒有黑盒。",
+            "opensource.body": "Oysterun 可以被檢視、修改與調整。閱讀程式碼、改 Host、建立自己的工具，並把 Agent 工作流掌握在自己手上。",
+            "opensource.point1": "檢視 Agent 控制如何運作",
+            "opensource.point2": "Fork 成自己的工作流",
+            "opensource.point3": "持續使用自己的模型與工具",
+            "opensource.point4": "不用被訂閱制鎖住",
+            "install.eyebrow": "安裝",
+            "install.title": "先安裝手機 App，再安裝 Host。",
+            "install.body": "Oysterun 有兩個部分：手機上的 iOS App，以及執行 Claude Code 或 Codex 的電腦上的 Host。請用同一個執行 Claude Code 或 Codex 的電腦使用者安裝 Host。",
+            "install.linux.title": "Linux Host",
+            "install.linux.body": "建立專用使用者，並在同一個使用者已安裝且登入 Claude Code 或 Codex 後，把 Oysterun 安裝到該使用者的 npm prefix。",
+            "install.nodeNote": "需要 Node.js 20 或更新版本。",
+            "install.macos.title": "macOS Host",
+            "install.macos.body": "在已有 Node.js 20 或更新版本的環境中，先安裝並登入 Claude Code 或 Codex，再安裝 Host package 並執行引導式 setup。",
+            "install.macos.note": "Host 會在本機啟動，並印出手機登入 QR。",
+            "install.update.kicker": "更新",
+            "install.update.title": "保持 Host 為最新版本",
+            "install.update.body": "使用同一個執行 Oysterun 的電腦使用者。這會安裝目前公開 Host package、重新啟動 Host，並保留既有設定。",
+            "roadmap.eyebrow": "即將推出",
+            "roadmap.title": "Roadmap 延續同一個承諾：更多能力，更少鎖定。",
+            "roadmap.agenthub.title": "AgentHub",
+            "roadmap.agenthub.body": "一鍵分享 Agent，並快速安裝社群建立的 Agents。",
+            "roadmap.tunnel.title": "Tunnel Service",
+            "roadmap.tunnel.body": "不用公開 IP，也能透過安全的 Oysterun Cloud bridge 存取家裡的電腦。",
+            "roadmap.android.title": "Android",
+            "roadmap.android.body": "把手機 Agent 控制介面帶到原生 Android 裝置。",
+            "roadmap.more.title": "未來支援更多 Agent",
+            "roadmap.more.body": "未來會評估更多 AI framework、provider 與 Agent 生態。",
+            "faq.eyebrow": "FAQ",
+            "faq.title": "人們第一次看到 Oysterun 時最常問的問題。",
+            "faq.host.title": "什麼是 Host？",
+            "faq.host.body": "Host 是執行 Oysterun Host 與 Agent Framework 的那台 Mac 或 Linux 電腦，作為手機 client 與 agent provider 之間的橋接層。Oysterun Host 讓手機連到這台電腦上的 Claude Code、Codex、本機檔案、sessions、網站與通知。",
+            "faq.q1.title": "Oysterun 是 AI 模型嗎？",
+            "faq.q1.body": "不是。Oysterun 是 Claude Code 與 Codex 外層的手機 App 與 Host layer。",
+            "faq.q2.title": "我的 Agent 會跑在 Oysterun 的伺服器上嗎？",
+            "faq.q2.body": "不會。你的 Agent 在自己的電腦上執行。Oysterun 讓 iPhone 可以控制並檢視那台本機 Host。",
+            "faq.q3.title": "Oysterun 會儲存我的對話嗎？",
+            "faq.q3.body": "不會。一般 Agent 對話與檔案都在你自己的機器上。Oysterun Cloud 只負責配對支援、通知、身份與營運安全。",
+            "faq.q4.title": "誰適合使用？",
+            "faq.q4.body": "已經使用 coding agent 的人，以及任何想讓有用的 AI 工作在電腦上繼續執行、再從手機管理的人。",
+            "faq.q5.title": "目前支援哪些 Agent provider？",
+            "faq.q5.body": "Oysterun 目前支援 Codex 與 Claude Code。未來會評估更多 Agent 生態。",
+            "faq.q6.title": "為什麼不只用 SSH 或 Telegram？",
+            "faq.q6.body": "SSH 和 Telegram 都是有用的通道，但 Oysterun 在工作外層提供完整產品介面：scheduler、Explorer、檔案預覽、通知、搜尋、置頂訊息、session 管理，以及 Agent 發布的網站。",
+            "faq.q7.title": "一個 session 可以跑多久？",
+            "faq.q7.body": "長時間工作是 Oysterun 的核心使用情境。2026 年 6 月，我在歐洲旅行一個月，位於台灣的 Oysterun Host 仍然全天候為這個專案工作。到 2026 年 7 月 5 日，這個專案已經透過 Oysterun 持續運作超過三個月。",
+            "faq.q8.title": "HTML 報告如何使用？",
+            "faq.q8.body": "你可以用檔案預覽直接查看單一 HTML 檔。若是更完整的輸出，每個 Agent 也可以在自己的 site folder 下發布網站，而且網站可以用有密碼或無密碼的方式分享給其他人。",
+            "faq.q9.title": "如果我沒有 Public IP 怎麼辦？",
+            "faq.q9.body": "目前可以使用 Tailscale；它的免費方案通常已經足夠單一使用者。我們未來也計畫提供 Oysterun Tunnel Service。",
+            "faq.q10.title": "為什麼不只用 Claude Mobile？",
+            "faq.q10.body": "Claude Mobile 很有用，但截至目前，它沒有 Oysterun 的檔案 Explorer、Agent 網站、scheduler、session 管理與 Host 層級工作流控制。這些介面是從手機完成完整專案所需要的能力。Claude Mobile 未來可能會加入更多功能；Oysterun 專注在 local Host 工作流。",
+            "final.eyebrow": "從手機 App 開始",
+            "final.title": "讓你現有的 Agent 可以從 iPhone 完整運作。",
+            "final.body": "安裝 App，在電腦上執行 Host，掃描 QR code，並把 Agent session 帶在身邊。",
+            "footer.tagline": "Oysterun。用 iPhone 控制你電腦上的 Agent。",
+            "footer.privacy": "隱私權政策"
+          }
+        };
+
+        const translatedNodes = Array.from(document.querySelectorAll("[data-i18n]"));
+        const defaultText = new Map(translatedNodes.map((node) => [node, node.textContent]));
+        const buttons = Array.from(document.querySelectorAll("[data-language-option]"));
+        const metaDescription = document.querySelector('meta[name="description"]');
+        const defaultTitle = document.title;
+        const defaultDescription = metaDescription?.getAttribute("content") || "";
+
+        function applyLanguage(language) {
+          const dictionary = dictionaries[language] || {};
+          translatedNodes.forEach((node) => {
+            const key = node.getAttribute("data-i18n");
+            node.textContent = dictionary[key] || defaultText.get(node) || "";
+          });
+          document.documentElement.lang = language === "zh-Hant" ? "zh-Hant" : "en";
+          document.title = dictionary["meta.title"] || defaultTitle;
+          if (metaDescription) {
+            metaDescription.setAttribute("content", dictionary["meta.description"] || defaultDescription);
+          }
+          buttons.forEach((button) => {
+            const selected = button.getAttribute("data-language-option") === language;
+            button.setAttribute("aria-pressed", String(selected));
+          });
+          if (typeof window.__renderArchGraph === "function") window.__renderArchGraph(language);
+          try {
+            window.localStorage.setItem("oysterun_site_language", language);
+          } catch {
+            // Ignore private browsing or blocked storage.
+          }
+        }
+
+        buttons.forEach((button) => {
+          button.addEventListener("click", () => {
+            applyLanguage(button.getAttribute("data-language-option") || "en");
+          });
+        });
+
+        let initialLanguage = "en";
+        try {
+          const savedLanguage = window.localStorage.getItem("oysterun_site_language");
+          if (savedLanguage === "zh-Hant" || savedLanguage === "en") initialLanguage = savedLanguage;
+        } catch {
+          initialLanguage = "en";
+        }
+        applyLanguage(initialLanguage);
+      })();
+    </script>
+    <script>
+      (() => {
+        const posthogToken = "phc_2c404JOxNanNDgJNdagtfwqc95BNVTIJVQLsMB75uh5";
+        const posthogApiHost = "https://us.i.posthog.com";
+        const analyticsPreferenceKey = "oysterun_landing_analytics";
+        const urlParams = new URLSearchParams(window.location.search);
+        const analyticsParam = urlParams.get("analytics");
+
+        try {
+          if (analyticsParam === "off") {
+            window.localStorage.setItem(analyticsPreferenceKey, "off");
+          } else if (analyticsParam === "on") {
+            window.localStorage.removeItem(analyticsPreferenceKey);
+          }
+        } catch {
+          // Storage can be unavailable in private or restricted browsing modes.
+        }
+
+        function hasAnalyticsOptOut() {
+          try {
+            return window.localStorage.getItem(analyticsPreferenceKey) === "off";
+          } catch {
+            return false;
+          }
+        }
+
+        function hasDoNotTrack() {
+          return navigator.doNotTrack === "1" || window.doNotTrack === "1";
+        }
+
+        if (hasAnalyticsOptOut() || hasDoNotTrack()) return;
+
+        !(function (documentRef, posthogRef) {
+          let methodIndex;
+          let methodName;
+          let scriptEl;
+          let firstScript;
+          if (posthogRef.__SV) return;
+          window.posthog = posthogRef;
+          posthogRef._i = [];
+          posthogRef.init = function (token, config, name) {
+            function stubMethod(target, method) {
+              const parts = method.split(".");
+              if (parts.length === 2) {
+                target = target[parts[0]];
+                method = parts[1];
+              }
+              target[method] = function () {
+                target.push([method].concat(Array.prototype.slice.call(arguments, 0)));
+              };
+            }
+
+            scriptEl = documentRef.createElement("script");
+            scriptEl.type = "text/javascript";
+            scriptEl.crossOrigin = "anonymous";
+            scriptEl.async = true;
+            scriptEl.src = config.api_host.replace(".i.posthog.com", "-assets.i.posthog.com") + "/static/array.js";
+            firstScript = documentRef.getElementsByTagName("script")[0];
+            firstScript.parentNode.insertBefore(scriptEl, firstScript);
+
+            let target = posthogRef;
+            if (name !== undefined) {
+              target = posthogRef[name] = [];
+            } else {
+              name = "posthog";
+            }
+            target.people = target.people || [];
+            target.toString = function (withPeople) {
+              let label = "posthog";
+              if (name !== "posthog") label += "." + name;
+              if (!withPeople) label += " (stub)";
+              return label;
+            };
+            target.people.toString = function () {
+              return target.toString(1) + ".people (stub)";
+            };
+
+            const methods = "init capture register register_once unregister identify alias set_config reset isFeatureEnabled onFeatureFlags reloadFeatureFlags getFeatureFlag getFeatureFlagPayload group updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on sessionRecordingStarted captureException startSessionRecording stopSessionRecording get_session_id people.set people.set_once people.unset people.increment people.append people.union people.track_charge people.clear_charges people.delete_user".split(" ");
+            for (methodIndex = 0; methodIndex < methods.length; methodIndex += 1) {
+              methodName = methods[methodIndex];
+              stubMethod(target, methodName);
+            }
+            posthogRef._i.push([token, config, name]);
+          };
+          posthogRef.__SV = 1;
+        })(document, window.posthog || []);
+
+        window.posthog.init(posthogToken, {
+          api_host: posthogApiHost,
+          autocapture: false,
+          capture_pageview: false,
+          capture_pageleave: false,
+          disable_session_recording: true,
+          person_profiles: "never",
+          persistence: "localStorage+cookie",
+          advanced_disable_decide: true
+        });
+
+        function getDeviceType() {
+          const ua = navigator.userAgent || "";
+          if (/iPad|Tablet/i.test(ua)) return "tablet";
+          if (/Mobi|Android|iPhone|iPod/i.test(ua)) return "mobile";
+          return "desktop";
+        }
+
+        function getPath() {
+          return window.location.pathname || "/";
+        }
+
+        function getUtmProperties() {
+          const props = {};
+          ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id"].forEach((key) => {
+            const value = urlParams.get(key);
+            if (value) props[key] = value;
+          });
+          return props;
+        }
+
+        function commonProperties() {
+          return {
+            surface: "landing",
+            path: getPath()
+          };
+        }
+
+        function capture(eventName, properties = {}) {
+          try {
+            window.posthog.capture(eventName, Object.assign(commonProperties(), properties));
+          } catch {
+            // Analytics must never block the static landing page.
+          }
+        }
+
+        function linkText(link) {
+          return (link.textContent || "").replace(/\s+/g, " ").trim();
+        }
+
+        function destinationFor(link) {
+          try {
+            return new URL(link.getAttribute("href") || "", window.location.href).href;
+          } catch {
+            return link.getAttribute("href") || "";
+          }
+        }
+
+        function sectionFor(node) {
+          const section = node.closest("[data-landing-section]");
+          return section?.getAttribute("data-landing-section") || "";
+        }
+
+        function isExternalDestination(destination) {
+          try {
+            const url = new URL(destination);
+            return /^https?:$/.test(url.protocol) && url.origin !== window.location.origin;
+          } catch {
+            return false;
+          }
+        }
+
+        capture("landing_page_viewed", Object.assign({
+          referrer: document.referrer || "",
+          device_type: getDeviceType()
+        }, getUtmProperties()));
+
+        let visibleStartedAt = document.visibilityState === "visible" ? performance.now() : null;
+        if (visibleStartedAt !== null) {
+          capture("landing_page_visible");
+        }
+
+        function captureHidden(source) {
+          if (visibleStartedAt === null) return;
+          const durationMs = Math.max(0, Math.round(performance.now() - visibleStartedAt));
+          capture("landing_page_hidden", {
+            duration_ms: durationMs,
+            source
+          });
+          visibleStartedAt = null;
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            visibleStartedAt = performance.now();
+            capture("landing_page_visible");
+            return;
+          }
+          captureHidden("visibilitychange");
+        });
+        window.addEventListener("pagehide", () => captureHidden("pagehide"));
+
+        const scrollDepths = [25, 50, 75, 100];
+        const reachedDepths = new Set();
+        let scrollRaf = 0;
+
+        function checkScrollDepth() {
+          const doc = document.documentElement;
+          const scrollHeight = Math.max(doc.scrollHeight, document.body.scrollHeight, window.innerHeight);
+          const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
+          const viewportBottom = window.scrollY + window.innerHeight;
+          let depth = maxScroll <= 0 ? 100 : Math.round((viewportBottom / scrollHeight) * 100);
+          if (window.scrollY >= maxScroll - 2) depth = 100;
+          depth = Math.max(0, Math.min(100, depth));
+
+          scrollDepths.forEach((threshold) => {
+            if (depth >= threshold && !reachedDepths.has(threshold)) {
+              reachedDepths.add(threshold);
+              capture("landing_scroll_depth_reached", {
+                depth_percent: threshold
+              });
+            }
+          });
+        }
+
+        function scheduleScrollDepthCheck() {
+          if (scrollRaf) return;
+          scrollRaf = window.requestAnimationFrame(() => {
+            scrollRaf = 0;
+            checkScrollDepth();
+          });
+        }
+
+        window.addEventListener("scroll", scheduleScrollDepthCheck, { passive: true });
+        window.addEventListener("resize", scheduleScrollDepthCheck);
+        scheduleScrollDepthCheck();
+
+        const viewedSections = new Set();
+        function captureSectionViewed(section) {
+          const sectionId = section.getAttribute("data-landing-section") || section.id;
+          if (!sectionId || viewedSections.has(sectionId)) return;
+          viewedSections.add(sectionId);
+          capture("landing_section_viewed", {
+            section_id: sectionId,
+            section_title: section.getAttribute("data-section-title") || sectionId
+          });
+        }
+
+        const sections = Array.from(document.querySelectorAll("[data-landing-section]"));
+        if ("IntersectionObserver" in window) {
+          const sectionObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting) {
+                captureSectionViewed(entry.target);
+                sectionObserver.unobserve(entry.target);
+              }
+            });
+          }, { threshold: 0.35 });
+          sections.forEach((section) => sectionObserver.observe(section));
+        } else {
+          sections.forEach((section) => captureSectionViewed(section));
+        }
+
+        document.addEventListener("click", (event) => {
+          const link = event.target.closest("a[href]");
+          if (!link) return;
+
+          const destination = destinationFor(link);
+          const sourceSection = link.getAttribute("data-landing-source-section") || sectionFor(link);
+          const ctaId = link.getAttribute("data-landing-cta");
+          const navItem = link.getAttribute("data-landing-nav");
+          const installIntent = link.getAttribute("data-landing-install-intent");
+          const githubSource = link.getAttribute("data-landing-github");
+
+          if (ctaId) {
+            capture("landing_cta_clicked", {
+              cta_id: ctaId,
+              cta_text: linkText(link),
+              cta_position: link.getAttribute("data-landing-cta-position") || sourceSection,
+              destination
+            });
+          }
+
+          if (navItem) {
+            capture("landing_nav_clicked", {
+              nav_item: navItem,
+              destination
+            });
+          }
+
+          if (installIntent) {
+            capture("landing_install_intent", {
+              cta_id: ctaId || installIntent,
+              destination,
+              source_section: sourceSection
+            });
+          }
+
+          if (githubSource) {
+            capture("landing_github_clicked", {
+              source_section: githubSource,
+              destination
+            });
+          }
+
+          if (isExternalDestination(destination)) {
+            capture("landing_external_link_clicked", {
+              destination,
+              link_type: link.getAttribute("data-landing-external-type") || "external"
+            });
+          }
+        });
+      })();
+    </script>
+    <script>
+      (() => {
+        const C = {
+          ink: "#111315", muted: "#5e6670", blue: "#2563eb", blueBg: "#eef3ff",
+          green: "#0f766e", greenBg: "#eef9f7", line: "#dce3e9", white: "#ffffff", soft: "#f7f9fb"
+        };
+
+        const ICONS = {
+          phone: '<rect x="6" y="2.5" width="12" height="19" rx="2.6"/><line x1="10" y1="18.4" x2="14" y2="18.4"/>',
+          host: '<rect x="2.5" y="3.5" width="19" height="13" rx="2"/><line x1="8" y1="20.5" x2="16" y2="20.5"/><line x1="12" y1="16.5" x2="12" y2="20.5"/>',
+          cloud: '<path d="M7.2 18.5h9.3a3.6 3.6 0 0 0 .5-7.16A5.1 5.1 0 0 0 7.3 9.7 4.1 4.1 0 0 0 7.2 18.5z"/>'
+        };
+
+        const STR = {
+          en: {
+            client: { kicker: "CLIENT", title: "iPhone or browser", body: "Chat, Explorer, File Preview, websites, session controls, and notification taps.", boxes: ["Oysterun App"] },
+            host: { kicker: "HOST", title: "Your Mac or Linux machine", body: "Runs agents, owns files, stores chat/session state, serves /sites pages, and schedules jobs.", boxes: ["Oysterun Host", "Codex / Claude Code"] },
+            cloud: { kicker: "CLOUD", title: "Notification relay", body: "Stores APNs registration and sends push notifications. Never carries chat, files, or agent messages." },
+            e1t: "Direct connection", e1b: "chat · files · websites · search · pins · scheduler · session controls",
+            e2t: "Notification candidate only", e2b: "bounded title / body / route metadata",
+            e3t: "APNs push", e3b: "tap opens the saved direct Host URL"
+          },
+          "zh-Hant": {
+            client: { kicker: "CLIENT", title: "iPhone 或瀏覽器", body: "聊天、Explorer、檔案預覽、網站、session 控制與通知點擊。", boxes: ["Oysterun App"] },
+            host: { kicker: "HOST", title: "你的 Mac 或 Linux 主機", body: "執行 Agent、持有檔案、儲存聊天與 session 狀態、提供 /sites 頁面，並排程工作。", boxes: ["Oysterun Host", "Codex / Claude Code"] },
+            cloud: { kicker: "CLOUD", title: "通知 relay", body: "儲存 APNs 註冊並送出推播通知；不承載聊天、檔案或 Agent 訊息。" },
+            e1t: "直接連線", e1b: "聊天 · 檔案 · 網站 · 搜尋 · 置頂 · scheduler · session 控制",
+            e2t: "僅通知候選", e2b: "有限的 title / body / route metadata",
+            e3t: "APNs 推播", e3b: "點擊後開啟已儲存的 direct Host URL"
+          }
+        };
+
+        const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+        function wrap(text, maxChars, cjk) {
+          if (cjk) {
+            const out = [];
+            let cur = "";
+            for (const ch of text) {
+              if ((cur + ch).length > maxChars && cur.length) { out.push(cur); cur = ch; }
+              else cur += ch;
+            }
+            if (cur) out.push(cur);
+            return out;
+          }
+          const words = text.split(/\s+/);
+          const out = [];
+          let cur = "";
+          for (const w of words) {
+            if (!cur) cur = w;
+            else if ((cur + " " + w).length <= maxChars) cur += " " + w;
+            else { out.push(cur); cur = w; }
+          }
+          if (cur) out.push(cur);
+          return out;
+        }
+
+        function icon(name, x, y, size, color) {
+          const s = size / 24;
+          return '<g transform="translate(' + x + ',' + y + ') scale(' + s + ')" fill="none" stroke="' + color +
+            '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + "</g>";
+        }
+
+        // Node card: icon + kicker + title + body. Returns {svg, h}
+        function node(x, y, w, cfg, kind, cjk) {
+          const pad = 20;
+          const iconSize = 30;
+          const accent = kind === "host" ? C.green : kind === "cloud" ? C.muted : C.blue;
+          const bg = kind === "host" ? C.greenBg : C.white;
+          const stroke = kind === "host" ? "rgba(15,118,110,.30)" : C.line;
+          const iconName = kind === "host" ? "host" : kind === "cloud" ? "cloud" : "phone";
+          const titleFs = 18, titleLH = 24;
+          const bodyFs = 13.5, bodyLH = 19;
+          const innerW = w - pad * 2;
+          const titleMax = cjk ? Math.floor(innerW / titleFs) : Math.floor(innerW / (titleFs * 0.52));
+          const bodyMax = cjk ? Math.floor(innerW / bodyFs) : Math.floor(innerW / (bodyFs * 0.5));
+          const tLines = wrap(cfg.title, titleMax, cjk);
+          const bLines = wrap(cfg.body, bodyMax, cjk);
+          let yy = y + pad;
+          let out = "";
+          // header row
+          out += icon(iconName, x + pad, yy, iconSize, accent);
+          out += '<text x="' + (x + pad + iconSize + 12) + '" y="' + (yy + iconSize * 0.68) +
+            '" font-size="11.5" font-weight="800" letter-spacing="1.4" fill="' + accent + '">' + esc(cfg.kicker) + "</text>";
+          yy += iconSize + 14;
+          // title
+          for (const ln of tLines) {
+            out += '<text x="' + (x + pad) + '" y="' + yy + '" font-size="' + titleFs + '" font-weight="750" fill="' + C.ink + '">' + esc(ln) + "</text>";
+            yy += titleLH;
+          }
+          yy += 4;
+          // body
+          for (const ln of bLines) {
+            out += '<text x="' + (x + pad) + '" y="' + yy + '" font-size="' + bodyFs + '" fill="' + C.muted + '">' + esc(ln) + "</text>";
+            yy += bodyLH;
+          }
+          // inner sub-boxes rendered inside the Host container (Oysterun + provider)
+          if (cfg.boxes && cfg.boxes.length) {
+            yy += 8;
+            const bgap = 10;
+            const bw = cfg.boxes.length === 1 ? innerW : (innerW - bgap) / 2;
+            const bh = 46;
+            const accents = [C.blue, C.green];
+            cfg.boxes.forEach((bx, i) => {
+              const bxX = x + pad + i * (bw + bgap);
+              const acc = accents[i] || C.blue;
+              out += '<rect x="' + bxX + '" y="' + yy + '" width="' + bw + '" height="' + bh + '" rx="10" fill="' + C.white + '" stroke="' + C.line + '" stroke-width="1.3"/>';
+              out += '<circle cx="' + (bxX + 15) + '" cy="' + (yy + bh / 2) + '" r="4" fill="' + acc + '"/>';
+              const lblMax = cjk ? Math.floor((bw - 30) / 11.5) : Math.floor((bw - 30) / 6.8);
+              const lns = wrap(bx, Math.max(4, lblMax), cjk);
+              const lineH = 14;
+              let ty = yy + bh / 2 - (lns.length - 1) * lineH / 2 + 4;
+              for (const ln of lns) {
+                out += '<text x="' + (bxX + 26) + '" y="' + ty + '" font-size="11.5" font-weight="700" fill="' + C.ink + '">' + esc(ln) + "</text>";
+                ty += lineH;
+              }
+            });
+            yy += bh;
+          }
+          const h = (yy - bodyLH + bodyLH) - y + pad - 2;
+          const rect = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+            '" rx="16" fill="' + bg + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+          return { svg: rect + out, h };
+        }
+
+        // Edge label chip: title (bold) + body. Returns {svg, w, h}
+        function label(cx, cy, title, body, primary, maxChars, cjk, anchor) {
+          const tFs = primary ? 13.5 : 12.5, bFs = 12, lh = 17, padX = 14, padY = 11;
+          const accent = primary ? C.blue : C.muted;
+          const bg = primary ? C.blueBg : C.white;
+          const stroke = primary ? "rgba(37,99,235,.32)" : C.line;
+          const bLines = wrap(body, maxChars, cjk);
+          const lines = [{ t: title, fs: tFs, w: 800, fill: accent }].concat(
+            bLines.map((l) => ({ t: l, fs: bFs, w: 500, fill: C.muted }))
+          );
+          const charW = cjk ? 1.02 : 0.54;
+          const boxW = Math.round(Math.max.apply(null, lines.map((l) => l.t.length * l.fs * charW)) + padX * 2);
+          const boxH = lines.length * lh + padY * 2;
+          let x = cx - boxW / 2;
+          if (anchor === "start") x = cx;
+          else if (anchor === "end") x = cx - boxW;
+          const y = cy - boxH / 2;
+          let out = '<rect x="' + x + '" y="' + y + '" width="' + boxW + '" height="' + boxH +
+            '" rx="11" fill="' + bg + '" stroke="' + stroke + '" stroke-width="1.5"/>';
+          let ty = y + padY + tFs;
+          for (const l of lines) {
+            out += '<text x="' + (x + boxW / 2) + '" y="' + ty + '" text-anchor="middle" font-size="' + l.fs +
+              '" font-weight="' + l.w + '" fill="' + l.fill + '">' + esc(l.t) + "</text>";
+            ty += lh;
+          }
+          return { svg: out, w: boxW, h: boxH, x, y };
+        }
+
+        function defs() {
+          const mk = (id, color) =>
+            '<marker id="' + id + '" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">' +
+            '<path d="M1 1 L9 5 L1 9 z" fill="' + color + '"/></marker>';
+          return "<defs>" + mk("arrB", C.blue) + mk("arrM", C.muted) + "</defs>";
+        }
+
+        function svgWrap(w, h, inner) {
+          return '<svg width="100%" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="xMidYMid meet" ' +
+            'style="display:block;overflow:visible;max-height:' + h + 'px" xmlns="http://www.w3.org/2000/svg">' +
+            defs() + inner + "</svg>";
+        }
+
+        function buildWide(W, t, cjk) {
+          const margin = 26;
+          const nodeW = Math.min(272, (W - margin * 2 - 70) / 2);
+          const topY = 12;
+          const clientX = margin, hostX = W - margin - nodeW;
+          const cloudX = (W - nodeW) / 2;
+          const cN = node(clientX, topY, nodeW, t.client, "client", cjk);
+          const hN = node(hostX, topY, nodeW, t.host, "host", cjk);
+          const rowH = Math.max(cN.h, hN.h);
+          const cloudY = topY + rowH + 196;
+          const clN = node(cloudX, cloudY, nodeW, t.cloud, "cloud", cjk);
+          const H = cloudY + clN.h + 26;
+
+          const rowMidY = topY + rowH / 2;
+          // e1: client <-> host (top)
+          const e1y = rowMidY;
+          const e1x1 = clientX + nodeW, e1x2 = hostX;
+          const e1 = '<line x1="' + e1x1 + '" y1="' + e1y + '" x2="' + e1x2 + '" y2="' + e1y +
+            '" stroke="' + C.blue + '" stroke-width="2.4" marker-start="url(#arrB)" marker-end="url(#arrB)"/>';
+          const e1lbl = label((e1x1 + e1x2) / 2, e1y, t.e1t, t.e1b, true, cjk ? 12 : 26, cjk);
+
+          // e2: host -> cloud (right side)
+          const hBx = hostX + nodeW * 0.42, hBy = topY + rowH;
+          const cRx = cloudX + nodeW * 0.72, cRy = cloudY;
+          const e2 = '<line x1="' + hBx + '" y1="' + hBy + '" x2="' + cRx + '" y2="' + cRy +
+            '" stroke="' + C.muted + '" stroke-width="2" stroke-dasharray="1.5 6" stroke-linecap="round" marker-end="url(#arrM)"/>';
+          const e2lbl = label((hBx + cRx) / 2 + 24, (hBy + cRy) / 2, t.e2t, t.e2b, false, cjk ? 11 : 22, cjk);
+
+          // e3: cloud -> client (left side)
+          const cLx = cloudX + nodeW * 0.28, cLy = cloudY;
+          const clBx = clientX + nodeW * 0.58, clBy = topY + rowH;
+          const e3 = '<line x1="' + cLx + '" y1="' + cLy + '" x2="' + clBx + '" y2="' + clBy +
+            '" stroke="' + C.muted + '" stroke-width="2" stroke-dasharray="1.5 6" stroke-linecap="round" marker-end="url(#arrM)"/>';
+          const e3lbl = label((cLx + clBx) / 2 - 24, (cLy + clBy) / 2, t.e3t, t.e3b, false, cjk ? 11 : 20, cjk);
+
+          const inner = e1 + e2 + e3 + e2lbl.svg + e3lbl.svg + e1lbl.svg + cN.svg + hN.svg + clN.svg;
+          return svgWrap(W, H, inner);
+        }
+
+        function buildNarrow(W, t, cjk) {
+          const leftM = 14, gutter = 46;
+          const nodeW = W - leftM - gutter;
+          const cx = leftM + nodeW / 2;
+          let y = 10;
+          const cN = node(leftM, y, nodeW, t.client, "client", cjk);
+          const clientBottom = y + cN.h;
+          const gap = 116;
+          const hostY = clientBottom + gap;
+          const hN = node(leftM, hostY, nodeW, t.host, "host", cjk);
+          const hostBottom = hostY + hN.h;
+          const cloudY = hostBottom + gap;
+          const clN = node(leftM, cloudY, nodeW, t.cloud, "cloud", cjk);
+          const cloudBottom = cloudY + clN.h;
+
+          const lblMax = cjk ? Math.floor(nodeW / 12) : Math.floor(nodeW / 6.6);
+
+          // e1 client<->host
+          const e1 = '<line x1="' + cx + '" y1="' + clientBottom + '" x2="' + cx + '" y2="' + hostY +
+            '" stroke="' + C.blue + '" stroke-width="2.4" marker-start="url(#arrB)" marker-end="url(#arrB)"/>';
+          const e1lbl = label(cx, (clientBottom + hostY) / 2, t.e1t, t.e1b, true, lblMax, cjk);
+          // e2 host->cloud
+          const e2 = '<line x1="' + cx + '" y1="' + hostBottom + '" x2="' + cx + '" y2="' + cloudY +
+            '" stroke="' + C.muted + '" stroke-width="2" stroke-dasharray="1.5 6" stroke-linecap="round" marker-end="url(#arrM)"/>';
+          const e2lbl = label(cx, (hostBottom + cloudY) / 2, t.e2t, t.e2b, false, lblMax, cjk);
+
+          // e3 cloud->client : down to a label below cloud, then up the right gutter into client
+          const e3lblCy = cloudBottom + 66;
+          const e3lbl = label(cx, e3lblCy, t.e3t, t.e3b, false, lblMax, cjk);
+          const gx = W - 20;
+          const clientRight = leftM + nodeW;
+          const clientMidY = 10 + cN.h * 0.5;
+          const seg1 = '<line x1="' + cx + '" y1="' + cloudBottom + '" x2="' + cx + '" y2="' + (e3lbl.y) +
+            '" stroke="' + C.muted + '" stroke-width="2" stroke-dasharray="1.5 6" stroke-linecap="round"/>';
+          const seg2 = '<path d="M ' + (e3lbl.x + e3lbl.w) + ' ' + e3lblCy + ' H ' + (gx - 12) +
+            ' Q ' + gx + ' ' + e3lblCy + ' ' + gx + ' ' + (e3lblCy - 12) +
+            ' V ' + (clientMidY + 12) + ' Q ' + gx + ' ' + clientMidY + ' ' + (gx - 12) + ' ' + clientMidY +
+            ' H ' + (clientRight + 2) + '" fill="none" stroke="' + C.muted +
+            '" stroke-width="2" stroke-dasharray="1.5 6" stroke-linecap="round" marker-end="url(#arrM)"/>';
+
+          const H = e3lblCy + e3lbl.h / 2 + 16;
+          const inner = e1 + e2 + seg1 + seg2 + e1lbl.svg + e2lbl.svg + e3lbl.svg + cN.svg + hN.svg + clN.svg;
+          return svgWrap(W, H, inner);
+        }
+
+        let curLang = "en";
+        function render(lang) {
+          if (lang) curLang = lang;
+          const host = document.getElementById("archGraph");
+          if (!host) return;
+          const t = STR[curLang] || STR.en;
+          const cjk = curLang === "zh-Hant";
+          const W = Math.max(320, Math.round(host.clientWidth));
+          host.innerHTML = (W < 720) ? buildNarrow(W, t, cjk) : buildWide(W, t, cjk);
+        }
+
+        window.__renderArchGraph = render;
+
+        let raf = 0;
+        window.addEventListener("resize", () => {
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => render());
+        });
+        if (document.readyState !== "loading") render();
+        else document.addEventListener("DOMContentLoaded", () => render());
+      })();
+    </script>
+  </body>
+</html>

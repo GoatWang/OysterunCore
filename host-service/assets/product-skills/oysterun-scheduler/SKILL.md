@@ -30,7 +30,7 @@ node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs list
 ## Commands
 
 - `list`
-- `create`
+- `create --session-ref <display-name> --prompt <text> --frequency daily --time HH:mm`
 - `get`
 - `update`
 - `enable`
@@ -39,6 +39,28 @@ node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs list
 - `test-run`
 - `runs`
 - `run-log`
+
+For Host scheduler rows, `create` targets a portable outside-scheduler setup
+snapshot. In a live Host session, omit the target to use the current session's
+saved setup, or pass `--session-ref <display-name>` for another session. Use
+rule fields such as `--frequency daily --time HH:mm`, `--frequency weekly
+--weekdays monday,wednesday --time HH:mm`, or `--frequency once --run-at
+<ISO time>`. Do not use `--interval` for Host scheduler rows; use `chat loop
+create --interval ...` for in-session loops.
+
+## P183/P307 Runtime Authority
+
+P183/P307 runtime authority alignment means every command in this skill is
+callable from a live Host session through Host-injected product runtime
+environment:
+`OYSTERUN_HOST_ORIGIN`, `OYSTERUN_CAPABILITY_TOKEN`, `OYSTERUN_SESSION_ID`,
+`OYSTERUN_AGENT_ID`, and `OYSTERUN_CLI_BIN`. Inside a live Host session,
+helper scripts and direct command examples must execute the injected CLI from
+`OYSTERUN_CLI_BIN`; do not call bare `oysterun`, because it may resolve to a
+globally installed package with older command behavior. That authority is
+Host-wide for installed Oysterun product skills. Do not ask an in-session agent
+to run dashboard login for these commands. Explicit `--token` is the operator
+override; external operator shells may still use dashboard CLI auth.
 
 ## Guardrails
 

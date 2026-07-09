@@ -10,6 +10,7 @@ parse_common_args "$@"
 configure_stack_runtime
 require_host_port_configured
 ensure_runtime_dirs
+append_service_control_audit "service_start" "attempt" "script=tool_scripts/start_oysterun.sh"
 cleanup_legacy_home_port_host_jobs_if_needed
 sync_host_stack_port_config
 
@@ -18,6 +19,7 @@ STARTED_HOST=0
 cleanup_failed_start() {
   trap - ERR
 
+  append_service_control_audit "service_start" "failed" "script=tool_scripts/start_oysterun.sh;started_host=${STARTED_HOST}"
   if [[ "${STARTED_HOST}" -eq 1 ]]; then
     stop_managed_process "${HOST_LABEL}" "${HOST_PID_FILE}" "Host service" >/dev/null 2>&1 || true
   fi
@@ -27,11 +29,7 @@ cleanup_failed_start() {
 
 trap cleanup_failed_start ERR
 
-NODE_BIN="$(resolve_command_path node)"
-if [[ -z "${NODE_BIN}" ]]; then
-  echo "[oysterun-service] node is required but was not found in PATH" >&2
-  exit 1
-fi
+NODE_BIN="$(require_node_runtime "Host start")"
 
 ensure_stack_dashboard_credentials "${NODE_BIN}"
 quarantine_legacy_routec_runtime_env_files_if_present "${NODE_BIN}"
@@ -55,8 +53,6 @@ fi
 ensure_dashboard_static_app "${NODE_BIN}"
 ensure_routec_web_chat_static_app
 
-: > "${HOST_LOG}"
-
 if [[ -n "${PERSISTENT_PLIST}" ]]; then
   current_pid="$(launchctl_pid_for_label "${HOST_LABEL}")"
   if [[ -n "${current_pid}" ]] && pid_is_running "${current_pid}"; then
@@ -70,6 +66,7 @@ if [[ -n "${PERSISTENT_PLIST}" ]]; then
   stop_stale_stack_host_state_holders "before launchd start"
   clear_host_origin_file
   ensure_port_available "${HOST_PORT}"
+  prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
 
   echo "[oysterun-service] Starting ${STACK_NAME} persistent LaunchAgent on ${HOST_URL}..."
   bootstrap_launch_agent_plist "${PERSISTENT_PLIST}"
@@ -81,7 +78,8 @@ else
   collect_routec_host_env_args
   if is_macos; then
     echo "[oysterun-service] Starting ${STACK_NAME} Host service on ${HOST_URL}..."
-    printf -v HOST_COMMAND 'export PATH=%q; cd %q && exec /usr/bin/env OYSTERUN_CONFIG_DIR=%q OYSTERUN_PORT=%q OYSTERUN_REPO_ROOT=%q' "${LAUNCH_PATH}" "${HOST_DIR}" "${CONFIG_DIR}" "${HOST_PORT}" "${ROOT_DIR}"
+    prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
+    printf -v HOST_COMMAND 'export PATH=%q; cd %q && exec /usr/bin/env OYSTERUN_CONFIG_DIR=%q OYSTERUN_PORT=%q OYSTERUN_REPO_ROOT=%q OYSTERUN_NODE_BIN=%q' "${LAUNCH_PATH}" "${HOST_DIR}" "${CONFIG_DIR}" "${HOST_PORT}" "${ROOT_DIR}" "${NODE_BIN}"
     if (( ${#ROUTEC_HOST_ENV_ARGS[@]} > 0 )); then
       for routec_host_env_arg in "${ROUTEC_HOST_ENV_ARGS[@]}"; do
         printf -v HOST_COMMAND '%s %q' "${HOST_COMMAND}" "${routec_host_env_arg}"
@@ -98,6 +96,7 @@ else
     write_host_origin_file "${HOST_PID}" "${HOST_LABEL}"
   else
     echo "[oysterun-service] Starting ${STACK_NAME} pid-file Host service on ${HOST_URL}..."
+    prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
     (
       trap '' HUP
       export PATH="${LAUNCH_PATH}"
@@ -106,6 +105,7 @@ else
         OYSTERUN_CONFIG_DIR="${CONFIG_DIR}" \
         OYSTERUN_PORT="${HOST_PORT}" \
         OYSTERUN_REPO_ROOT="${ROOT_DIR}" \
+        OYSTERUN_NODE_BIN="${NODE_BIN}" \
         "${ROUTEC_HOST_ENV_ARGS[@]}" \
         "${NODE_BIN}" server.mjs
     ) >> "${HOST_LOG}" 2>&1 &
@@ -120,6 +120,7 @@ else
 fi
 
 write_current_routec_stack_readiness "tool_scripts/start_oysterun.sh" >/dev/null
+append_service_control_audit "service_start" "done" "script=tool_scripts/start_oysterun.sh;host_pid=${HOST_PID}"
 
 trap - ERR
 

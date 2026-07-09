@@ -42,12 +42,18 @@ for stack in "${TARGET_STACKS[@]}"; do
 
   if ! is_macos; then
     echo "[oysterun-service] Linux stack ${STACK_NAME} has no launchd LaunchAgent to uninstall."
+    stop_stale_stack_host_state_holders "during service uninstall"
+    rm -f "${HOST_PID_FILE}"
+    clear_host_origin_file
+    echo "[oysterun-service] Cleaned runtime service state for ${STACK_NAME}."
     continue
   fi
 
   local_plist_path="$(launch_agent_plist_path_for_label "${HOST_LABEL}")"
   if launch_service_is_loaded "${HOST_LABEL}"; then
     bootout_launch_agent_service "${HOST_LABEL}"
+  else
+    echo "[oysterun-service] LaunchAgent already absent for ${STACK_NAME}: ${HOST_LABEL}"
   fi
   stop_stale_stack_host_state_holders "during LaunchAgent uninstall"
 

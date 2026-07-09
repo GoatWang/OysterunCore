@@ -69,6 +69,9 @@ const ROUTEC_BODY_KEYWORD_SEARCH_CATEGORY_COMPATIBILITY = new Map([
   ["control.cancel.request", "control.request"],
   ["control.cancel.outcome", "control.outcome"],
 ]);
+const ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION =
+  "routec.p180_host_owner_message_neighbors.v1";
+const ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS = 20_000;
 
 function isRouteCChatLivenessDiagnosticsEnabled() {
   return readConfig().debug_routec_chat_liveness_diagnostics_enabled === true;
@@ -3132,6 +3135,196 @@ function boundRoomEventsInStreamOrder(store, binding) {
     previousSeq = seq;
   }
   return events;
+}
+
+function isRouteCHostOwnerTimelineMessageEvent(event) {
+  return (
+    event?.type === MATRIX_ROOM_MESSAGE_EVENT_TYPE &&
+    event?.unsigned?.routec_matrix_actor_key === "human" &&
+    event?.unsigned?.routec_matrix_actor_kind === "human"
+  );
+}
+
+function routeCHostOwnerNeighborEvent(event) {
+  if (!event) return null;
+  return {
+    event_id: event.event_id,
+    routec_stream_seq: eventStreamSeq(event),
+    origin_server_ts: Number.isFinite(event.origin_server_ts)
+      ? event.origin_server_ts
+      : null,
+  };
+}
+
+export function readRouteCHostOwnerMessageNeighbors({
+  binding,
+  roomId,
+  anchorEventId = null,
+  anchorPosition = null,
+}) {
+  requireBinding(binding);
+  const normalizedRoomId = normalizeNonEmptyString(roomId);
+  if (!normalizedRoomId) {
+    return {
+      status: "missing_identity",
+      error: "matrix_room_id required",
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    };
+  }
+  if (normalizedRoomId !== binding.matrix_room_id) {
+    return {
+      status: "forbidden",
+      error: "host owner neighbor room binding does not match session",
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    };
+  }
+
+  const normalizedAnchorEventId = normalizeNonEmptyString(anchorEventId);
+  const normalizedAnchorPosition = normalizeNonEmptyString(anchorPosition);
+  const latestAnchorRequested =
+    !normalizedAnchorEventId && normalizedAnchorPosition === "latest";
+  if (
+    normalizedAnchorPosition &&
+    normalizedAnchorPosition !== "latest"
+  ) {
+    return {
+      status: "invalid_anchor",
+      error: "anchor_position must be latest when supplied",
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    };
+  }
+  if (!normalizedAnchorEventId && !latestAnchorRequested) {
+    return {
+      status: "missing_identity",
+      error: "anchor_event_id or anchor_position=latest required",
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    };
+  }
+
+  const store = readStore();
+  requireBranchCopySourceRoom(store, binding);
+  const events = boundRoomEventsInStreamOrder(store, binding);
+  if (events.length > ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS) {
+    return {
+      status: "too_many_events_fail_closed",
+      error: "host owner neighbor lookup exceeded bounded room event limit",
+      event_count: events.length,
+      max_event_count: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    };
+  }
+
+  const hostOwnerEvents = events.filter(isRouteCHostOwnerTimelineMessageEvent);
+  if (hostOwnerEvents.length === 0) {
+    return {
+      status: "ok",
+      session_id: binding.host_session_id,
+      matrix_room_id: binding.matrix_room_id,
+      anchor: latestAnchorRequested
+        ? {
+            anchor_position: "latest",
+            event_id: null,
+            routec_stream_seq: null,
+            host_owner_message: false,
+          }
+        : null,
+      previous: null,
+      next: null,
+      boundaries: {
+        no_host_owner_messages: true,
+        at_first_host_owner_message: true,
+        at_latest_host_owner_message: true,
+      },
+      proof: {
+        schema_version: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION,
+        lookup_source: "routec_host_owned_matrix_storage_room_event_index",
+        order_by: "routec_stream_seq",
+        actor_key: "human",
+        actor_kind: "human",
+        stable_actor_metadata_required: true,
+        display_name_used_for_ownership: false,
+        body_scan_used_for_ownership: false,
+        raw_event_payload_returned: false,
+        message_body_returned: false,
+      },
+    };
+  }
+
+  let anchorEvent = null;
+  let anchorSeq = null;
+  if (normalizedAnchorEventId) {
+    anchorEvent =
+      store.events_by_id[normalizedAnchorEventId] ||
+      events.find((event) => event.event_id === normalizedAnchorEventId) ||
+      null;
+    if (!anchorEvent || anchorEvent.room_id !== binding.matrix_room_id) {
+      return {
+        status: "anchor_not_found",
+        error: "host owner neighbor anchor event not found in bound room",
+        matrix_event_id: normalizedAnchorEventId,
+        raw_event_payload_returned: false,
+        message_body_returned: false,
+      };
+    }
+    anchorSeq = eventStreamSeq(anchorEvent);
+  } else {
+    anchorSeq =
+      events.length > 0 ? eventStreamSeq(events[events.length - 1]) + 1 : 1;
+  }
+
+  const previous =
+    [...hostOwnerEvents]
+      .reverse()
+      .find((event) => eventStreamSeq(event) < anchorSeq) || null;
+  const next =
+    hostOwnerEvents.find((event) => eventStreamSeq(event) > anchorSeq) || null;
+  const anchorHostOwnerMessage =
+    Boolean(anchorEvent) && isRouteCHostOwnerTimelineMessageEvent(anchorEvent);
+
+  return {
+    status: "ok",
+    session_id: binding.host_session_id,
+    matrix_room_id: binding.matrix_room_id,
+    anchor: latestAnchorRequested
+      ? {
+          anchor_position: "latest",
+          event_id: null,
+          routec_stream_seq: anchorSeq,
+          host_owner_message: false,
+        }
+      : {
+          anchor_position: "event",
+          event_id: anchorEvent.event_id,
+          routec_stream_seq: anchorSeq,
+          host_owner_message: anchorHostOwnerMessage,
+        },
+    previous: routeCHostOwnerNeighborEvent(previous),
+    next: routeCHostOwnerNeighborEvent(next),
+    boundaries: {
+      no_host_owner_messages: false,
+      at_first_host_owner_message: previous === null,
+      at_latest_host_owner_message: next === null,
+    },
+    proof: {
+      schema_version: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION,
+      lookup_source: "routec_host_owned_matrix_storage_room_event_index",
+      order_by: "routec_stream_seq",
+      searched_event_count: events.length,
+      host_owner_message_count: hostOwnerEvents.length,
+      actor_key: "human",
+      actor_kind: "human",
+      stable_actor_metadata_required: true,
+      display_name_used_for_ownership: false,
+      body_scan_used_for_ownership: false,
+      raw_event_payload_returned: false,
+      message_body_returned: false,
+    },
+  };
 }
 
 function emptyMessagesEndSeq({ direction, startSeq, toSeq }) {

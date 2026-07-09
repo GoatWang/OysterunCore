@@ -43,6 +43,20 @@ node .claude/skills/oysterun-mail/scripts/oysterun_mail.mjs list
 - `update`
 - `delete --confirm` or `delete --dry-run`
 
+## P183/P307 Runtime Authority
+
+P183/P307 runtime authority alignment means every command in this skill is
+callable from a live Host session through Host-injected product runtime
+environment:
+`OYSTERUN_HOST_ORIGIN`, `OYSTERUN_CAPABILITY_TOKEN`, `OYSTERUN_SESSION_ID`,
+`OYSTERUN_AGENT_ID`, and `OYSTERUN_CLI_BIN`. Inside a live Host session,
+helper scripts and direct command examples must execute the injected CLI from
+`OYSTERUN_CLI_BIN`; do not call bare `oysterun`, because it may resolve to a
+globally installed package with older command behavior. That authority is
+Host-wide for installed Oysterun product skills. Do not ask an in-session agent
+to run dashboard login for these commands. Explicit `--token` is the operator
+override; external operator shells may still use dashboard CLI auth.
+
 ## Guardrails
 
 - Do not call `/mail/send` or `/mail/items/*` directly from this skill.
@@ -59,4 +73,6 @@ The legacy capability helper remains available for scheduler or agent runtime pa
 node .claude/skills/oysterun-mail/scripts/send_mail.mjs --title "Digest ready" --body "Daily tracker finished"
 ```
 
-External operator shells should prefer `oysterun_mail.mjs` with dashboard CLI auth; live Host sessions must rely on Host-injected scoped capability env instead of dashboard tokens.
+External operator shells should prefer `oysterun_mail.mjs` with dashboard CLI
+auth; live Host sessions must rely on Host-injected product runtime env instead
+of dashboard tokens.

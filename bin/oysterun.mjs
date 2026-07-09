@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,7 @@ const serviceCommands = new Map([
   ["service:restart", "restart"],
   ["service:status", "status"],
   ["service:logs", "logs"],
+  ["service:uninstall", "uninstall"],
 ]);
 
 function run(command, args) {
@@ -55,6 +56,62 @@ function runSetup(args = []) {
 
 function runService(command, args = []) {
   run(releaseServiceScript, [command, ...args]);
+}
+
+function parseUninstallArgs(args = []) {
+  const options = {
+    confirm: null,
+    dryRun: false,
+    help: false,
+    keepConfig: false,
+    stack: null,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+    } else if (arg === "--dry-run") {
+      options.dryRun = true;
+    } else if (arg === "--keep-config") {
+      options.keepConfig = true;
+    } else if (arg === "--confirm") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--confirm requires a value");
+      }
+      options.confirm = value;
+      index += 1;
+    } else if (arg.startsWith("--confirm=")) {
+      options.confirm = arg.slice("--confirm=".length);
+    } else if (arg === "--stack") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("--stack requires production, staging, or all");
+      }
+      options.stack = value;
+      index += 1;
+    } else if (arg.startsWith("--stack=")) {
+      options.stack = arg.slice("--stack=".length);
+    } else {
+      throw new Error(`unknown uninstall argument: ${arg}`);
+    }
+  }
+
+  if (
+    options.stack !== null &&
+    !["production", "staging", "all"].includes(options.stack)
+  ) {
+    throw new Error("--stack must be production, staging, or all");
+  }
+  if (options.confirm !== null && options.confirm !== "DELETE") {
+    throw new Error("config deletion requires --confirm DELETE exactly");
+  }
+  if (options.keepConfig && options.confirm === "DELETE") {
+    throw new Error("--keep-config cannot be combined with --confirm DELETE");
+  }
+
+  return options;
 }
 
 function isNonEmptyString(value) {
@@ -120,11 +177,13 @@ Usage:
   oysterun --version
   oysterun setup [options]
   oysterun show-qr
+  oysterun uninstall [--confirm DELETE] [--keep-config] [--dry-run]
   oysterun service:start
   oysterun service:stop
   oysterun service:restart [--restore-sessions]
   oysterun service:status
   oysterun service:logs [--follow]
+  oysterun service:uninstall [--stack production|staging|all]
   oysterun <module> <action> [options]
 
 Product modules:
@@ -137,6 +196,114 @@ Install contract:
   npm install -g oysterun installs files only. It does not run setup or start
   the Host service.
 `);
+}
+
+function printUninstallHelp() {
+  console.log(`Oysterun uninstall
+
+Usage:
+  oysterun uninstall [--confirm DELETE] [--keep-config] [--dry-run]
+  oysterun uninstall --stack production|staging|all [options]
+
+Behavior:
+  - Stops/removes managed Oysterun service state where available.
+  - Preserves the config directory unless --confirm DELETE is supplied exactly.
+  - Does not delete the Default Browse Root or agent folders.
+  - Does not remove the global npm package; run npm uninstall -g oysterun after
+    service/config cleanup if you want to remove the CLI itself.
+`);
+}
+
+function readConfiguredDefaultBrowsePath() {
+  try {
+    const configPath = getConfigPath();
+    if (!existsSync(configPath)) return "";
+    const raw = readRawConfigSource();
+    return typeof raw.default_browse_path === "string"
+      ? raw.default_browse_path.trim()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function runUninstall(args = []) {
+  let options;
+  try {
+    options = parseUninstallArgs(args);
+  } catch (error) {
+    console.error(`oysterun uninstall: ${error.message}`);
+    console.error("Run 'oysterun uninstall --help' for usage.");
+    process.exit(2);
+  }
+
+  if (options.help) {
+    printUninstallHelp();
+    return;
+  }
+
+  const configPath = getConfigPath();
+  const configDir = dirname(configPath);
+  const defaultBrowsePath = readConfiguredDefaultBrowsePath();
+  const deleteConfig = options.confirm === "DELETE";
+  const serviceArgs = ["uninstall"];
+  if (options.stack) {
+    serviceArgs.push("--stack", options.stack);
+  }
+
+  console.log("Oysterun uninstall plan:");
+  console.log(`  Service cleanup: ${options.dryRun ? "dry-run" : "execute"}`);
+  console.log(
+    `  Config directory: ${
+      deleteConfig ? `delete ${configDir}` : `preserve ${configDir}`
+    }`
+  );
+  console.log(
+    `  Default Browse Root: preserve${
+      defaultBrowsePath ? ` ${defaultBrowsePath}` : ""
+    }`
+  );
+  console.log("  Global CLI package: preserve");
+  console.log("");
+
+  if (!deleteConfig) {
+    console.log(
+      "Config deletion is skipped. Re-run with --confirm DELETE to delete the config directory."
+    );
+  }
+  console.log(
+    "Default Browse Root and agent folders are never deleted by this command; remove them manually only if intended."
+  );
+  console.log(
+    "To remove the global CLI after cleanup, run: npm uninstall -g oysterun"
+  );
+
+  if (options.dryRun) {
+    console.log("Dry run complete: no service or config changes were made.");
+    return;
+  }
+
+  const result = spawnSync(releaseServiceScript, serviceArgs, {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: "inherit",
+  });
+  if (result.error) {
+    console.error(
+      `oysterun uninstall: failed to run service cleanup: ${result.error.message}`
+    );
+    process.exit(1);
+  }
+  if ((result.status ?? 0) !== 0) {
+    process.exit(result.status ?? 1);
+  }
+
+  if (deleteConfig) {
+    rmSync(configDir, { recursive: true, force: true });
+    console.log(`Deleted config directory: ${configDir}`);
+  } else {
+    console.log(`Preserved config directory: ${configDir}`);
+  }
 }
 
 function printConfiguredStatus(status) {
@@ -190,6 +357,9 @@ switch (command) {
     break;
   case "show-qr":
     run(process.execPath, [setupScript, "--show-qr", ...rest]);
+    break;
+  case "uninstall":
+    runUninstall(rest);
     break;
   case "help":
   case "--help":

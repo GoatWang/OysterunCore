@@ -98,6 +98,10 @@ import {
   ProviderAuthManager,
   serializeProviderAuthStatus,
 } from "./provider-auth.mjs";
+import {
+  logProviderStartupEvent,
+  preflightProviderStartup,
+} from "./provider-startup-preflight.mjs";
 import { getSessionHistory } from "./session-history.mjs";
 import {
   buildDefaultBranchName,
@@ -107,7 +111,12 @@ import {
   normalizeSessionName,
 } from "./session-name.mjs";
 import { getSessionNameCounterStore } from "./session-name-counter-store.mjs";
-import { createFolder, listFolderPage } from "./folder-browser.mjs";
+import {
+  copyDemoAgent,
+  createFolder,
+  listFolderPage,
+  validateFolderPath,
+} from "./folder-browser.mjs";
 import { attachRuntimeTurnId } from "./runtime-turn-events.mjs";
 import { TerminalSessionManager } from "./terminal-session-manager.mjs";
 import {
@@ -119,6 +128,13 @@ import {
   readHostRestartRestoreState,
   validateConsumableHostRestartRestoreState,
 } from "./restart-restore-state.mjs";
+import {
+  HOST_TELEMETRY_FEATURE_KEYS,
+  getHostTelemetryStatus,
+  recordHostTelemetryCounter,
+  recordHostTelemetryFeature,
+  startHostTelemetryScheduler,
+} from "./host-telemetry.mjs";
 import {
   LOCAL_SERVICE_CONTROL_HEADER,
   ensureLocalServiceControlToken,
@@ -155,6 +171,7 @@ import {
   copyRouteCMatrixRoomTimeline,
   ensureRouteCMatrixRoomStorage,
   getRouteCMatrixRoomTimelineReplaySourceProof,
+  readRouteCHostOwnerMessageNeighbors,
   readRouteCMatrixToolEventDetail,
   runRouteCMatrixStorageWriteBatch,
 } from "./routec-matrix-storage-adapter.mjs";
@@ -215,6 +232,7 @@ const QRErrorCorrectLevel = require(
   "qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel"
 );
 const REPO_ROOT = resolve(__dirname, "..");
+const OYSTERUN_PRODUCT_CLI_BIN = resolve(REPO_ROOT, "bin", "oysterun.mjs");
 const STATIC_ROOT = join(__dirname, "..", "static");
 const ROUTEC_WEB_CHAT_DIST_ROOT = resolve(
   __dirname,
@@ -2645,6 +2663,7 @@ function buildMailCreateInputFromBody(body, grant) {
     pickMailBodyString(body, "recipient_user_id", "recipientUserId") ||
     grant.recipient_user_id;
   const boundSessionId = normalizeString(grant?.constraints?.session_id);
+  const isLiveSessionGrant = grant.grant_kind === "live_session";
   const sessionId = pickMailBodyString(body, "session_id", "sessionId");
   const scheduleId = pickMailBodyString(body, "schedule_id", "scheduleId");
   const scheduleRunId = pickMailBodyString(
@@ -2668,16 +2687,18 @@ function buildMailCreateInputFromBody(body, grant) {
     expected: grant.schedule_run_id,
     fieldName: "schedule_run_id",
   });
-  assertGrantBoundMailField({
-    value: agentId,
-    expected: grant.agent_id,
-    fieldName: "agent_id",
-  });
-  assertGrantBoundMailField({
-    value: sessionId,
-    expected: boundSessionId,
-    fieldName: "session_id",
-  });
+  if (!isLiveSessionGrant) {
+    assertGrantBoundMailField({
+      value: agentId,
+      expected: grant.agent_id,
+      fieldName: "agent_id",
+    });
+    assertGrantBoundMailField({
+      value: sessionId,
+      expected: boundSessionId,
+      fieldName: "session_id",
+    });
+  }
   return {
     id: pickMailBodyString(body, "id"),
     recipientUserId,
@@ -2694,8 +2715,8 @@ function buildMailCreateInputFromBody(body, grant) {
     sourceType: pickMailBodyString(body, "source_type", "sourceType"),
     sourceName: pickMailBodyString(body, "source_name", "sourceName"),
     sourceRef: pickMailBodyString(body, "source_ref", "sourceRef"),
-    agentId: grant.agent_id || agentId,
-    sessionId: boundSessionId || sessionId,
+    agentId: agentId || grant.agent_id,
+    sessionId: sessionId || boundSessionId,
     scheduleId: grant.schedule_id || scheduleId,
     scheduleRunId: grant.schedule_run_id || scheduleRunId,
     siteUrl: pickMailBodyString(body, "site_url", "siteUrl"),
@@ -2713,7 +2734,11 @@ function buildMailCreateInputFromBody(body, grant) {
   };
 }
 
-function buildDashboardMailCreateInputFromBody(body, actorId) {
+function buildDashboardMailCreateInputFromBody(
+  body,
+  actorId,
+  actorType = "dashboard"
+) {
   return {
     id: pickMailBodyString(body, "id"),
     recipientUserId:
@@ -2747,7 +2772,7 @@ function buildDashboardMailCreateInputFromBody(body, actorId) {
     metadata: body.metadata,
     idempotencyKey: pickMailBodyString(body, "idempotency_key", "idempotencyKey"),
     links: normalizeMailLinksForStore(body.links || []),
-    actorType: "dashboard",
+    actorType,
     actorId,
   };
 }
@@ -2828,16 +2853,6 @@ function authenticateMailCreateCapability(req, res) {
         error: "Mail create capability disabled",
         capability_scope: MAIL_CREATE_SCOPE,
         reason: "live_session_not_running",
-        raw_token_returned: false,
-      });
-      return null;
-    }
-    if (session.runtimeCapabilities?.[MAIL_CREATE_SCOPE] !== true) {
-      respond(res, 403, {
-        error: "Mail create capability disabled",
-        capability_scope: MAIL_CREATE_SCOPE,
-        reason: "runtime_capability_disabled",
-        session_id: session.id,
         raw_token_returned: false,
       });
       return null;
@@ -3252,6 +3267,7 @@ const telegramBridgeManager = createTelegramBridgeManager({
   logger: console,
 });
 let tunnelAgent = null;
+let hostTelemetryScheduler = null;
 
 /**
  * WebSocket subscribers per live session.
@@ -3887,6 +3903,7 @@ sessionManager.on("runtimeEvent", (agentId, event) => {
   const enrichedEvent = ensurePersistableEventFields(
     attachRuntimeTurnId(event, () => null)
   );
+  recordRuntimeEventTelemetry(enrichedEvent);
   const routeCSemanticRuntimeTypes = new Set([
     "message.assistant",
     "message.thinking",
@@ -4110,18 +4127,18 @@ function ensureTelegramMockRouteCMatrixBinding(session, reason) {
   };
 }
 
-function materializeRouteCMatrixBindingForSessionSend(session) {
+function materializeRouteCMatrixBindingForLiveSession(session, reason) {
   if (!session || typeof session !== "object") {
-    throw new Error("Route C clean-chat send requires a live Host session");
+    throw new Error("Route C Matrix binding requires a live Host session");
   }
   const sessionId = typeof session.id === "string" ? session.id.trim() : "";
   const agentId =
     typeof session.agentId === "string" ? session.agentId.trim() : "";
   if (!sessionId) {
-    throw new Error("Route C clean-chat send requires session.id");
+    throw new Error("Route C Matrix binding requires session.id");
   }
   if (!agentId) {
-    throw new Error("Route C clean-chat send requires session.agentId");
+    throw new Error("Route C Matrix binding requires session.agentId");
   }
 
   let binding = getRouteCMatrixRoomBinding(sessionId);
@@ -4134,29 +4151,58 @@ function materializeRouteCMatrixBindingForSessionSend(session) {
   }
   if (!binding || binding.host_session_id !== sessionId) {
     throw new Error(
-      "Route C clean-chat send could not materialize a session binding"
+      "Route C Matrix binding could not materialize a session binding"
     );
   }
   if (binding.host_agent_id !== agentId) {
     throw new Error(
-      "Route C clean-chat send binding agent did not match the live session"
+      "Route C Matrix binding agent did not match the live session"
     );
   }
   if (
     typeof binding.matrix_room_id !== "string" ||
     !binding.matrix_room_id.trim()
   ) {
-    throw new Error("Route C clean-chat send binding is missing matrix_room_id");
+    throw new Error("Route C Matrix binding is missing matrix_room_id");
   }
 
   const matrixStorage = ensureRouteCMatrixRoomStorage({ binding });
   return {
-    status: "routec_matrix_binding_ready_for_session_send",
     binding,
     matrix_storage: matrixStorage,
     routec_matrix_binding_materialized_from_live_session:
       materializedFromLiveSession,
     routec_matrix_binding_reused: materializedFromLiveSession !== true,
+    reason,
+  };
+}
+
+function materializeRouteCMatrixBindingForSessionStart(session) {
+  const proof = materializeRouteCMatrixBindingForLiveSession(
+    session,
+    "session_start_response"
+  );
+  return {
+    status: "routec_matrix_binding_ready_for_session_start",
+    routec_matrix_binding_ready: true,
+    routec_matrix_binding_materialized_before_session_start_response: true,
+    chat_shell_ready: session?.chatShellReady === true,
+    provider_ready: session?.providerReady === true,
+    ...proof,
+    provider_delivery_attempted: false,
+    transcript_db_fallback_used: false,
+    host_db_transcript_product_truth: false,
+  };
+}
+
+function materializeRouteCMatrixBindingForSessionSend(session) {
+  const proof = materializeRouteCMatrixBindingForLiveSession(
+    session,
+    "session_send"
+  );
+  return {
+    status: "routec_matrix_binding_ready_for_session_send",
+    ...proof,
     provider_delivery_attempted: false,
     transcript_db_fallback_used: false,
     host_db_transcript_product_truth: false,
@@ -5139,6 +5185,75 @@ function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function recordTelemetryCounter(key, amount = 1) {
+  recordHostTelemetryCounter(key, amount, { logger: console });
+}
+
+function recordTelemetryFeature(key) {
+  recordHostTelemetryFeature(key, { logger: console });
+}
+
+const HOST_TELEMETRY_FEATURE_KEY_SET = new Set(HOST_TELEMETRY_FEATURE_KEYS);
+
+function isSessionControlRuntimeEvent(event = {}) {
+  const kind = normalizeString(event.control_kind || event.controlKind);
+  const family = normalizeString(event.control_family || event.controlFamily);
+  return (
+    family === "session_control" ||
+    kind === "stop" ||
+    kind === "interrupt" ||
+    kind === "restart"
+  );
+}
+
+function recordRuntimeEventTelemetry(event = {}) {
+  const semanticType =
+    normalizeString(event.semantic_type) || normalizeString(event.type);
+  if (!semanticType) return;
+  if (semanticType === "turn.completed") {
+    recordTelemetryCounter("provider_turn_completed_count");
+    return;
+  }
+  if (semanticType === "tool.call") {
+    recordTelemetryCounter("tool_call_count");
+    return;
+  }
+  if (semanticType === "tool.result" || semanticType === "tool.failure") {
+    recordTelemetryCounter("tool_result_count");
+    return;
+  }
+  if (semanticType === "tool.output") {
+    const rawBody =
+      typeof event.body === "string"
+        ? event.body
+        : typeof event.content === "string"
+          ? event.content
+          : "";
+    if (rawBody.length > 1024 * 1024) {
+      recordTelemetryCounter("large_tool_output_count");
+    }
+    return;
+  }
+  if (
+    semanticType === "control.request" &&
+    !isSessionControlRuntimeEvent(event)
+  ) {
+    recordTelemetryCounter("approval_request_count");
+    return;
+  }
+  if (
+    semanticType === "control.outcome" &&
+    !isSessionControlRuntimeEvent(event)
+  ) {
+    const outcome = normalizeString(event.control_outcome || event.outcome);
+    if (outcome === "accepted") {
+      recordTelemetryCounter("approval_accepted_count");
+    } else if (outcome === "rejected" || outcome === "denied") {
+      recordTelemetryCounter("approval_rejected_count");
+    }
+  }
+}
+
 function routeCStableHash(value) {
   return createHash("sha256").update(String(value || "")).digest("hex");
 }
@@ -5160,15 +5275,15 @@ function buildProviderModelRefreshRunnerOptions() {
     PROVIDER_MODEL_REFRESH_BACKGROUND_ENABLE_ENV
   );
   return {
-    backgroundRefreshEnabled: explicitEnable === true,
+    backgroundRefreshEnabled: explicitEnable !== false,
     backgroundRefreshSource:
       explicitEnable === null
-        ? "default_served_host_readiness_no_provider_child"
+        ? "default_product_background_24h"
         : PROVIDER_MODEL_REFRESH_BACKGROUND_ENABLE_ENV,
     backgroundRefreshDisabledReason:
       explicitEnable === false
         ? "disabled_by_explicit_env"
-        : "served_host_readiness_no_provider_child",
+        : "background_refresh_enabled_by_default",
   };
 }
 
@@ -5539,11 +5654,19 @@ function applySessionTelegramConfigRequest(session, normalizedTelegram = {}) {
 
 const AGENT_RUNTIME_CAPABILITY_NAMES = Object.freeze([
   "mail:create",
+  "mail:read",
+  "mail:update",
+  "mail:delete",
+  "notifications:read",
+  "notifications:send",
   "session:list",
   "session:read_status",
   "session:send",
   "session:create",
+  "session:update",
+  "session:control",
   "session:read_transcript",
+  "scheduler:read",
   "scheduler:run",
   "scheduler:update",
   "website:read",
@@ -5577,13 +5700,21 @@ assertNoProhibitedRuntimeCapabilities();
 
 const AGENT_RUNTIME_CAPABILITY_BACKED_API = Object.freeze({
   "mail:create": true,
+  "mail:read": true,
+  "mail:update": true,
+  "mail:delete": true,
+  "notifications:read": true,
+  "notifications:send": true,
   "session:list": true,
   "session:read_status": true,
   "session:send": true,
-  "session:create": false,
+  "session:create": true,
+  "session:update": true,
+  "session:control": true,
   "session:read_transcript": true,
-  "scheduler:run": false,
-  "scheduler:update": false,
+  "scheduler:read": true,
+  "scheduler:run": true,
+  "scheduler:update": true,
   "website:read": true,
   "website:update": true,
   "telegram:read": true,
@@ -5695,7 +5826,10 @@ function buildLiveSessionRuntimeCapabilityGrant({
   agentId,
   capabilities,
 }) {
-  const state = normalizeRuntimeCapabilityState(capabilities);
+  // P307: installed Oysterun product skills use Host-wide product runtime
+  // authority. Keep per-session capability state for UI/diagnostics, but issue
+  // live-session runtime grants with the default-on product capability bundle.
+  const state = normalizeRuntimeCapabilityState(DEFAULT_AGENT_RUNTIME_CAPABILITIES);
   const enabledScopes = listEnabledRuntimeCapabilities(state);
   const backedEnabledScopes = enabledScopes.filter(
     (name) => AGENT_RUNTIME_CAPABILITY_BACKED_API[name] === true
@@ -5722,6 +5856,9 @@ function buildLiveSessionRuntimeCapabilityGrant({
   if (!hostOrigin) {
     throw new Error("OYSTERUN_HOST_ORIGIN is required for live sessions");
   }
+  if (!existsSync(OYSTERUN_PRODUCT_CLI_BIN)) {
+    throw new Error(`Oysterun product CLI bin is required: ${OYSTERUN_PRODUCT_CLI_BIN}`);
+  }
   const { token, grant } = mailStore.createCapabilityGrant({
     grantKind: "live_session",
     actorType: "session",
@@ -5731,7 +5868,8 @@ function buildLiveSessionRuntimeCapabilityGrant({
     scopes: enabledScopes,
     constraints: {
       session_id: sessionId,
-      grant_source: "live_session_runtime_capabilities",
+      grant_source: "live_session_product_runtime_authority",
+      product_authority_scope: "host_wide_product",
     },
   });
   return {
@@ -5741,6 +5879,7 @@ function buildLiveSessionRuntimeCapabilityGrant({
       OYSTERUN_MAIL_WRITE_TOKEN: token,
       OYSTERUN_SESSION_ID: sessionId,
       OYSTERUN_AGENT_ID: agentId,
+      OYSTERUN_CLI_BIN: OYSTERUN_PRODUCT_CLI_BIN,
     },
     redactionValues: [token],
     metadata: {
@@ -5757,6 +5896,7 @@ function buildLiveSessionRuntimeCapabilityGrant({
         "OYSTERUN_MAIL_WRITE_TOKEN",
         "OYSTERUN_SESSION_ID",
         "OYSTERUN_AGENT_ID",
+        "OYSTERUN_CLI_BIN",
       ],
       mail_create_enabled: state[MAIL_CREATE_SCOPE] === true,
       raw_token_returned: false,
@@ -5802,6 +5942,10 @@ function getActiveStackName() {
     normalizeString(process.env.OYSTERUN_STACK) ||
     null
   );
+}
+
+function isBoundaryTestRuntime() {
+  return normalizeString(process.env.OYSTERUN_BOUNDARY_TEST) === "1";
 }
 
 const OYSTERUN_NPM_PACKAGE_NAME = "oysterun";
@@ -6276,22 +6420,6 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function normalizeLaunchctlLabelComponent(value, fallback = "unknown") {
-  const normalized = normalizeString(value)
-    .replace(/[^A-Za-z0-9_.-]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return normalized || fallback;
-}
-
-function buildOysterunUpdateRestartJobLabel({ stackName, operationId }) {
-  return [
-    "com.oysterun.update-restart",
-    normalizeLaunchctlLabelComponent(stackName, "stack"),
-    normalizeLaunchctlLabelComponent(operationId, "operation"),
-  ].join(".");
-}
-
 function buildUpdateOperationStateShellCommand(statePatch) {
   const statePath = getUpdateOperationStatePath(getConfigDir());
   const payload = {
@@ -6308,7 +6436,48 @@ function buildUpdateOperationStateShellCommand(statePatch) {
     "fs.mkdirSync(path.dirname(statePath), { recursive: true });",
     "fs.writeFileSync(statePath, JSON.stringify(payload, null, 2) + '\\n', 'utf8');",
   ].join(" ");
-  return `node -e ${shellQuote(script)}`;
+  return `${shellQuote(process.execPath)} -e ${shellQuote(script)}`;
+}
+
+function resolveOysterunUpdateRestartCommand() {
+  const nodeBin = process.execPath;
+  const oysterunCliScript = join(REPO_ROOT, "bin", "oysterun.mjs");
+  if (!existsSync(oysterunCliScript) || !statSync(oysterunCliScript).isFile()) {
+    throw new Error(
+      `Oysterun package restart CLI script is missing: ${oysterunCliScript}`
+    );
+  }
+  return {
+    nodeBin,
+    oysterunCliScript,
+    shellCommand: `${shellQuote(nodeBin)} ${shellQuote(oysterunCliScript)} service:restart`,
+  };
+}
+
+function buildUpdateOperationRestartClaimShellCommand({ operationId }) {
+  const statePath = getUpdateOperationStatePath(getConfigDir());
+  const script = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    `const statePath = ${JSON.stringify(statePath)};`,
+    `const operationId = ${JSON.stringify(operationId)};`,
+    "let state;",
+    "try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch (err) { console.error(`[oysterun-update] cannot read update operation state: ${err.message}`); process.exit(2); }",
+    "if (!state || state.operation_id !== operationId) { console.error('[oysterun-update] restart claim skipped: operation id mismatch'); process.exit(2); }",
+    "if (state.status !== 'restart_scheduled') { console.error(`[oysterun-update] restart claim skipped: status=${state.status}`); process.exit(2); }",
+    "const now = new Date().toISOString();",
+    "state.status = 'restart_runner_started';",
+    "state.phase = 'Restarting...';",
+    "state.running = true;",
+    "state.restart_runner = 'detached_one_shot';",
+    "state.restart_runner_started_at = now;",
+    "state.updated_at = now;",
+    "state.error = null;",
+    "state.error_redacted = true;",
+    "fs.mkdirSync(path.dirname(statePath), { recursive: true });",
+    "fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\\n', 'utf8');",
+  ].join(" ");
+  return `${shellQuote(process.execPath)} -e ${shellQuote(script)}`;
 }
 
 function buildActiveShellExecRestartSnapshot() {
@@ -6525,6 +6694,9 @@ function assertHostRestartSchedulingAvailable() {
       "Host restart is unavailable because the active stack name is not known."
     );
   }
+  if (isBoundaryTestRuntime()) {
+    throw new Error("Host restart is unavailable from boundary test runtime.");
+  }
   const restartScript = join(REPO_ROOT, "tool_scripts", "restart_oysterun.sh");
   if (!existsSync(restartScript)) {
     throw new Error(`Host restart script is missing: ${restartScript}`);
@@ -6613,6 +6785,28 @@ function buildHostRuntimeStatusPayload() {
   };
 }
 
+function serializeProviderModelRefreshResult(result = {}) {
+  return {
+    status: normalizeString(result.status) || "unknown",
+    reason: normalizeString(result.reason),
+    provider: normalizeString(result.provider),
+    source: normalizeString(result.source),
+    providers: Array.isArray(result.providers)
+      ? result.providers.map((entry) => ({
+          provider: normalizeString(entry.provider),
+          status: normalizeString(entry.status) || "unknown",
+          reason: normalizeString(entry.reason),
+          model_count: Number.isInteger(entry.model_count)
+            ? entry.model_count
+            : null,
+          error: normalizeString(entry.error),
+        }))
+      : [],
+    params_path: normalizeString(result.params_path),
+    secret_fields_redacted: true,
+  };
+}
+
 async function scheduleOysterunPackageUpdate() {
   const stackName = getActiveStackName();
   const resolvedChannel = normalizeOysterunUpdateChannel();
@@ -6689,34 +6883,48 @@ async function scheduleOysterunPackageUpdate() {
     running: false,
     error: "npm install succeeded but Host restart scheduling failed.",
   });
-  const restartJobLabel = buildOysterunUpdateRestartJobLabel({
-    stackName,
+  let restartCommand;
+  try {
+    restartCommand = resolveOysterunUpdateRestartCommand();
+  } catch (err) {
+    const message = err?.message || "Host restart scheduling failed.";
+    writeUpdateOperationState(
+      {
+        ...operationState,
+        status: "restart_schedule_failed",
+        phase: "Updated, restart required",
+        running: false,
+        error: message,
+        error_redacted: true,
+      },
+      { configDir: getConfigDir() }
+    );
+    throw err;
+  }
+  const restartClaimCommand = buildUpdateOperationRestartClaimShellCommand({
     operationId: operationState.operation_id,
   });
-  const restartJobCommand = [
-    "set -euo pipefail",
-    'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
-    `export OYSTERUN_RELEASE_STACK=${shellQuote(stackName)}`,
-    `export OYSTERUN_STACK=${shellQuote(stackName)}`,
-    `echo "[oysterun-update] restart job start $(date -Is)"`,
-    "oysterun service:restart",
-  ].join("\n");
   const command = [
     "set -euo pipefail",
     'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
-    `echo "[oysterun-update] start $(date -Is)"`,
+    `export OYSTERUN_NODE_BIN=${shellQuote(restartCommand.nodeBin)}`,
+    `echo "[oysterun-update] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
     `npm install -g ${shellQuote(packageSpec)} --prefer-online${registryArg} || { ${installFailedStateCommand}; exit 1; }`,
-    `echo "[oysterun-update] npm install complete $(date -Is)"`,
+    `echo "[oysterun-update] npm install complete $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
     restartPhaseStateCommand,
-    `echo "[oysterun-update] scheduling restart job ${restartJobLabel} $(date -Is)"`,
-    `launchctl submit -l ${shellQuote(restartJobLabel)} -o ${shellQuote(logPath)} -e ${shellQuote(logPath)} -- /bin/zsh -lc ${shellQuote(restartJobCommand)} || { ${restartFailedStateCommand}; exit 1; }`,
-    `echo "[oysterun-update] restart job scheduled ${restartJobLabel} $(date -Is)"`,
+    `echo "[oysterun-update] one-shot restart runner claim $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
+    `if ${restartClaimCommand}; then echo "[oysterun-update] restart runner start $(date -u +%Y-%m-%dT%H:%M:%SZ)"; ${restartCommand.shellCommand} || { ${restartFailedStateCommand}; exit 1; }; else echo "[oysterun-update] restart runner skipped because operation was already claimed or completed $(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi`,
   ].join("\n");
   setTimeout(() => {
     const child = spawn("bash", ["-lc", `${command} >> ${shellQuote(logPath)} 2>&1`], {
       cwd: REPO_ROOT,
       detached: true,
-      env: { ...process.env, OYSTERUN_RELEASE_STACK: stackName, OYSTERUN_STACK: stackName },
+      env: {
+        ...process.env,
+        OYSTERUN_RELEASE_STACK: stackName,
+        OYSTERUN_STACK: stackName,
+        OYSTERUN_NODE_BIN: restartCommand.nodeBin,
+      },
       stdio: "ignore",
     });
     child.unref();
@@ -6890,6 +7098,12 @@ function buildHostPreferencesPayload() {
       config.notification_sound_web_enabled !== false,
     notification_sound_app_enabled:
       config.notification_sound_app_enabled !== false,
+    daily_telemetry_enabled: config.daily_telemetry_enabled === true,
+    daily_telemetry_consent_recorded_at:
+      normalizeString(config.daily_telemetry_consent_recorded_at),
+    daily_telemetry_host_id_present:
+      Boolean(normalizeString(config.host_id)),
+    daily_telemetry: getHostTelemetryStatus({ config }),
     debug_show_capability_ui: config.debug_show_capability_ui === true,
     show_interface_style_in_session_setup_profile:
       config.show_interface_style_in_session_setup_profile === true,
@@ -7785,44 +7999,6 @@ function serializeProviderAuthRequiredError(
   };
 }
 
-function resolveSlashCommandName(text) {
-  const trimmed = normalizeString(text);
-  if (!trimmed || !trimmed.startsWith("/")) {
-    return "";
-  }
-  return trimmed.slice(1).split(/\s+/)[0].toLowerCase();
-}
-
-function isClaudeLoginSlashCommand(session, text) {
-  const providerId = session.provider || session.adapterId || "claude";
-  if (providerId !== "claude") {
-    return false;
-  }
-  return resolveSlashCommandName(text) === "login";
-}
-
-async function buildClaudeLoginSlashCommandResponse(session) {
-  const providerId = "claude";
-  const result = await providerAuthManager.startLogin(providerId);
-  const providerAuthStatus = await providerAuthManager.getStatus(providerId);
-  const authJob = result.job;
-  let status = "provider_auth_required";
-  if (providerAuthStatus.state === "authenticated") {
-    status = "provider_authenticated";
-  } else if (authJob?.state === "running") {
-    status = "provider_auth_started";
-  }
-  return {
-    status,
-    session_id: session.id,
-    agent_id: session.agentId,
-    provider: providerId,
-    command: "login",
-    provider_auth: serializeProviderAuthStatus(providerAuthStatus),
-    auth_job: authJob,
-  };
-}
-
 function buildNormalizedConfigPayload(body = {}, runtime) {
   const normalized = {};
 
@@ -8575,6 +8751,112 @@ function requireSessionCapability(claims, sessionId, capability, res) {
   return session;
 }
 
+function buildSessionRefResolution(session, sessionRef, matchedBy) {
+  return {
+    session_ref: sessionRef,
+    matched_by: matchedBy,
+    resolved_session_id: session.id,
+    session_id: session.id,
+    session_name: session.sessionName || null,
+    agent_id: session.agentId,
+  };
+}
+
+function sessionRefResolutionResponseFields(resolution) {
+  if (!resolution) return {};
+  return {
+    resolved_session_id: resolution.resolved_session_id,
+    session_ref_resolution: resolution,
+  };
+}
+
+function resolveLiveSessionReferenceOrRespond({ sessionId, sessionRef, res }) {
+  const normalizedSessionId = normalizeString(sessionId);
+  if (normalizedSessionId) {
+    return { sessionId: normalizedSessionId, resolution: null };
+  }
+
+  const rawSessionRef = normalizeString(sessionRef);
+  if (!rawSessionRef) {
+    respond(res, 400, {
+      error: "session_id or session_ref required",
+      reason: "session_target_required",
+    });
+    return null;
+  }
+
+  const exactSession = sessionManager.getSession(rawSessionRef);
+  if (exactSession) {
+    return {
+      sessionId: exactSession.id,
+      resolution: buildSessionRefResolution(
+        exactSession,
+        rawSessionRef,
+        "session_id"
+      ),
+    };
+  }
+
+  const normalizedSessionName = normalizeSessionName(rawSessionRef);
+  if (!normalizedSessionName) {
+    respond(res, 400, {
+      error: "session_ref must be a non-empty live session id or display name",
+      reason: "invalid_session_ref",
+      session_ref: rawSessionRef,
+    });
+    return null;
+  }
+
+  const matches = sessionManager
+    .list()
+    .filter(
+      (entry) => normalizeSessionName(entry.sessionName) === normalizedSessionName
+    );
+
+  if (matches.length === 0) {
+    respond(res, 404, {
+      error: "Session reference not found",
+      reason: "session_ref_not_found",
+      session_ref: rawSessionRef,
+    });
+    return null;
+  }
+
+  if (matches.length > 1) {
+    respond(res, 409, {
+      error: "Session reference is ambiguous",
+      reason: "session_ref_ambiguous",
+      session_ref: rawSessionRef,
+      matches: matches.map((entry) => ({
+        session_id: entry.sessionId,
+        session_name: entry.sessionName || null,
+        agent_id: entry.agentId,
+      })),
+    });
+    return null;
+  }
+
+  const session = sessionManager.getSession(matches[0].sessionId);
+  if (!session) {
+    respond(res, 404, {
+      error: "Session reference resolved to a non-running session",
+      reason: "session_ref_not_running",
+      session_ref: rawSessionRef,
+      resolved_session_id: matches[0].sessionId,
+    });
+    return null;
+  }
+
+  return {
+    sessionId: session.id,
+    resolution: buildSessionRefResolution(
+      session,
+      rawSessionRef,
+      "session_name"
+    ),
+  };
+}
+
 function serializeWorkspacePolicy(workspacePolicy) {
   if (!workspacePolicy) return null;
   const allowedPathPolicy =
@@ -8697,15 +8979,8 @@ function requireRuntimeCapability(claims, res, { scope, sessionId, agentId }) {
     });
     return null;
   }
-  if (requestedSessionId && requestedSessionId !== boundSessionId) {
-    respondRuntimeCapabilityDenied(res, 403, {
-      reason: "session_scope_mismatch",
-      capability_scope: normalizedScope,
-    });
-    return null;
-  }
-  const session = sessionManager.getSession(boundSessionId);
-  if (!session) {
+  const actorSession = sessionManager.getSession(boundSessionId);
+  if (!actorSession) {
     respondRuntimeCapabilityDenied(res, 403, {
       reason: "live_session_not_running",
       capability_scope: normalizedScope,
@@ -8713,33 +8988,48 @@ function requireRuntimeCapability(claims, res, { scope, sessionId, agentId }) {
     });
     return null;
   }
-  if (session.runtimeCapabilities?.[normalizedScope] !== true) {
+  const targetSession = requestedSessionId
+    ? sessionManager.getSession(requestedSessionId)
+    : null;
+  if (requestedSessionId && !targetSession) {
     respondRuntimeCapabilityDenied(res, 403, {
-      reason: "runtime_capability_disabled",
+      reason: "target_session_not_running",
       capability_scope: normalizedScope,
-      session_id: session.id,
+      session_id: requestedSessionId,
     });
     return null;
   }
   const boundAgentId = normalizeString(grant.agent_id);
   const requestedAgentId = normalizeString(agentId);
-  if (boundAgentId && session.agentId !== boundAgentId) {
+  if (boundAgentId && actorSession.agentId !== boundAgentId) {
     respondRuntimeCapabilityDenied(res, 403, {
       reason: "grant_agent_session_mismatch",
       capability_scope: normalizedScope,
-      session_id: session.id,
+      session_id: actorSession.id,
     });
     return null;
   }
-  if (requestedAgentId && requestedAgentId !== session.agentId) {
+  if (
+    requestedAgentId &&
+    targetSession &&
+    requestedAgentId !== targetSession.agentId
+  ) {
     respondRuntimeCapabilityDenied(res, 403, {
-      reason: "agent_scope_mismatch",
+      reason: "target_session_agent_mismatch",
       capability_scope: normalizedScope,
-      session_id: session.id,
+      session_id: targetSession.id,
+      agent_id: requestedAgentId,
     });
     return null;
   }
-  return { mode: "runtime_capability", grant, session, scope: normalizedScope };
+  return {
+    mode: "runtime_capability",
+    grant,
+    session: targetSession || actorSession,
+    actorSession,
+    targetSession,
+    scope: normalizedScope,
+  };
 }
 
 function requireDashboardOrRuntimeCapability(
@@ -8776,25 +9066,43 @@ function requireSessionCapabilityOrRuntimeScope(
   return requireSessionCapability(claims, sessionId, dashboardCapability, res);
 }
 
+function requireAgentCapabilityOrRuntimeScope(
+  claims,
+  agentId,
+  dashboardCapability,
+  runtimeScope,
+  res
+) {
+  if (isRuntimeCapabilityOnly(claims)) {
+    return requireRuntimeCapability(claims, res, {
+      scope: runtimeScope,
+      agentId,
+    });
+  }
+  if (!requireAgentCapability(claims, agentId, dashboardCapability, res)) {
+    return null;
+  }
+  return { mode: isDashboardOnly(claims) ? "dashboard" : "agent_capability" };
+}
+
+function buildRuntimeCapabilityAuditActor(auth, claims, fallback = "dashboard-admin") {
+  if (auth?.mode === "runtime_capability") {
+    return {
+      actorType: "runtime_capability",
+      actorId: auth.actorSession?.id || auth.grant?.actor_id || "live-session",
+    };
+  }
+  return {
+    actorType: "dashboard",
+    actorId: claims.user_id || fallback,
+  };
+}
+
+function getRuntimeCapabilityAuditActorId(auth, claims, fallback = "dashboard-admin") {
+  return buildRuntimeCapabilityAuditActor(auth, claims, fallback).actorId;
+}
+
 function requireRuntimeWebsiteFolderMatchesSession(auth, body, res) {
-  if (!auth || auth.mode !== "runtime_capability") return true;
-  const requestedFolder =
-    normalizeString(body?.agent_folder) || normalizeString(body?.agentFolder);
-  if (!requestedFolder) return true;
-  if (!auth.session?.cwd) {
-    respondRuntimeCapabilityDenied(res, 403, {
-      reason: "live_session_folder_unavailable",
-      session_id: auth.session?.id || null,
-    });
-    return false;
-  }
-  if (requestedFolder !== auth.session.cwd) {
-    respondRuntimeCapabilityDenied(res, 403, {
-      reason: "agent_folder_scope_mismatch",
-      session_id: auth.session.id,
-    });
-    return false;
-  }
   return true;
 }
 
@@ -10778,7 +11086,9 @@ const server = createServer(async (req, res) => {
         );
         if (result.created) {
           emitCommittedMailNotification(result.mail);
+          recordTelemetryCounter("mail_created_count");
         }
+        recordTelemetryFeature("mail");
         return respond(res, result.created ? 201 : 200, {
           ok: true,
           status: "mail_item_created",
@@ -10926,6 +11236,98 @@ const server = createServer(async (req, res) => {
           error: err.message || String(err),
           continuation_state: "unavailable",
           raw_path_exposed: false,
+        });
+      }
+    }
+
+    // ── GET /session/host-owner-message-neighbors?session_id=…&matrix_room_id=…&anchor_event_id=… ─────
+    if (
+      req.method === "GET" &&
+      path === "/session/host-owner-message-neighbors"
+    ) {
+      const sessionId = normalizeString(url.searchParams.get("session_id"));
+      const matrixRoomId = normalizeString(
+        url.searchParams.get("matrix_room_id") || url.searchParams.get("room_id")
+      );
+      const anchorEventId = normalizeString(
+        url.searchParams.get("anchor_event_id") ||
+          url.searchParams.get("event_id") ||
+          url.searchParams.get("matrix_event_id")
+      );
+      const anchorPosition = normalizeString(
+        url.searchParams.get("anchor_position")
+      );
+      if (!sessionId || !matrixRoomId || (!anchorEventId && !anchorPosition)) {
+        return respond(res, 400, {
+          status: "missing_identity",
+          error:
+            "session_id, matrix_room_id, and anchor_event_id or anchor_position=latest required",
+          raw_event_payload_returned: false,
+          message_body_returned: false,
+        });
+      }
+      const session = requireSessionCapability(
+        claims,
+        sessionId,
+        "can_chat",
+        res
+      );
+      if (!session) return;
+      let binding = null;
+      try {
+        binding = requireRouteCMatrixRoomBinding(sessionId);
+      } catch {
+        binding = null;
+      }
+      if (!binding) {
+        return respond(res, 404, {
+          status: "unavailable",
+          error: "host owner neighbor room binding not found",
+          raw_event_payload_returned: false,
+          message_body_returned: false,
+        });
+      }
+      if (binding.matrix_room_id !== matrixRoomId) {
+        return respond(res, 403, {
+          status: "forbidden",
+          error: "host owner neighbor room binding does not match session",
+          raw_event_payload_returned: false,
+          message_body_returned: false,
+        });
+      }
+      try {
+        const result = readRouteCHostOwnerMessageNeighbors({
+          binding,
+          roomId: matrixRoomId,
+          anchorEventId,
+          anchorPosition,
+        });
+        const status =
+          result.status === "missing_identity" ||
+          result.status === "invalid_anchor"
+            ? 400
+            : result.status === "forbidden"
+            ? 403
+            : result.status === "anchor_not_found"
+            ? 404
+            : result.status === "too_many_events_fail_closed"
+            ? 409
+            : 200;
+        return respond(res, status, {
+          ...result,
+          committed_transcript_truth: "matrix_room_timeline",
+          routec_host_owner_neighbor_endpoint: true,
+          host_owner_lookup_actor_source: "routec_matrix_actor_key",
+          host_owner_lookup_body_scan_used: false,
+          raw_event_payload_returned: false,
+          message_body_returned: false,
+        });
+      } catch (err) {
+        return respond(res, 503, {
+          status: "unavailable",
+          error: err.message || String(err),
+          raw_event_payload_returned: false,
+          message_body_returned: false,
         });
       }
     }
@@ -11228,7 +11630,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && path === "/cloud/notification-bootstrap") {
       if (!requireDashboardMode(claims, res)) return;
       try {
-        return respond(res, 201, await createCloudNotificationBootstrap());
+        const payload = await createCloudNotificationBootstrap();
+        recordTelemetryCounter("notification_bootstrap_created_count");
+        recordTelemetryFeature("notifications_settings");
+        return respond(res, 201, payload);
       } catch (err) {
         return respond(res, 400, { error: err.message });
       }
@@ -11310,13 +11715,18 @@ const server = createServer(async (req, res) => {
 
     // ── Authenticated Mail dashboard APIs (P34.2 source only) ──
     if (req.method === "POST" && path === "/mail/send") {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "mail:create",
+      });
+      if (!auth) return;
       const body = await readBody(req);
       try {
+        const actor = buildRuntimeCapabilityAuditActor(auth, claims);
         const result = mailStore.createMailItem(
           buildDashboardMailCreateInputFromBody(
             body,
-            claims.user_id || "dashboard-admin"
+            actor.actorId,
+            actor.actorType
           )
         );
         if (result.created) {
@@ -11340,7 +11750,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && path === "/mail/unread-count") {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "mail:read",
+      });
+      if (!auth) return;
       return respond(res, 200, {
         status: "mail_unread_count",
         unread_count: mailStore.getUnreadCount(),
@@ -11351,7 +11764,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && path === "/mail/items") {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "mail:read",
+      });
+      if (!auth) return;
       const requestedLimit = Number(url.searchParams.get("limit") || 50);
       const limit =
         Number.isInteger(requestedLimit) && requestedLimit > 0
@@ -11377,17 +11793,17 @@ const server = createServer(async (req, res) => {
       /^\/mail\/items\/([^/]+)\/(read|unread|archive|unarchive)$/
     );
     if (mailStateMatch) {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "mail:update",
+      });
+      if (!auth) return;
       if (req.method !== "POST") {
         return respond(res, 405, { error: "Unsupported Mail state method" });
       }
       const mailId = decodeURIComponent(mailStateMatch[1]);
       const action = mailStateMatch[2];
       try {
-        const actor = {
-          actorType: "dashboard",
-          actorId: claims.user_id || "dashboard-admin",
-        };
+        const actor = buildRuntimeCapabilityAuditActor(auth, claims);
         const mail =
           action === "read"
             ? mailStore.markMailItemRead(mailId, actor)
@@ -11396,6 +11812,9 @@ const server = createServer(async (req, res) => {
             : action === "archive"
             ? mailStore.archiveMailItem(mailId, actor)
             : mailStore.unarchiveMailItem(mailId, actor);
+        if (action === "read") recordTelemetryCounter("mail_read_count");
+        if (action === "archive") recordTelemetryCounter("mail_archived_count");
+        recordTelemetryFeature("mail");
         return respond(res, 200, {
           status: `mail_item_${action}`,
           mail,
@@ -11410,11 +11829,16 @@ const server = createServer(async (req, res) => {
 
     const mailItemMatch = path.match(/^\/mail\/items\/([^/]+)$/);
     if (mailItemMatch) {
-      if (!requireDashboardMode(claims, res)) return;
       const mailId = decodeURIComponent(mailItemMatch[1]);
       if (req.method === "GET") {
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "mail:read",
+        });
+        if (!auth) return;
         const mail = mailStore.getMailItem(mailId);
         if (!mail) return respond(res, 404, { error: "Mail item not found" });
+        recordTelemetryCounter("mail_read_count");
+        recordTelemetryFeature("mail");
         return respond(res, 200, {
           status: "mail_item",
           mail,
@@ -11425,10 +11849,16 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "PATCH") {
         const body = await readBody(req);
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "mail:update",
+        });
+        if (!auth) return;
         try {
+          const actor = buildRuntimeCapabilityAuditActor(auth, claims);
           const mail = mailStore.updateMailItem(mailId, {
             ...buildMailUpdateInputFromBody(body),
-            actorId: claims.user_id || "dashboard-admin",
+            actorType: actor.actorType,
+            actorId: actor.actorId,
           });
           return respond(res, 200, {
             status: "mail_item_updated",
@@ -11442,12 +11872,18 @@ const server = createServer(async (req, res) => {
         }
       }
       if (req.method === "DELETE") {
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "mail:delete",
+        });
+        if (!auth) return;
         try {
-          const mail = mailStore.deleteMailItem(mailId, {
-            actorType: "dashboard",
-            actorId: claims.user_id || "dashboard-admin",
-          });
-          return respond(res, 200, {
+        const mail = mailStore.deleteMailItem(
+          mailId,
+          buildRuntimeCapabilityAuditActor(auth, claims)
+        );
+        recordTelemetryCounter("mail_deleted_count");
+        recordTelemetryFeature("mail");
+        return respond(res, 200, {
             status: "mail_item_deleted",
             mail_id: mail.id,
             deleted_at: mail.deleted_at,
@@ -11547,6 +11983,41 @@ const server = createServer(async (req, res) => {
           )
         ),
       });
+    }
+
+    if (req.method === "POST" && path === "/providers/model-refresh") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        const body = await readJsonBody(req);
+        const config = readConfig();
+        const providerId = requireProvider(
+          normalizeString(body.provider),
+          { config }
+        ).id;
+        const refresh = await providerModelRefreshRunner.refreshSelectedProvider(
+          providerId,
+          { source: "manual_session_setup" }
+        );
+        const refreshedConfig = readConfig();
+        return respond(res, 200, {
+          status: "provider_model_refresh_complete",
+          provider: providerId,
+          refresh: serializeProviderModelRefreshResult(refresh),
+          provider_model_refresh: providerModelRefreshRunner.getStatus(),
+          providers: await Promise.all(
+            listProviders({ config: refreshedConfig }).map((provider) =>
+              serializeProviderCatalogEntry(provider, refreshedConfig)
+            )
+          ),
+          secret_fields_redacted: true,
+        });
+      } catch (err) {
+        return respond(res, err.statusCode || 400, {
+          error: err.message,
+          provider_model_refresh: true,
+          secret_fields_redacted: true,
+        });
+      }
     }
 
     if (req.method === "GET" && path === "/telegram/status") {
@@ -11760,16 +12231,18 @@ const server = createServer(async (req, res) => {
         if (!auth) return;
         if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
         const folder = resolveP86WebsiteAgentFolder(agentId, body);
-        return respond(
-          res,
-          body.dry_run === true ? 200 : 201,
-          applyP86WebsiteScaffold({
-            agentId,
-            folder,
-            access: body.access || body.web_access,
-            dryRun: body.dry_run === true,
-          })
-        );
+        const dryRun = body.dry_run === true;
+        const result = applyP86WebsiteScaffold({
+          agentId,
+          folder,
+          access: body.access || body.web_access,
+          dryRun,
+        });
+        if (!dryRun) {
+          recordTelemetryCounter("website_init_count");
+          recordTelemetryFeature("website_settings");
+        }
+        return respond(res, dryRun ? 200 : 201, result);
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
@@ -11804,6 +12277,8 @@ const server = createServer(async (req, res) => {
         }
         const result = persistAgentConfigUpdates(folder, { web_access: access });
         persistP86WebsiteAgentFolder(agentId, body);
+        recordTelemetryCounter("website_access_changed_count");
+        recordTelemetryFeature("website_settings");
         return respond(res, 200, {
           status: "website_access_updated",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
@@ -11852,6 +12327,8 @@ const server = createServer(async (req, res) => {
           web_password: password,
         });
         persistP86WebsiteAgentFolder(agentId, body);
+        recordTelemetryCounter("website_password_set_count");
+        recordTelemetryFeature("website_settings");
         return respond(res, 200, {
           status: "website_password_updated",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
@@ -11969,6 +12446,8 @@ const server = createServer(async (req, res) => {
           resolveTerminalLaunchCwd(body.cwd),
           { restart: body.restart === true }
         );
+        recordTelemetryCounter("terminal_opened_count");
+        recordTelemetryFeature("terminal");
         return respond(res, 200, {
           terminal,
         });
@@ -11991,6 +12470,8 @@ const server = createServer(async (req, res) => {
         if (!terminal) {
           return respond(res, 404, { error: "Terminal session not found" });
         }
+        recordTelemetryCounter("terminal_input_sent_count");
+        recordTelemetryFeature("terminal");
         return respond(res, 200, {
           terminal,
         });
@@ -12079,20 +12560,22 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && path === "/dev/folders") {
       if (!requireDashboardMode(claims, res)) return;
       try {
-        return respond(
-          res,
-          200,
-          await listFolderPage({
-            path: url.searchParams.get("path"),
-            offset: url.searchParams.get("offset"),
-            limit: url.searchParams.get("limit"),
-            q: url.searchParams.get("q"),
-          })
-        );
+        const payload = await listFolderPage({
+          path: url.searchParams.get("path"),
+          offset: url.searchParams.get("offset"),
+          limit: url.searchParams.get("limit"),
+          q: url.searchParams.get("q"),
+        });
+        recordTelemetryCounter("file_explorer_opened_count");
+        recordTelemetryFeature("file_explorer");
+        return respond(res, 200, payload);
       } catch (err) {
-        if (err?.code === "folder_access_denied") {
-          return respond(res, 403, {
-            code: "folder_access_denied",
+        if (
+          err?.code === "folder_access_denied" ||
+          err?.code === "folder_browse_timeout"
+        ) {
+          return respond(res, err.status || 403, {
+            code: err.code,
             error: err.message,
             path: err.path || "",
             platform: err.platform || process.platform,
@@ -12105,18 +12588,57 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    if (req.method === "POST" && path === "/dev/folders/create") {
+    if (req.method === "POST" && path === "/dev/folders/validate") {
       if (!requireDashboardMode(claims, res)) return;
       try {
         const body = await readBody(req);
         return respond(
           res,
-          201,
-          await createFolder({
-            parentPath: body.parent_path,
-            folderName: body.folder_name,
+          200,
+          await validateFolderPath({
+            path: body.path,
           })
         );
+      } catch (err) {
+        const payload = { error: err.message };
+        if (err?.code) {
+          payload.code = err.code;
+        }
+        return respond(res, err?.status || 400, payload);
+      }
+    }
+
+    if (req.method === "POST" && path === "/dev/folders/create") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        const body = await readBody(req);
+        const payload = await createFolder({
+          parentPath: body.parent_path,
+          folderName: body.folder_name,
+        });
+        recordTelemetryCounter("folder_created_count");
+        recordTelemetryFeature("file_explorer");
+        return respond(res, 201, payload);
+      } catch (err) {
+        const payload = { error: err.message };
+        if (err?.code) {
+          payload.code = err.code;
+        }
+        return respond(res, err?.status || 400, payload);
+      }
+    }
+
+    if (req.method === "POST" && path === "/dev/folders/demo-agent") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        const body = await readBody(req);
+        const payload = await copyDemoAgent({
+          parentPath: body.parent_path,
+          demoId: body.demo_id,
+        });
+        recordTelemetryCounter("demo_agent_created_count");
+        recordTelemetryFeature("file_explorer");
+        return respond(res, 201, payload);
       } catch (err) {
         const payload = { error: err.message };
         if (err?.code) {
@@ -12241,20 +12763,29 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && path === "/notifications/status") {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "notifications:read",
+      });
+      if (!auth) return;
+      const actorId = getRuntimeCapabilityAuditActorId(auth, claims);
       return respond(res, 200, {
         status: "notifications_status",
         contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
         cloud_configured: Boolean(BACKEND_URL && DEVICE_TOKEN),
-        push: buildApnsPushStatusPayload(claims.user_id || "dashboard-admin"),
+        push: buildApnsPushStatusPayload(actorId),
         token_redacted: true,
       });
     }
 
     if (req.method === "POST" && path === "/notifications/send") {
-      if (!requireDashboardMode(claims, res)) return;
+      let telemetryNotificationSendAttempted = false;
       try {
         const body = await readBody(req);
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "notifications:send",
+        });
+        if (!auth) return;
+        const actorId = getRuntimeCapabilityAuditActorId(auth, claims);
         const title = normalizeString(body.title) || "Oysterun";
         const message = normalizeString(body.body || body.text);
         const route = normalizeString(body.url || body.route) || "/app";
@@ -12279,17 +12810,19 @@ const server = createServer(async (req, res) => {
             token_redacted: true,
           });
         }
+        telemetryNotificationSendAttempted = true;
+        recordTelemetryCounter("notification_send_requested_count");
+        recordTelemetryFeature("notifications_settings");
         const backendUrl = normalizeString(BACKEND_URL).replace(/\/+$/, "");
         const deviceToken = normalizeString(DEVICE_TOKEN);
         if (!backendUrl || !deviceToken) {
+          recordTelemetryCounter("notification_send_failed_count");
           return respond(res, 409, {
             error: "notification_delivery_target_unavailable",
             message:
               "Cloud push is not configured. Use notifications status for setup details.",
             contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-            push: buildApnsPushStatusPayload(
-              claims.user_id || "dashboard-admin"
-            ),
+            push: buildApnsPushStatusPayload(actorId),
             token_redacted: true,
           });
         }
@@ -12315,6 +12848,7 @@ const server = createServer(async (req, res) => {
           data = null;
         }
         if (!response.ok || data?.accepted === false) {
+          recordTelemetryCounter("notification_send_failed_count");
           return respond(res, response.ok ? 502 : response.status, {
             error:
               data?.reason ||
@@ -12323,6 +12857,7 @@ const server = createServer(async (req, res) => {
             token_redacted: true,
           });
         }
+        recordTelemetryCounter("notification_send_cloud_accepted_count");
         return respond(res, 200, {
           status: "notification_sent",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
@@ -12332,6 +12867,9 @@ const server = createServer(async (req, res) => {
           token_redacted: true,
         });
       } catch (err) {
+        if (telemetryNotificationSendAttempted) {
+          recordTelemetryCounter("notification_send_failed_count");
+        }
         return respond(res, 400, {
           error: err.message,
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
@@ -12343,7 +12881,28 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && path === "/dev/preferences") {
       if (!requireDashboardMode(claims, res)) return;
       try {
+        recordTelemetryFeature("host_preferences");
         return respond(res, 200, buildHostPreferencesPayload());
+      } catch (err) {
+        return respond(res, 400, { error: err.message });
+      }
+    }
+
+    if (req.method === "POST" && path === "/telemetry/feature") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        const body = await readBody(req);
+        const feature = normalizeString(body.feature);
+        if (!feature || !HOST_TELEMETRY_FEATURE_KEY_SET.has(feature)) {
+          return respond(res, 400, { error: "supported feature required" });
+        }
+        const recorded = recordHostTelemetryFeature(feature, {
+          logger: console,
+        });
+        return respond(res, 200, {
+          status: "telemetry_feature_recorded",
+          recorded,
+        });
       } catch (err) {
         return respond(res, 400, { error: err.message });
       }
@@ -12364,6 +12923,10 @@ const server = createServer(async (req, res) => {
             body,
             "notification_sound_app_enabled"
           ) &&
+          !Object.prototype.hasOwnProperty.call(
+            body,
+            "daily_telemetry_enabled"
+          ) &&
           !Object.prototype.hasOwnProperty.call(body, "default_browse_path") &&
           !Object.prototype.hasOwnProperty.call(body, "public_base_url") &&
           !Object.prototype.hasOwnProperty.call(body, "direct_host_url") &&
@@ -12373,7 +12936,7 @@ const server = createServer(async (req, res) => {
         ) {
           return respond(res, 400, {
             error:
-              "display_name, notification_sound_web_enabled, notification_sound_app_enabled, default_browse_path, direct_host_url, claude_command, codex_command, or session_defaults required",
+              "display_name, notification_sound_web_enabled, notification_sound_app_enabled, daily_telemetry_enabled, default_browse_path, direct_host_url, claude_command, codex_command, or session_defaults required",
           });
         }
 
@@ -12424,6 +12987,27 @@ const server = createServer(async (req, res) => {
           }
           updates.notification_sound_app_enabled =
             body.notification_sound_app_enabled;
+        }
+
+        if (
+          Object.prototype.hasOwnProperty.call(
+            body,
+            "daily_telemetry_enabled"
+          )
+        ) {
+          if (typeof body.daily_telemetry_enabled !== "boolean") {
+            return respond(res, 400, {
+              error: "daily_telemetry_enabled must be a boolean",
+            });
+          }
+          updates.daily_telemetry_enabled = body.daily_telemetry_enabled;
+          if (
+            currentConfig.daily_telemetry_enabled === true !==
+            body.daily_telemetry_enabled
+          ) {
+            updates.daily_telemetry_consent_recorded_at =
+              new Date().toISOString();
+          }
         }
 
         if (Object.prototype.hasOwnProperty.call(body, "default_browse_path")) {
@@ -12522,6 +13106,7 @@ const server = createServer(async (req, res) => {
         }
 
         writeConfig(updates);
+        recordTelemetryFeature("host_preferences");
         return respond(res, 200, {
           status: "updated",
           preferences: buildHostPreferencesPayload(),
@@ -12534,11 +13119,14 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && path === "/dev/file") {
       if (!requireDashboardMode(claims, res)) return;
       try {
-        return respond(
-          res,
-          200,
-          readDevFilePreview(url.searchParams.get("path"))
-        );
+        const payload = readDevFilePreview(url.searchParams.get("path"));
+        recordTelemetryCounter("file_preview_count");
+        recordTelemetryFeature("file_preview");
+        if (payload.preview_kind === "html") {
+          recordTelemetryCounter("html_preview_count");
+          recordTelemetryFeature("html_preview");
+        }
+        return respond(res, 200, payload);
       } catch (err) {
         console.error("[oysterun-host] Failed to read dev file preview", err);
         return respond(res, 400, { error: err.message });
@@ -12587,11 +13175,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && path === "/dev/file-text") {
       if (!requireDashboardMode(claims, res)) return;
       try {
-        return respond(
-          res,
-          200,
-          readDevFileTextContent(url.searchParams.get("path"))
-        );
+        const payload = readDevFileTextContent(url.searchParams.get("path"));
+        recordTelemetryCounter("file_preview_count");
+        recordTelemetryFeature("file_preview");
+        return respond(res, 200, payload);
       } catch (err) {
         console.error("[oysterun-host] Failed to read dev file text", err);
         return respond(res, 400, { error: err.message });
@@ -12894,8 +13481,14 @@ const server = createServer(async (req, res) => {
       if (!agent_id) {
         return respond(res, 400, { error: "agent_id query param required" });
       }
-      if (!requireAgentCapability(claims, agent_id, "can_start_session", res))
-        return;
+      const auth = requireAgentCapabilityOrRuntimeScope(
+        claims,
+        agent_id,
+        "can_start_session",
+        "session:create",
+        res
+      );
+      if (!auth) return;
       let folder = getAgentFolder(agent_id);
       const requestedFolder = normalizeString(url.searchParams.get("agent_folder"));
       if (claims._dashboardAuth && requestedFolder) {
@@ -12937,14 +13530,72 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // ── POST /agent/provider-skill-install ─────────────────
+    if (req.method === "POST" && path === "/agent/provider-skill-install") {
+      const body = await readBody(req);
+      const agent_id = normalizeString(body.agent_id || body.agentId);
+      if (!agent_id) {
+        return respond(res, 400, { error: "agent_id required" });
+      }
+      if (!requireAgentCapability(claims, agent_id, "can_manage_config", res))
+        return;
+      const session = sessionManager.getAgentSession(agent_id);
+      let folder =
+        session?.cwd || getAgentFolder(agent_id) || normalizeString(body.agent_folder);
+      if (claims._dashboardAuth && normalizeString(body.agent_folder)) {
+        folder = normalizeString(body.agent_folder);
+      }
+      if (!folder) {
+        return respond(res, 400, {
+          error: "No local folder mapping configured for this agent",
+        });
+      }
+      const requestedProvider = normalizeString(body.provider);
+      let providerId = requestedProvider || session?.provider || null;
+      if (!providerId) {
+        try {
+          providerId = summarizeAgentConfig(folder).provider;
+        } catch {
+          providerId = "claude";
+        }
+      }
+      try {
+        const result = sessionManager.installOysterunProviderSkillSet({
+          cwd: folder,
+          provider: providerId,
+          overwrite: body.overwrite === true,
+        });
+        return respond(res, 200, {
+          agent_id,
+          agent_folder: folder,
+          ...result,
+        });
+      } catch (err) {
+        if (isProductSkillRequirementError(err)) {
+          return respond(
+            res,
+            err.statusCode || 409,
+            serializeProductSkillRequirementError(err)
+          );
+        }
+        throw err;
+      }
+    }
+
     // ── GET /agent/provider-trust-status?agent_id=… ────────
     if (req.method === "GET" && path === "/agent/provider-trust-status") {
       const agent_id = url.searchParams.get("agent_id");
       if (!agent_id) {
         return respond(res, 400, { error: "agent_id query param required" });
       }
-      if (!requireAgentCapability(claims, agent_id, "can_start_session", res))
-        return;
+      const auth = requireAgentCapabilityOrRuntimeScope(
+        claims,
+        agent_id,
+        "can_start_session",
+        "session:create",
+        res
+      );
+      if (!auth) return;
       let folder = getAgentFolder(agent_id);
       const requestedFolder = normalizeString(url.searchParams.get("agent_folder"));
       if (claims._dashboardAuth && requestedFolder) {
@@ -12977,10 +13628,15 @@ const server = createServer(async (req, res) => {
 
     // ── GET /session/history?session_id=… ─────────────────
     if (req.method === "GET" && path === "/session/history") {
-      const session_id = url.searchParams.get("session_id");
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: url.searchParams.get("session_id"),
+        sessionRef: url.searchParams.get("session_ref"),
+        res,
+      });
+      if (!sessionTarget) return;
       const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_chat",
         "session:read_transcript",
         res
@@ -12992,15 +13648,21 @@ const server = createServer(async (req, res) => {
         session_id: session.id,
         agent_id: session.agentId,
         messages,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
     // ── Current-session in-session loop CRUD (P12.3 GUI) ──────
     if (req.method === "GET" && path === "/session/loops") {
-      const session_id = url.searchParams.get("session_id");
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: url.searchParams.get("session_id"),
+        sessionRef: url.searchParams.get("session_ref"),
+        res,
+      });
+      if (!sessionTarget) return;
       const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_chat",
         "session:send",
         res
@@ -13022,15 +13684,23 @@ const server = createServer(async (req, res) => {
         generic_cli_serialization_remains_redacted: true,
         browser_local_storage_owner: false,
         matrix_db_owner: false,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
     if (req.method === "POST" && path === "/session/loops") {
       const body = await readBody(req);
-      const session = requireSessionCapability(
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        body.session_id,
+        sessionTarget.sessionId,
         "can_chat",
+        "session:send",
         res
       );
       if (!session) return;
@@ -13057,6 +13727,7 @@ const server = createServer(async (req, res) => {
           agent_id: session.agentId,
           serialization_scope: "authenticated_current_session_loop_gui",
           matrix_feedback: feedback,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       } catch (err) {
         return respond(res, getSessionLoopCrudErrorStatus(err), {
@@ -13073,10 +13744,17 @@ const server = createServer(async (req, res) => {
     ) {
       const scheduleId = decodeURIComponent(sessionLoopMatch[1]);
       const body = await readBody(req);
-      const session = requireSessionCapability(
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        body.session_id,
+        sessionTarget.sessionId,
         "can_chat",
+        "session:send",
         res
       );
       if (!session) return;
@@ -13104,7 +13782,11 @@ const server = createServer(async (req, res) => {
             }),
             schedule: result.feedback_schedule || before || result,
           });
-          return respond(res, 200, { ...result, matrix_feedback: feedback });
+          return respond(res, 200, {
+            ...result,
+            matrix_feedback: feedback,
+            ...sessionRefResolutionResponseFields(sessionTarget.resolution),
+          });
         }
         const result = schedulerService.updateSessionLoopScheduleForGui({
           hostSessionId: session.id,
@@ -13129,6 +13811,7 @@ const server = createServer(async (req, res) => {
           agent_id: session.agentId,
           serialization_scope: "authenticated_current_session_loop_gui",
           matrix_feedback: feedback,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       } catch (err) {
         return respond(res, getSessionLoopCrudErrorStatus(err), {
@@ -13140,7 +13823,10 @@ const server = createServer(async (req, res) => {
 
     // ── Host scheduler dashboard CRUD (P12.5 Scheduler tab) ──────
     if (req.method === "GET" && path === "/scheduler/schedules") {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:read",
+      });
+      if (!auth) return;
       return respond(res, 200, {
         status: "host_scheduler_schedules",
         host_timezone: getHostSystemTimezone(),
@@ -13153,13 +13839,18 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && path === "/scheduler/schedules") {
-      if (!requireDashboardMode(claims, res)) return;
       const body = await readBody(req);
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:update",
+      });
+      if (!auth) return;
       try {
         const result = schedulerService.createHostScheduleForDashboard({
           ...buildHostSchedulerPayloadFromBody(body),
-          createdBy: claims.user_id || "dashboard-admin",
+          createdBy: getRuntimeCapabilityAuditActorId(auth, claims),
         });
+        recordTelemetryCounter("scheduler_schedule_created_count");
+        recordTelemetryFeature("scheduler");
         return respond(res, 201, {
           ...result,
           serialization_scope: "authenticated_dashboard_host_scheduler_ui",
@@ -13176,7 +13867,10 @@ const server = createServer(async (req, res) => {
       /^\/scheduler\/schedules\/([^/]+)\/runs\/([^/]+)\/log$/
     );
     if (hostSchedulerRunLogMatch) {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:read",
+      });
+      if (!auth) return;
       const scheduleId = decodeURIComponent(hostSchedulerRunLogMatch[1]);
       const runId = decodeURIComponent(hostSchedulerRunLogMatch[2]);
       if (req.method === "GET") {
@@ -13208,7 +13902,10 @@ const server = createServer(async (req, res) => {
       /^\/scheduler\/schedules\/([^/]+)\/runs$/
     );
     if (hostSchedulerRunsMatch) {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:read",
+      });
+      if (!auth) return;
       const scheduleId = decodeURIComponent(hostSchedulerRunsMatch[1]);
       if (req.method === "GET") {
         const requestedLimit = Number(url.searchParams.get("limit") || 25);
@@ -13242,7 +13939,10 @@ const server = createServer(async (req, res) => {
       /^\/scheduler\/schedules\/([^/]+)\/test-run$/
     );
     if (hostSchedulerTestRunMatch) {
-      if (!requireDashboardMode(claims, res)) return;
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:run",
+      });
+      if (!auth) return;
       const scheduleId = decodeURIComponent(hostSchedulerTestRunMatch[1]);
       if (req.method === "POST") {
         try {
@@ -13250,6 +13950,13 @@ const server = createServer(async (req, res) => {
             scheduleId,
             dispatcher: schedulerSessionDispatcher,
           });
+          recordTelemetryCounter("scheduler_run_count");
+          if (result.status === "test_run_dispatched") {
+            recordTelemetryCounter("scheduler_run_success_count");
+          } else {
+            recordTelemetryCounter("scheduler_run_failed_count");
+          }
+          recordTelemetryFeature("scheduler");
           return respond(res, 200, {
             ...result,
             scheduler_command: "host_scheduler_test_run",
@@ -13259,6 +13966,9 @@ const server = createServer(async (req, res) => {
             matrix_db_owner: false,
           });
         } catch (err) {
+          recordTelemetryCounter("scheduler_run_count");
+          recordTelemetryCounter("scheduler_run_failed_count");
+          recordTelemetryFeature("scheduler");
           return respond(res, getHostSchedulerCrudErrorStatus(err), {
             error: err.message,
             scheduler_command: "host_scheduler_test_run",
@@ -13269,9 +13979,12 @@ const server = createServer(async (req, res) => {
 
     const hostSchedulerMatch = path.match(/^\/scheduler\/schedules\/([^/]+)$/);
     if (hostSchedulerMatch) {
-      if (!requireDashboardMode(claims, res)) return;
       const scheduleId = decodeURIComponent(hostSchedulerMatch[1]);
       if (req.method === "GET") {
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "scheduler:read",
+        });
+        if (!auth) return;
         try {
           return respond(res, 200, {
             status: "host_scheduler_schedule",
@@ -13287,11 +14000,17 @@ const server = createServer(async (req, res) => {
       }
       if (req.method === "PATCH") {
         const body = await readBody(req);
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "scheduler:update",
+        });
+        if (!auth) return;
         try {
           const result = schedulerService.updateHostScheduleForDashboard({
             scheduleId,
             ...buildHostSchedulerPatchPayloadFromBody(body),
           });
+          recordTelemetryCounter("scheduler_schedule_updated_count");
+          recordTelemetryFeature("scheduler");
           return respond(res, 200, {
             ...result,
             serialization_scope: "authenticated_dashboard_host_scheduler_ui",
@@ -13304,12 +14023,17 @@ const server = createServer(async (req, res) => {
         }
       }
       if (req.method === "DELETE") {
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "scheduler:update",
+        });
+        if (!auth) return;
         try {
-          return respond(
-            res,
-            200,
-            schedulerService.deleteHostScheduleForDashboard({ scheduleId })
-          );
+          const result = schedulerService.deleteHostScheduleForDashboard({
+            scheduleId,
+          });
+          recordTelemetryCounter("scheduler_schedule_deleted_count");
+          recordTelemetryFeature("scheduler");
+          return respond(res, 200, result);
         } catch (err) {
           return respond(res, getHostSchedulerCrudErrorStatus(err), {
             error: err.message,
@@ -13327,11 +14051,17 @@ const server = createServer(async (req, res) => {
       if (!agent_id) {
         return respond(res, 400, { error: "agent_id required" });
       }
-      if (!requireAgentCapability(claims, agent_id, "can_start_session", res))
-        return;
+      const auth = requireAgentCapabilityOrRuntimeScope(
+        claims,
+        agent_id,
+        "can_start_session",
+        "session:create",
+        res
+      );
+      if (!auth) return;
 
       let resolvedFolder = getAgentFolder(agent_id);
-      if (claims._dashboardAuth && agent_folder) {
+      if (auth.mode === "dashboard" && agent_folder) {
         resolvedFolder = agent_folder;
         setAgentFolder(agent_id, resolvedFolder);
       }
@@ -13452,12 +14182,87 @@ const server = createServer(async (req, res) => {
         agentId: agent_id,
         capabilities: sessionRuntimeCapabilities,
       });
+      const providerStartupAttemptId = randomUUID();
+      logProviderStartupEvent({
+        event: "session_start_request",
+        attempt_id: providerStartupAttemptId,
+        created_at: new Date().toISOString(),
+        provider: resolved.runtime.provider,
+        agent_id,
+        cwd: resolvedFolder,
+        session_id: sessionId,
+        session_id_candidate: sessionId,
+        configured_command: getConfiguredProviderCommand(
+          readConfig(),
+          resolved.runtime.provider
+        ),
+        resolved_command: null,
+        home: process.env.HOME || null,
+        path_summary: {
+          entry_count: String(process.env.PATH || "")
+            .split(":")
+            .filter(Boolean).length,
+        },
+        provider_home: null,
+        phase: "session_start_request",
+        duration_ms: 0,
+        success: null,
+        error_code: null,
+        message: null,
+        stdout_tail_redacted: "",
+        stderr_tail_redacted: "",
+        exit_code: null,
+        signal: null,
+        history_written: false,
+        ready: false,
+      });
+      const startupPreflight = await preflightProviderStartup({
+        provider: resolved.runtime.provider,
+        agentId: agent_id,
+        cwd: resolvedFolder,
+        config: readConfig(),
+        providerAuthManager,
+        attemptId: providerStartupAttemptId,
+        sessionIdCandidate: sessionId,
+        env: process.env,
+      });
+      logProviderStartupEvent({
+        event: startupPreflight.ok ? "preflight_pass" : "preflight_fail",
+        ...startupPreflight.diagnostic,
+      });
+      if (!startupPreflight.ok) {
+        recordTelemetryCounter("provider_start_failed_count");
+        if (
+          startupPreflight.response?.auth_required === true ||
+          normalizeString(startupPreflight.response?.error_scope) ===
+            "provider_authentication"
+        ) {
+          recordTelemetryCounter("provider_auth_required_count");
+        }
+        logProviderStartupEvent({
+          event: "session_start_response",
+          ...startupPreflight.diagnostic,
+          success: false,
+          history_written: false,
+          ready: false,
+        });
+        return respond(
+          res,
+          startupPreflight.statusCode || 503,
+          startupPreflight.response
+        );
+      }
       let session;
       try {
         session = sessionManager.start({
           agentId: agent_id,
           cwd: resolvedFolder,
           sessionId,
+          providerStartupAttemptId,
+          providerStartupConfiguredCommand:
+            startupPreflight.diagnostic?.configured_command || null,
+          providerStartupResolvedCommand:
+            startupPreflight.diagnostic?.resolved_command || null,
           sessionName: resolvedSessionName,
           provider: resolved.runtime.provider,
           model: resolved.runtime.model,
@@ -13486,7 +14291,26 @@ const server = createServer(async (req, res) => {
             : undefined,
           installOysterunSkills: body.install_oysterun_skills === true,
         });
+        logProviderStartupEvent({
+          event: "session_start_response",
+          ...startupPreflight.diagnostic,
+          phase: "sessionManager.start",
+          success: true,
+          history_written: true,
+          ready: session._ready === true,
+        });
       } catch (err) {
+        recordTelemetryCounter("provider_start_failed_count");
+        logProviderStartupEvent({
+          event: "session_start_response",
+          ...startupPreflight.diagnostic,
+          phase: "sessionManager.start",
+          success: false,
+          error_code: err.code || "session_manager_start_failed",
+          message: err.message || String(err),
+          history_written: false,
+          ready: false,
+        });
         if (isProviderUnavailableError(err)) {
           return respond(
             res,
@@ -13567,6 +14391,41 @@ const server = createServer(async (req, res) => {
         );
       }
 
+      let routeCMatrixStartBindingProof;
+      try {
+        routeCMatrixStartBindingProof =
+          materializeRouteCMatrixBindingForSessionStart(session);
+      } catch (err) {
+        console.error(
+          `[session/start] Route C Matrix binding failed before start response session_id=${session.id}: ${err.message}`
+        );
+        try {
+          await sessionManager.killSession(session.id);
+        } catch (killErr) {
+          console.error(
+            `[session/start] Failed to kill Matrix binding failed session ${session.id}: ${killErr.message}`
+          );
+        }
+        return respond(res, 424, {
+          error: "Route C Matrix binding failed before the session start response.",
+          status: "routec_session_start_matrix_binding_required",
+          session_id: session.id,
+          agent_id,
+          chat_shell_ready: false,
+          provider_ready: false,
+          routec_matrix_binding_ready: false,
+          routec_matrix_binding_materialized_before_session_start_response: false,
+          provider_delivery_attempted: false,
+          transcript_db_fallback_used: false,
+          host_db_transcript_product_truth: false,
+          message: err.message || String(err),
+        });
+      }
+
+      recordTelemetryCounter("session_started_count");
+      recordTelemetryFeature("sessions");
+      recordTelemetryFeature("chat");
+
       return respond(res, 200, {
         success: true,
         session_id: session.id,
@@ -13620,6 +14479,20 @@ const server = createServer(async (req, res) => {
         profile_config: buildLiveSessionProfileConfigPayload(session),
         alive: session.alive,
         ready: session._ready,
+        chat_shell_ready: session.chatShellReady === true,
+        provider_ready: session.providerReady === true,
+        routec_matrix_binding_ready:
+          routeCMatrixStartBindingProof.routec_matrix_binding_ready === true,
+        routec_matrix_binding_materialized_before_session_start_response:
+          routeCMatrixStartBindingProof
+            .routec_matrix_binding_materialized_before_session_start_response ===
+          true,
+        routec_matrix_binding_materialized_from_live_session:
+          routeCMatrixStartBindingProof
+            .routec_matrix_binding_materialized_from_live_session === true,
+        routec_matrix_binding_reused:
+          routeCMatrixStartBindingProof.routec_matrix_binding_reused === true,
+        routec_matrix_binding_materialization: routeCMatrixStartBindingProof,
         capabilities: session.capabilities || {},
         workspace_policy: serializeWorkspacePolicy(session.workspacePolicy),
         bookkeeping_warning: bookkeepingWarnings.length
@@ -13631,11 +14504,17 @@ const server = createServer(async (req, res) => {
     // ── POST /session/send ─────────────────────────────────
     if (req.method === "POST" && path === "/session/send") {
       const body = await readBody(req);
-      const { session_id, text } = body;
+      const { text } = body;
 
-      if (!session_id || !text) {
-        return respond(res, 400, { error: "session_id and text required" });
+      if (!text) {
+        return respond(res, 400, { error: "text required" });
       }
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
       const clientMessageId =
         typeof body.client_message_id === "string"
           ? body.client_message_id.trim()
@@ -13645,25 +14524,14 @@ const server = createServer(async (req, res) => {
           error: "client_message_id must be a non-empty string when provided",
         });
       }
-      const session = requireSessionCapability(
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_chat",
+        "session:send",
         res
       );
       if (!session) return;
-
-      if (isClaudeLoginSlashCommand(session, text)) {
-        try {
-          return respond(
-            res,
-            200,
-            await buildClaudeLoginSlashCommandResponse(session)
-          );
-        } catch (err) {
-          return respond(res, 400, { error: err.message });
-        }
-      }
 
       if (isDemotedLoopStopCommandInput(text)) {
         return respond(res, 400, {
@@ -13687,6 +14555,8 @@ const server = createServer(async (req, res) => {
             action: classifyLoopFeedbackAction({ result: loopResult }),
             schedule: loopResult.feedback_schedule || loopResult.schedule,
           });
+          recordTelemetryCounter("user_message_sent_count");
+          recordTelemetryFeature("chat");
           return respond(
             res,
             200,
@@ -13821,6 +14691,8 @@ const server = createServer(async (req, res) => {
           session,
           providerDelivery.message_id
         );
+        recordTelemetryCounter("user_message_sent_count");
+        recordTelemetryFeature("chat");
         return respond(res, 200, {
           status:
             queuedMessage?.state === "failed"
@@ -13846,6 +14718,7 @@ const server = createServer(async (req, res) => {
           matrix_first_session_send: true,
           transcript_db_fallback_used: false,
           host_db_transcript_product_truth: false,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       }
       if (
@@ -13887,6 +14760,8 @@ const server = createServer(async (req, res) => {
           host_db_transcript_product_truth: false,
         });
       }
+      recordTelemetryCounter("user_message_sent_count");
+      recordTelemetryFeature("chat");
       return respond(res, 200, {
         status: "queued",
         session_id: session.id,
@@ -13897,6 +14772,8 @@ const server = createServer(async (req, res) => {
         routec_matrix_binding_materialized_from_live_session:
           routeCMatrixBindingProof
             .routec_matrix_binding_materialized_from_live_session === true,
+        routec_matrix_binding_reused:
+          routeCMatrixBindingProof.routec_matrix_binding_reused === true,
         routec_matrix_user_event: committedMatrixUserEvent,
         provider_delivery: providerDelivery,
         routec_matrix_delivery: queuedMessage.routeCMatrixDelivery,
@@ -13906,6 +14783,7 @@ const server = createServer(async (req, res) => {
         matrix_first_session_send: true,
         transcript_db_fallback_used: false,
         host_db_transcript_product_truth: false,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
@@ -14169,11 +15047,18 @@ const server = createServer(async (req, res) => {
     // ── POST /session/stop ─────────────────────────────────
     if (req.method === "POST" && path === "/session/stop") {
       const body = await readBody(req);
-      const { session_id, force } = body;
-      const session = requireSessionCapability(
+      const { force } = body;
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_start_session",
+        "session:control",
         res
       );
       if (!session) return;
@@ -14275,6 +15160,8 @@ const server = createServer(async (req, res) => {
         });
       }
 
+      recordTelemetryCounter("session_stopped_count");
+      recordTelemetryFeature("sessions");
       return respond(res, 200, {
         status: force ? "killed" : "stopped",
         session_id: session.id,
@@ -14286,20 +15173,25 @@ const server = createServer(async (req, res) => {
                 routeCUnboundStopCleanup,
             }
           : {}),
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
     // ── POST /session/rename ───────────────────────────────
     if (req.method === "POST" && path === "/session/rename") {
       const body = await readBody(req);
-      const { session_id, session_name } = body;
-      if (!session_id) {
-        return respond(res, 400, { error: "session_id required" });
-      }
-      const session = requireSessionCapability(
+      const { session_name } = body;
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_start_session",
+        "session:update",
         res
       );
       if (!session) return;
@@ -14309,6 +15201,7 @@ const server = createServer(async (req, res) => {
         body.persist_shared_config === true;
       if (persistSharedConfig) {
         if (
+          !isRuntimeCapabilityOnly(claims) &&
           !requireAgentCapability(
             claims,
             session.agentId,
@@ -14332,7 +15225,7 @@ const server = createServer(async (req, res) => {
         }
         if (
           sessionManager.hasRunningSessionName(resolvedSessionName, {
-            excludeSessionId: session_id,
+            excludeSessionId: session.id,
           })
         ) {
           throw new Error(buildSessionNameConflictMessage(resolvedSessionName));
@@ -14343,7 +15236,7 @@ const server = createServer(async (req, res) => {
             })
           : null;
         const { session: renamedSession, changed } =
-          sessionManager.renameSession(session_id, resolvedSessionName);
+          sessionManager.renameSession(session.id, resolvedSessionName);
         return respond(res, 200, {
           renamed: changed,
           session_id: renamedSession.id,
@@ -14353,6 +15246,7 @@ const server = createServer(async (req, res) => {
           config_mutated: persistSharedConfig,
           shared_config_mutated: persistSharedConfig,
           shared_config_changed: configPersistResult?.changed === true,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       } catch (err) {
         const message = err.message || String(err);
@@ -14368,11 +15262,17 @@ const server = createServer(async (req, res) => {
     // ── POST /session/interrupt ────────────────────────────
     if (req.method === "POST" && path === "/session/interrupt") {
       const body = await readBody(req);
-      const { session_id } = body;
-      const session = requireSessionCapability(
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_chat",
+        "session:control",
         res
       );
       if (!session) return;
@@ -14424,11 +15324,14 @@ const server = createServer(async (req, res) => {
             replay_policy: "always",
           },
         });
+        recordTelemetryCounter("session_interrupted_count");
+        recordTelemetryFeature("chat");
         return respond(res, 200, {
           status: "interrupted",
           session_id: session.id,
           agent_id: session.agentId,
           shell_exec_ids: interruptedShellExecIds,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       }
 
@@ -14475,10 +15378,13 @@ const server = createServer(async (req, res) => {
           replay_policy: "always",
         },
       });
+      recordTelemetryCounter("session_interrupted_count");
+      recordTelemetryFeature("chat");
       return respond(res, 200, {
         status: "interrupted",
         session_id: session.id,
         agent_id: session.agentId,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
@@ -14609,7 +15515,6 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && path === "/session/restart") {
       const body = await readBody(req);
       const {
-        session_id,
         provider,
         model,
         reasoning_effort,
@@ -14625,10 +15530,17 @@ const server = createServer(async (req, res) => {
         provider_profile,
       } = body;
 
-      const currentSession = requireSessionCapability(
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: body.session_id,
+        sessionRef: body.session_ref,
+        res,
+      });
+      if (!sessionTarget) return;
+      const currentSession = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_start_session",
+        "session:control",
         res
       );
       if (!currentSession) return;
@@ -14770,6 +15682,9 @@ const server = createServer(async (req, res) => {
       emitSessionLifecycleEvent(restarted, "resume");
       // "started" event will fire and report "active" automatically
 
+      recordTelemetryCounter("session_restarted_count");
+      recordTelemetryFeature("sessions");
+      recordTelemetryFeature("chat");
       return respond(res, 200, {
         session_id: restarted.id,
         session_name: restarted.sessionName || null,
@@ -14806,15 +15721,21 @@ const server = createServer(async (req, res) => {
           session: restarted,
         }),
         resumed: true,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
     // ── GET /session/status?session_id=… ───────────────────
     if (req.method === "GET" && path === "/session/status") {
-      const session_id = url.searchParams.get("session_id");
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: url.searchParams.get("session_id"),
+        sessionRef: url.searchParams.get("session_ref"),
+        res,
+      });
+      if (!sessionTarget) return;
       const session = requireSessionCapabilityOrRuntimeScope(
         claims,
-        session_id,
+        sessionTarget.sessionId,
         "can_chat",
         "session:read_status",
         res
@@ -14858,6 +15779,7 @@ const server = createServer(async (req, res) => {
         }),
         workspace_policy: serializeWorkspacePolicy(session.workspacePolicy),
         pending_control_requests: serializePendingControlRequests(session),
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
@@ -14905,25 +15827,25 @@ const server = createServer(async (req, res) => {
             hasWebsiteEnabledRequest ||
             hasWebsitePasswordRequest
           ? "website:update"
-          : "";
+          : "session:update";
         if (isRuntimeCapabilityOnly(claims)) {
-          if (
-            !runtimeScope ||
-            persistSharedConfig ||
-            hasNotificationRequest ||
-            hasRuntimeCapabilityRequest ||
-            hasAllowedPathsRequest
-          ) {
+          if (hasRuntimeCapabilityRequest) {
             respondRuntimeCapabilityDenied(res, 403, {
               reason: "runtime_profile_update_scope_not_allowed",
-              capability_scope: runtimeScope || null,
+              capability_scope: "runtime_capabilities",
             });
             return;
           }
         }
+        const sessionTarget = resolveLiveSessionReferenceOrRespond({
+          sessionId: body.session_id,
+          sessionRef: body.session_ref,
+          res,
+        });
+        if (!sessionTarget) return;
         const session = requireSessionCapabilityOrRuntimeScope(
           claims,
-          body.session_id,
+          sessionTarget.sessionId,
           "can_start_session",
           runtimeScope,
           res
@@ -14985,6 +15907,7 @@ const server = createServer(async (req, res) => {
         }
         if (persistSharedConfig) {
           if (
+            !isRuntimeCapabilityOnly(claims) &&
             !requireAgentCapability(
               claims,
               session.agentId,
@@ -15087,6 +16010,21 @@ const server = createServer(async (req, res) => {
           persistSharedConfig && Boolean(nextWebsitePassword);
         const localConfigMutated =
           localTelegramConfigMutated || localWebsitePasswordMutated;
+        recordTelemetryFeature("agent_profile");
+        if (hasWebAccessRequest || hasWebsiteEnabledRequest) {
+          recordTelemetryCounter("website_access_changed_count");
+          recordTelemetryFeature("website_settings");
+        }
+        if (nextWebsitePassword) {
+          recordTelemetryCounter("website_password_set_count");
+          recordTelemetryFeature("website_settings");
+        }
+        if (hasNotificationRequest) {
+          recordTelemetryFeature("notifications_settings");
+        }
+        if (hasTelegramRequest) {
+          recordTelemetryFeature("telegram_settings");
+        }
         return respond(res, 200, {
           status: "session_profile_config_updated",
           session_id: session.id,
@@ -15118,6 +16056,7 @@ const server = createServer(async (req, res) => {
           local_config_mutated: localConfigMutated,
           private_config_mutated: localConfigMutated,
           private_local_material_serialized: localConfigMutated,
+          ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       } catch (err) {
         return respond(res, 400, {
@@ -15168,6 +16107,7 @@ const server = createServer(async (req, res) => {
           matrixRoomId: body.matrix_room_id,
           notificationsEnabled: body.notifications_enabled,
         });
+        recordTelemetryFeature("notifications_settings");
         return respond(res, 200, {
           status: "session_notification_settings_updated",
           session_id: session.id,
@@ -15306,10 +16246,13 @@ const server = createServer(async (req, res) => {
 
     // ── GET /session/messages?session_id=…&agent_id=… ──────
     if (req.method === "GET" && path === "/session/messages") {
-      const session_id = normalizeString(url.searchParams.get("session_id"));
-      if (!session_id) {
-        return respond(res, 400, { error: "session_id query param required" });
-      }
+      const sessionTarget = resolveLiveSessionReferenceOrRespond({
+        sessionId: url.searchParams.get("session_id"),
+        sessionRef: url.searchParams.get("session_ref"),
+        res,
+      });
+      if (!sessionTarget) return;
+      const session_id = sessionTarget.sessionId;
       const agent_id = normalizeString(url.searchParams.get("agent_id"));
       if (!agent_id) {
         return respond(res, 400, { error: "agent_id query param required" });
@@ -15372,6 +16315,7 @@ const server = createServer(async (req, res) => {
         legacy_debug_transcript_read: false,
         product_legacy_transcript_caller_allowed: false,
         matrix_transcript_read: syncResult.matrix_transcript_read,
+        ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
 
@@ -15574,8 +16518,14 @@ const server = createServer(async (req, res) => {
       if (!sourceSessionId) {
         return respond(res, 400, { error: "source_session_id required" });
       }
-      if (!requireAgentCapability(claims, agent_id, "can_start_session", res))
-        return;
+      const auth = requireAgentCapabilityOrRuntimeScope(
+        claims,
+        agent_id,
+        "can_start_session",
+        "session:create",
+        res
+      );
+      if (!auth) return;
 
       const sourceRecord =
         getSessionHistory().find(
@@ -15594,7 +16544,7 @@ const server = createServer(async (req, res) => {
 
       let resolvedFolder =
         sourceRecord.agent_folder || getAgentFolder(agent_id);
-      if (claims._dashboardAuth && agent_folder) {
+      if (auth.mode === "dashboard" && agent_folder) {
         resolvedFolder = agent_folder;
       }
       if (!resolvedFolder) {
@@ -15915,6 +16865,9 @@ const server = createServer(async (req, res) => {
         );
       }
 
+      recordTelemetryCounter("session_branch_resumed_count");
+      recordTelemetryFeature("sessions");
+      recordTelemetryFeature("chat");
       return respond(res, 200, {
         success: true,
         session_id: session.id,
@@ -16016,8 +16969,14 @@ const server = createServer(async (req, res) => {
           source_session_id: sourceSessionId,
         });
       }
-      if (!requireAgentCapability(claims, agent_id, "can_start_session", res))
-        return;
+      const auth = requireAgentCapabilityOrRuntimeScope(
+        claims,
+        agent_id,
+        "can_start_session",
+        "session:create",
+        res
+      );
+      if (!auth) return;
       if (sessionManager.getSession(sourceSessionId)) {
         return respond(res, 409, {
           error:
@@ -16045,7 +17004,7 @@ const server = createServer(async (req, res) => {
 
       let resolvedFolder =
         sourceRecord.agent_folder || getAgentFolder(agent_id);
-      if (claims._dashboardAuth && agent_folder) {
+      if (auth.mode === "dashboard" && agent_folder) {
         resolvedFolder = agent_folder;
       }
       if (!resolvedFolder) {
@@ -16350,6 +17309,9 @@ const server = createServer(async (req, res) => {
         );
       }
 
+      recordTelemetryCounter("session_resumed_count");
+      recordTelemetryFeature("sessions");
+      recordTelemetryFeature("chat");
       return respond(res, 200, {
         success: true,
         session_id: session.id,
@@ -16418,9 +17380,18 @@ const server = createServer(async (req, res) => {
     // ── GET /sessions ──────────────────────────────────────
     if (req.method === "GET" && path === "/sessions") {
       const allSessions = sessionManager.list();
-      const accessible = claims._dashboardAuth
-        ? allSessions
-        : allSessions.filter((s) => claims.agent_ids.includes(s.agentId));
+      let accessible;
+      if (isRuntimeCapabilityOnly(claims)) {
+        const auth = requireRuntimeCapability(claims, res, {
+          scope: "session:list",
+        });
+        if (!auth) return;
+        accessible = allSessions;
+      } else if (claims._dashboardAuth) {
+        accessible = allSessions;
+      } else {
+        accessible = allSessions.filter((s) => claims.agent_ids.includes(s.agentId));
+      }
       return respond(res, 200, {
         sessions: accessible.map((session) => {
           const sessionId = session.id || session.sessionId;
@@ -17152,6 +18123,7 @@ reconcileHostRestartRestoreOnBoot();
 schedulerRunner.start();
 
 await ensureHostCloudRegistration();
+hostTelemetryScheduler = startHostTelemetryScheduler({ logger: console });
 
 if (!normalizeString(DEVICE_TOKEN)) {
   console.warn(
@@ -17279,6 +18251,7 @@ process.on("unhandledRejection", (reason) => {
 process.on("SIGINT", () => {
   console.log("\n[oysterun-host] Shutting down...");
   if (tunnelAgent) tunnelAgent.stop();
+  hostTelemetryScheduler?.stop?.();
   schedulerRunner.stop();
   providerModelRefreshRunner.stop();
   schedulerService.close();
@@ -17292,6 +18265,7 @@ process.on("SIGINT", () => {
 
 process.on("SIGTERM", () => {
   if (tunnelAgent) tunnelAgent.stop();
+  hostTelemetryScheduler?.stop?.();
   schedulerRunner.stop();
   providerModelRefreshRunner.stop();
   schedulerService.close();

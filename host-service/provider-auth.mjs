@@ -89,6 +89,23 @@ function buildAuthCheckUnknownStatus(providerId, commandAvailable, error) {
   };
 }
 
+function parseClaudeAuthStatusJson(output) {
+  const text = sanitizeAuthOutput(output).trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    if (typeof parsed.loggedIn !== "boolean") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeClaudeAuthStatus(rawStatus, commandAvailable) {
   const loggedIn = rawStatus?.loggedIn === true;
   return {
@@ -186,9 +203,16 @@ export class ProviderAuthManager {
         const env = { ...process.env };
         delete env.CLAUDECODE;
         const { stdout } = await this.execFileFn(configuredCommand, ["auth", "status"], { env });
-        const parsed = JSON.parse(sanitizeAuthOutput(stdout).trim() || "{}");
+        const parsed = parseClaudeAuthStatusJson(stdout);
+        if (!parsed) {
+          throw new Error("Claude auth status returned malformed JSON");
+        }
         return normalizeClaudeAuthStatus(parsed, true);
       } catch (error) {
+        const parsed = parseClaudeAuthStatusJson(error?.stdout);
+        if (parsed) {
+          return normalizeClaudeAuthStatus(parsed, true);
+        }
         return buildAuthCheckUnknownStatus(providerId, true, error);
       }
     }

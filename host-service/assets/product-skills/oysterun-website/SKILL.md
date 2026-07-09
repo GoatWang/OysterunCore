@@ -37,6 +37,22 @@ node .claude/skills/oysterun-website/scripts/oysterun_website.mjs status --agent
 - `access set --confirm` or `access set --dry-run`
 - `password set --confirm` or `password set --dry-run`
 
+## P183/P307 Runtime Authority
+
+P183/P307 runtime authority alignment makes all installed product skill commands
+usable from a live Host session through Host-injected product runtime
+environment:
+`OYSTERUN_HOST_ORIGIN`, `OYSTERUN_CAPABILITY_TOKEN`, `OYSTERUN_SESSION_ID`,
+`OYSTERUN_AGENT_ID`, and `OYSTERUN_CLI_BIN`. Inside a live Host session,
+helper scripts and direct command examples must execute the injected CLI from
+`OYSTERUN_CLI_BIN`; do not call bare `oysterun`, because it may resolve to a
+globally installed package with older command behavior. That authority is
+Host-wide for installed Oysterun product skills. Website commands still use
+typed CLI fields such as `--agent-id` and `--agent-folder`; they must not bypass
+website validation or raw Host APIs. Do not ask an in-session agent to run
+dashboard login for these commands. Explicit `--token` is the operator override;
+external operator shells may still use dashboard CLI auth.
+
 ## Site Contract
 
 - Shared agent config: `.oysterun/config.json`

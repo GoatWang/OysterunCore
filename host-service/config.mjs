@@ -498,6 +498,8 @@ const DEFAULT_CONFIG = Object.freeze({
   show_hidden_files: true,
   notification_sound_web_enabled: true,
   notification_sound_app_enabled: true,
+  daily_telemetry_enabled: false,
+  daily_telemetry_consent_recorded_at: null,
   debug_fixture_provider_enabled: false,
   debug_large_tool_spillover_provider_enabled: false,
   debug_p135_codex_replay_provider_enabled: false,
@@ -1776,6 +1778,13 @@ function normalizeConfig(config) {
     notification_sound_app_enabled: normalizeBooleanWithDefault(
       migratedCredentialConfig.notification_sound_app_enabled,
       DEFAULT_CONFIG.notification_sound_app_enabled
+    ),
+    daily_telemetry_enabled: normalizeBooleanWithDefault(
+      migratedCredentialConfig.daily_telemetry_enabled,
+      DEFAULT_CONFIG.daily_telemetry_enabled
+    ),
+    daily_telemetry_consent_recorded_at: normalizeString(
+      migratedCredentialConfig.daily_telemetry_consent_recorded_at
     ),
     debug_fixture_provider_enabled: normalizeBooleanWithDefault(
       migratedCredentialConfig.debug_fixture_provider_enabled,

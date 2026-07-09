@@ -32,6 +32,20 @@ node .claude/skills/oysterun-notifications/scripts/oysterun_notifications.mjs se
 - `status`
 - `send`
 
+## P183/P307 Runtime Authority
+
+P183/P307 runtime authority alignment means every command in this skill is
+callable from a live Host session through Host-injected product runtime
+environment:
+`OYSTERUN_HOST_ORIGIN`, `OYSTERUN_CAPABILITY_TOKEN`, `OYSTERUN_SESSION_ID`,
+`OYSTERUN_AGENT_ID`, and `OYSTERUN_CLI_BIN`. Inside a live Host session,
+helper scripts and direct command examples must execute the injected CLI from
+`OYSTERUN_CLI_BIN`; do not call bare `oysterun`, because it may resolve to a
+globally installed package with older command behavior. That authority is
+Host-wide for installed Oysterun product skills. Do not ask an in-session agent
+to run dashboard login for these commands. Explicit `--token` is the operator
+override; external operator shells may still use dashboard CLI auth.
+
 ## Guardrails
 
 - Do not call debug APNs scripts, direct push providers, or notification endpoints directly from this skill.

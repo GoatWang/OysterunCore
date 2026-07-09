@@ -32,6 +32,8 @@ import {
   buildCloudApiUrl,
   resolveCloudBackendUrl,
   resolveCloudBackendStage,
+  resolveDefaultBrowsePath,
+  resolveDirectoryPath,
 } from "./config.mjs";
 import { hashDashboardPassword } from "./dashboard-password.mjs";
 import {
@@ -53,7 +55,7 @@ const repoRoot = dirname(__dirname);
 const releaseServiceScript = join(repoRoot, "tool_scripts", "oysterun_release_service.sh");
 const OYSTERUN_PHONE_APP_DOWNLOAD_URL = "https://oysterun.com";
 const execFileAsync = promisify(execFile);
-const SETUP_TOTAL_STEPS = 6;
+const SETUP_TOTAL_STEPS = 7;
 
 function printDetectedProviderStatus(detectedCommands) {
   console.log("  Detected providers:");
@@ -114,6 +116,8 @@ function parseArgs() {
       opts.displayName = args[++i];
     } else if (args[i] === "--public-base-url" && args[i + 1]) {
       opts.publicBaseUrl = args[++i];
+    } else if (args[i] === "--default-browse-root" && args[i + 1]) {
+      opts.defaultBrowseRoot = args[++i];
     } else if (args[i] === "--dashboard-user" && args[i + 1]) {
       opts.dashboardUser = args[++i];
     } else if (args[i] === "--dashboard-password" && args[i + 1]) {
@@ -174,6 +178,42 @@ async function promptWithDefault(question, defaultValue) {
   return answer || defaultValue || "";
 }
 
+async function promptDefaultBrowseRootForSetup(opts, config) {
+  const existingBrowseRoot =
+    typeof config.default_browse_path === "string" &&
+    config.default_browse_path.trim()
+      ? config.default_browse_path.trim()
+      : "";
+
+  if (opts.defaultBrowseRoot !== undefined) {
+    return resolveDirectoryPath(opts.defaultBrowseRoot, "Default Browse Root");
+  }
+  if (!isInteractiveSetup()) {
+    return undefined;
+  }
+
+  const displayedDefault = existingBrowseRoot || resolveDefaultBrowsePath();
+  console.log(
+    "  Explorer starts here. Choose a root where you can find project folders for agent sessions."
+  );
+  const answer = await prompt(`Default Browse Root [${displayedDefault}]: `);
+  const requestedBrowseRoot = answer.trim();
+  if (!requestedBrowseRoot) {
+    return existingBrowseRoot
+      ? resolveDirectoryPath(existingBrowseRoot, "Default Browse Root")
+      : undefined;
+  }
+  return resolveDirectoryPath(requestedBrowseRoot, "Default Browse Root");
+}
+
+function withOptionalDefaultBrowseRoot(updates, defaultBrowseRoot) {
+  if (defaultBrowseRoot === undefined) return updates;
+  return {
+    ...updates,
+    default_browse_path: defaultBrowseRoot,
+  };
+}
+
 async function promptRequiredValue(question, defaultValue = "") {
   while (true) {
     const answer = await promptWithDefault(question, defaultValue);
@@ -210,9 +250,40 @@ function isInteractiveSetup() {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
+async function promptDailyTelemetryConsentForSetup(config = {}) {
+  if (!isInteractiveSetup()) return {};
+  printSetupStep(5, "Help improve Oysterun?");
+  console.log(
+    "  Oysterun can send a small daily telemetry report to help us improve reliability and understand which features are used."
+  );
+  console.log("  Sent once per day:");
+  console.log("  - Host ID");
+  console.log("  - Oysterun version");
+  console.log("  - Operating system");
+  console.log("  - Daily aggregated feature usage counts");
+  console.log("  Never sent:");
+  console.log("  - Chats or prompts");
+  console.log("  - Files or file paths");
+  console.log("  - Terminal output");
+  console.log("  - Project names");
+  console.log("  - Credentials or secrets");
+  console.log(
+    "  You can change your mind any time in the Host Preferences page."
+  );
+  console.log(
+    "  You can review exactly what is sent in our open-source code and disable telemetry at any time."
+  );
+  const enabled = await promptYesNoDefaultYes("Enable daily telemetry?");
+  if (config.daily_telemetry_enabled === enabled) return {};
+  return {
+    daily_telemetry_enabled: enabled,
+    daily_telemetry_consent_recorded_at: new Date().toISOString(),
+  };
+}
+
 async function maybeShowPhoneAppDownloadStep() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return;
-  printSetupStep(5, "Phone app");
+  printSetupStep(6, "Phone app");
   console.log("  You need the Oysterun phone app to scan the login QR.");
   const showDownload = await promptYesNoDefaultNo(
     "Show phone app download link and QR code?"
@@ -429,7 +500,7 @@ async function maybeInstallOrStartReleaseService(opts, { hostUrl }) {
   const serviceManagerLabel =
     process.platform === "darwin" ? "LaunchAgent" : "pid-file Host service";
   const servicePrepareVerb = process.platform === "darwin" ? "Installing" : "Preparing";
-  printSetupStep(6, serviceAlreadyRunning ? "Restart Host" : "Start Host");
+  printSetupStep(7, serviceAlreadyRunning ? "Restart Host" : "Start Host");
   if (serviceAlreadyRunning && isInteractiveSetup()) {
     console.log("  An Oysterun Host service is already running.");
     console.log(
@@ -862,6 +933,7 @@ async function configureDirectMode(opts, config, detectedCommands) {
       ? opts.publicBaseUrl
       : await promptWithDefault("Public Host URL (optional)", currentPublicBaseUrl)
   );
+  const defaultBrowseRoot = await promptDefaultBrowseRootForSetup(opts, config);
 
   const currentDashboardUser = config.dashboard_user || "";
   const dashboardUser = opts.dashboardUser !== undefined
@@ -879,23 +951,31 @@ async function configureDirectMode(opts, config, detectedCommands) {
       dashboardPasswordHash = hashDashboardPassword(requireNonEmptyPassword(dashboardPasswordUpdate, "Local login password"));
     }
   }
+  const telemetryUpdates = await promptDailyTelemetryConsentForSetup(config);
 
-  writeConfig({
-    ...clearCloudRegistration(),
-    display_name: displayName,
-    port,
-    public_base_url: publicBaseUrl,
-    direct_host_url: publicBaseUrl,
-    dashboard_user: dashboardUser,
-    dashboard_password_hash: dashboardPasswordHash,
-    claude_command: detectedCommands.claude_command,
-    codex_command: detectedCommands.codex_command,
-  });
+  writeConfig(
+    withOptionalDefaultBrowseRoot(
+      {
+        ...clearCloudRegistration(),
+        display_name: displayName,
+        port,
+        public_base_url: publicBaseUrl,
+        direct_host_url: publicBaseUrl,
+        dashboard_user: dashboardUser,
+        dashboard_password_hash: dashboardPasswordHash,
+        claude_command: detectedCommands.claude_command,
+        codex_command: detectedCommands.codex_command,
+        ...telemetryUpdates,
+      },
+      defaultBrowseRoot
+    )
+  );
 
   console.log(`\n  ✓ Direct Host mode configured`);
   console.log(`  Host display name: ${displayName || "(unset)"}`);
   console.log(`  Host port: ${port}`);
   console.log(`  Public Host URL: ${publicBaseUrl || "(unset)"}`);
+  console.log(`  Default Browse Root: ${defaultBrowseRoot || config.default_browse_path || resolveDefaultBrowsePath()}`);
   console.log(`  Local login username: ${dashboardUser}`);
   printDetectedProviderStatus(detectedCommands);
   console.log(`  Config saved to ${getConfigPath()}`);
@@ -950,6 +1030,7 @@ async function configureCloudDirectMode(opts, config, backendUrl, backendStage, 
   if (!directHostUrl) {
     throw new Error("Direct Host URL required");
   }
+  const defaultBrowseRoot = await promptDefaultBrowseRootForSetup(opts, config);
 
   printSetupStep(4, "Host password");
   const hasExistingPasswordHash = typeof config.dashboard_password_hash === "string" && config.dashboard_password_hash.trim().length > 0;
@@ -970,6 +1051,7 @@ async function configureCloudDirectMode(opts, config, backendUrl, backendStage, 
       currentPasswordHash: dashboardPasswordHash,
     });
   }
+  const telemetryUpdates = await promptDailyTelemetryConsentForSetup(config);
 
   console.log(`\n  Registering direct-IP Host with backend at ${backendUrl}...`);
 
@@ -999,39 +1081,46 @@ async function configureCloudDirectMode(opts, config, backendUrl, backendStage, 
     throw new Error("Cloud registration response missing host_id/host_credential");
   }
 
-  writeConfig({
-    connection_mode: "direct",
-    host_id: hostId,
-    host_credential: hostCredential,
-    device_id: hostId,
-    device_token: hostCredential,
-    onboarding_token: data.onboarding_token,
-    onboarding_url: data.onboarding_url,
-    device_signing_public_key: data.device_signing_public_key,
-    device_signing_kid: data.device_signing_kid,
-    cloud_public_key: data.device_signing_public_key,
-    backend_url: backendUrl,
-    tunnel_provider: "none",
-    frp_server_addr: null,
-    frp_server_port: null,
-    frp_token: null,
-    frp_subdomain: null,
-    frp_subdomain_host: null,
-    ngrok_domain: null,
-    port,
-    display_name: displayName,
-    public_base_url: directHostUrl,
-    direct_host_url: directHostUrl,
-    dashboard_user: "admin",
-    dashboard_password_hash: dashboardPasswordHash,
-    registered_at: new Date().toISOString(),
-    claude_command: detectedCommands.claude_command,
-    codex_command: detectedCommands.codex_command,
-  });
+  writeConfig(
+    withOptionalDefaultBrowseRoot(
+      {
+        connection_mode: "direct",
+        host_id: hostId,
+        host_credential: hostCredential,
+        device_id: hostId,
+        device_token: hostCredential,
+        onboarding_token: data.onboarding_token,
+        onboarding_url: data.onboarding_url,
+        device_signing_public_key: data.device_signing_public_key,
+        device_signing_kid: data.device_signing_kid,
+        cloud_public_key: data.device_signing_public_key,
+        backend_url: backendUrl,
+        tunnel_provider: "none",
+        frp_server_addr: null,
+        frp_server_port: null,
+        frp_token: null,
+        frp_subdomain: null,
+        frp_subdomain_host: null,
+        ngrok_domain: null,
+        port,
+        display_name: displayName,
+        public_base_url: directHostUrl,
+        direct_host_url: directHostUrl,
+        dashboard_user: "admin",
+        dashboard_password_hash: dashboardPasswordHash,
+        registered_at: new Date().toISOString(),
+        claude_command: detectedCommands.claude_command,
+        codex_command: detectedCommands.codex_command,
+        ...telemetryUpdates,
+      },
+      defaultBrowseRoot
+    )
+  );
 
   console.log(`\n  ✓ Direct-IP Cloud Host registration complete`);
   console.log(`  Host ID: ${hostId}`);
   console.log(`  Direct Host URL: ${directHostUrl}`);
+  console.log(`  Default Browse Root: ${defaultBrowseRoot || config.default_browse_path || resolveDefaultBrowsePath()}`);
   console.log(`  Backend URL: ${backendUrl}`);
   console.log(`  Cloud stage: ${backendStage}`);
   console.log(`  Local login user: admin`);
@@ -1099,6 +1188,8 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   if (!Number.isInteger(port) || port <= 0) {
     throw new Error(`Invalid port: ${portInput}`);
   }
+  const defaultBrowseRoot = await promptDefaultBrowseRootForSetup(opts, config);
+  const telemetryUpdates = await promptDailyTelemetryConsentForSetup(config);
 
   console.log(`\n  Registering with backend at ${backendUrl}...`);
 
@@ -1136,39 +1227,46 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   }
   const creds = await credResp.json();
 
-  writeConfig({
-    connection_mode: "cloud",
-    device_id: data.device_id,
-    onboarding_token: data.onboarding_token,
-    onboarding_url: data.onboarding_url,
-    device_signing_public_key: data.device_signing_public_key,
-    device_signing_kid: data.device_signing_kid,
-    cloud_public_key: data.device_signing_public_key,
-    device_token: data.device_token,
-    backend_url: backendUrl,
-    tunnel_provider: creds.tunnel_provider,
-    frp_server_addr: creds.frp_server_addr,
-    frp_server_port: creds.frp_server_port,
-    frp_token: creds.frp_token,
-    frp_subdomain: creds.frp_subdomain,
-    frp_subdomain_host: creds.frp_subdomain_host,
-    ngrok_domain: ngrokDomain || creds.ngrok_domain || null,
-    port,
-    display_name: displayName,
-    registered_at: new Date().toISOString(),
-    claude_command: detectedCommands.claude_command,
-    codex_command: detectedCommands.codex_command,
-  });
+  writeConfig(
+    withOptionalDefaultBrowseRoot(
+      {
+        connection_mode: "cloud",
+        device_id: data.device_id,
+        onboarding_token: data.onboarding_token,
+        onboarding_url: data.onboarding_url,
+        device_signing_public_key: data.device_signing_public_key,
+        device_signing_kid: data.device_signing_kid,
+        cloud_public_key: data.device_signing_public_key,
+        device_token: data.device_token,
+        backend_url: backendUrl,
+        tunnel_provider: creds.tunnel_provider,
+        frp_server_addr: creds.frp_server_addr,
+        frp_server_port: creds.frp_server_port,
+        frp_token: creds.frp_token,
+        frp_subdomain: creds.frp_subdomain,
+        frp_subdomain_host: creds.frp_subdomain_host,
+        ngrok_domain: ngrokDomain || creds.ngrok_domain || null,
+        port,
+        display_name: displayName,
+        registered_at: new Date().toISOString(),
+        claude_command: detectedCommands.claude_command,
+        codex_command: detectedCommands.codex_command,
+        ...telemetryUpdates,
+      },
+      defaultBrowseRoot
+    )
+  );
 
   console.log(`\n  ✓ Cloud registration complete`);
   console.log(`  Device ID: ${data.device_id}`);
   console.log(`  Cloud stage: ${backendStage}`);
+  console.log(`  Default Browse Root: ${defaultBrowseRoot || config.default_browse_path || resolveDefaultBrowsePath()}`);
   console.log(`  Tunnel hostname: ${creds.tunnel_hostname}  (${creds.tunnel_provider})`);
   console.log(`  Onboarding URL: ${data.onboarding_url}`);
   printDetectedProviderStatus(detectedCommands);
 
   await maybeShowPhoneAppDownloadStep();
-  printSetupStep(6, "Login QR");
+  printSetupStep(7, "Login QR");
   console.log("\n  Scan this QR code with the Oysterun app to claim your farm:\n");
   qrcode.generate(data.onboarding_url, { small: true });
 

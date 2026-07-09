@@ -1,5 +1,0 @@
-CAPACITOR_DEBUG = false
-OYSTERUN_CAPACITOR_APP_ID = com.example.oysteruncore.beta
-OYSTERUN_CAPACITOR_APP_NAME = OysterunCoreBeta
-OYSTERUN_APS_ENVIRONMENT = development
-OYSTERUN_APP_ATTEST_ENVIRONMENT = development

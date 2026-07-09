@@ -1,8 +1,8 @@
 ---
 name: oysterun-find-context
-description: Use for current-session Oysterun context lookup around a known Matrix/chat event through the P86 CLI without direct Host API calls or cross-session search.
+description: Use for Oysterun context lookup around a known Matrix/chat event in the current or explicit target session through the P86 CLI without direct Host API calls or global search.
 metadata:
-  short-description: Current-session chat context lookup
+  short-description: Target-session chat context lookup
 ---
 
 # Oysterun Find Context
@@ -14,12 +14,12 @@ are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs`
 after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs`
 before review.
 
-Use this module skill when a live Oysterun session needs a bounded
-current-session context window around a known chat/Matrix event id. It wraps the
-P86 product CLI contract:
+Use this module skill when a live Oysterun session needs a bounded context
+window around a known chat/Matrix event id in the current session or an explicit
+target session. It wraps the P86 product CLI contract:
 
 ```text
-oysterun chat messages-around --session-id <session_id> --agent-id <agent_id> --event-id <matrix_event_id>
+oysterun chat messages-around --event-id <matrix_event_id> [--session-ref <display_name>]
 ```
 
 The helper delegates to the same CLI surface:
@@ -37,20 +37,38 @@ When Host injects this skill into a live session, the helper path is:
 
 ```bash
 node .claude/skills/oysterun-find-context/scripts/oysterun_find_context.mjs \
-  --session-id <session_id> \
-  --agent-id <agent_id> \
   --event-id <matrix_event_id>
 ```
+
+When the user names another visible live session, pass it with `--session-ref`
+or `--session`, not `--session-id`. `--session-id` is exact Host session UUID
+only.
 
 ## Commands
 
 - `messages-around`
 
+## P183/P307 Runtime Authority
+
+P183/P307 runtime authority alignment preserves this skill's bounded context
+lookup path while making installed product skill commands usable from a live
+Host session through Host-injected product runtime environment:
+`OYSTERUN_HOST_ORIGIN`, `OYSTERUN_CAPABILITY_TOKEN`, `OYSTERUN_SESSION_ID`,
+`OYSTERUN_AGENT_ID`, and `OYSTERUN_CLI_BIN`. Inside a live Host session,
+helper scripts and direct command examples must execute the injected CLI from
+`OYSTERUN_CLI_BIN`; do not call bare `oysterun`, because it may resolve to a
+globally installed package with older command behavior. That authority is
+Host-wide for installed Oysterun product skills, so one live session may read
+bounded context from another live session by `--session-ref` when the user asks.
+Do not ask an in-session agent to run dashboard login for this command. Explicit
+`--token` is the operator override; external operator shells may still use
+dashboard CLI auth.
+
 ## Guardrails
 
-- Use this skill only for current-session context around an explicit event id.
-- Do not use it for cross-session search, global Matrix indexing, or broad
-  history mining.
+- Use this skill only for bounded context around an explicit event id.
+- Do not use it for global Matrix indexing, broad history mining, or raw local
+  session JSONL scans.
 - Do not call `/session/messages`, `/session/transcript/search`,
   `/sessions/search`, Matrix facade routes, or Host APIs directly from this
   skill. The helper must go through `oysterun chat messages-around`.

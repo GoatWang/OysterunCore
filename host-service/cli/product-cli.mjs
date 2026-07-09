@@ -259,10 +259,7 @@ function resolveRuntimeCapabilityToken({ env = process.env } = {}) {
 }
 
 function hasExplicitDashboardAuth({ options = {}, env = process.env } = {}) {
-  return Boolean(
-    optionalOption(options, "token") ||
-      normalizeString(env.OYSTERUN_DASHBOARD_TOKEN)
-  );
+  return Boolean(optionalOption(options, "token"));
 }
 
 function hasLiveSessionRuntimeCapabilityEnv(env = process.env) {
@@ -290,6 +287,20 @@ function requireSessionId(options = {}, env = process.env) {
   return value;
 }
 
+function resolveSessionRef(options = {}) {
+  return optionalOption(options, "sessionRef", "session");
+}
+
+function requireSessionTarget(options = {}, env = process.env) {
+  const sessionId = optionalOption(options, "sessionId");
+  if (sessionId) return { session_id: sessionId };
+  const sessionRef = resolveSessionRef(options);
+  if (sessionRef) return { session_ref: sessionRef };
+  const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+  if (envSessionId) return { session_id: envSessionId };
+  fail("session id or session ref is required");
+}
+
 function resolveAgentId(options = {}, env = process.env) {
   return optionalOption(options, "agentId", "agent") || normalizeString(env.OYSTERUN_AGENT_ID);
 }
@@ -310,6 +321,26 @@ async function readResponse(response) {
   }
 }
 
+function formatApiError(data) {
+  const safe = redact(data);
+  const primary = normalizeString(safe?.error) || normalizeString(safe?.message);
+  if (!primary) return JSON.stringify(safe);
+  const details = [];
+  for (const key of [
+    "reason",
+    "capability_scope",
+    "session_id",
+    "agent_id",
+    "runtime_capability_auth",
+  ]) {
+    const value = safe?.[key];
+    if (value !== undefined && value !== null && value !== "") {
+      details.push(`${key}=${String(value)}`);
+    }
+  }
+  return details.length ? `${primary} (${details.join(", ")})` : primary;
+}
+
 export async function apiRequest({
   method,
   path,
@@ -319,7 +350,7 @@ export async function apiRequest({
   fetchFn = fetch,
   auth = true,
   allowRuntimeCapability = true,
-  preferRuntimeCapability = false,
+  preferRuntimeCapability = shouldPreferCurrentSessionRuntimeCapability(options, env),
 }) {
   const target = resolveTarget({ options, env });
   const runtimeCapabilityToken =
@@ -352,9 +383,7 @@ export async function apiRequest({
   const data = await readResponse(response);
   if (!response.ok) {
     const error = new Error(
-      `${method} ${path} failed (${response.status}): ${
-        data?.error || data?.message || JSON.stringify(redact(data))
-      }`
+      `${method} ${path} failed (${response.status}): ${formatApiError(data)}`
     );
     error.exitCode = response.status >= 500 ? 1 : 2;
     error.response = data;
@@ -453,8 +482,12 @@ function messageMatchesChatSearch(message, queryLower) {
 }
 
 async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
-  const sessionId = requireSessionId(options, env);
-  const agentId = requireAgentId(options, env);
+  const targetContext = await resolveSessionMessagesTarget({
+    options,
+    env,
+    fetchFn,
+  });
+  const { sessionTarget, agentId } = targetContext;
   const searchQuery = requireOption(options, "query", "query", "q");
   const queryLower = searchQuery.toLowerCase();
   const resultLimit = positiveIntegerOption(
@@ -465,6 +498,7 @@ async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
     "limit"
   );
   const matches = [];
+  let resolvedSessionId = targetContext.sessionId || sessionTarget.session_id || null;
   let afterSeq = 0;
   let latestSeq = null;
   let scannedMessages = 0;
@@ -480,7 +514,7 @@ async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
     const response = await apiRequest({
       method: "GET",
       path: `/session/messages${query({
-        session_id: sessionId,
+        ...sessionTarget,
         agent_id: agentId,
         limit: CHAT_SEARCH_PAGE_LIMIT,
         after_seq: afterSeq,
@@ -491,6 +525,9 @@ async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
     });
     scannedPages += 1;
     const body = response.data;
+    if (!resolvedSessionId && body?.session_id) {
+      resolvedSessionId = body.session_id;
+    }
     const pageMessages = Array.isArray(body?.messages) ? body.messages : [];
     for (const message of pageMessages) {
       scannedMessages += 1;
@@ -525,10 +562,14 @@ async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
     hostReportedHasMore &&
     scannedPages >= CHAT_SEARCH_MAX_PAGES &&
     !resultLimitReached;
+  const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+  const crossSessionSearch =
+    Boolean(resolvedSessionId && envSessionId && resolvedSessionId !== envSessionId);
 
   return {
     status: "chat_search_results",
-    session_id: sessionId,
+    session_id: resolvedSessionId,
+    session_ref: sessionTarget.session_ref || null,
     agent_id: agentId,
     query: searchQuery,
     limit: resultLimit,
@@ -540,8 +581,10 @@ async function searchCurrentSessionChatMessages({ options, env, fetchFn }) {
     host_db_transcript_product_truth: false,
     legacy_transcript_search_used: false,
     legacy_transcript_search_endpoint_used: false,
-    cross_session_search: false,
-    search_surface: "session_messages_matrix_current_session",
+    cross_session_search: crossSessionSearch,
+    search_surface: crossSessionSearch
+      ? "session_messages_matrix_target_session"
+      : "session_messages_matrix_current_session",
     search_scan: {
       endpoint: "/session/messages",
       page_limit: CHAT_SEARCH_PAGE_LIMIT,
@@ -575,8 +618,12 @@ function chatMessageMatchesContextTarget(message, targetId) {
 }
 
 async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
-  const sessionId = requireSessionId(options, env);
-  const agentId = requireAgentId(options, env);
+  const targetContext = await resolveSessionMessagesTarget({
+    options,
+    env,
+    fetchFn,
+  });
+  const { sessionTarget, agentId } = targetContext;
   const targetId = requireOption(
     options,
     "event id",
@@ -600,6 +647,7 @@ async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
     "after"
   );
   const messages = [];
+  let resolvedSessionId = targetContext.sessionId || sessionTarget.session_id || null;
   let afterSeq = 0;
   let latestSeq = null;
   let scannedPages = 0;
@@ -614,7 +662,7 @@ async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
     const response = await apiRequest({
       method: "GET",
       path: `/session/messages${query({
-        session_id: sessionId,
+        ...sessionTarget,
         agent_id: agentId,
         limit: CHAT_MESSAGES_AROUND_PAGE_LIMIT,
         after_seq: afterSeq,
@@ -625,6 +673,9 @@ async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
     });
     scannedPages += 1;
     const body = response.data;
+    if (!resolvedSessionId && body?.session_id) {
+      resolvedSessionId = body.session_id;
+    }
     const pageMessages = Array.isArray(body?.messages) ? body.messages : [];
     for (const message of pageMessages) {
       messages.push(message);
@@ -676,12 +727,16 @@ async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
     targetIndex < 0 &&
     hostReportedHasMore &&
     scannedPages >= CHAT_MESSAGES_AROUND_MAX_PAGES;
+  const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+  const crossSessionContext =
+    Boolean(resolvedSessionId && envSessionId && resolvedSessionId !== envSessionId);
 
   return {
     status: targetMessage
       ? "chat_messages_around"
       : "chat_messages_around_not_found",
-    session_id: sessionId,
+    session_id: resolvedSessionId,
+    session_ref: sessionTarget.session_ref || null,
     agent_id: agentId,
     target_event_id: targetId,
     target_found: Boolean(targetMessage),
@@ -698,8 +753,10 @@ async function readCurrentSessionMessagesAround({ options, env, fetchFn }) {
     host_db_transcript_product_truth: false,
     legacy_transcript_search_used: false,
     legacy_transcript_search_endpoint_used: false,
-    cross_session_search: false,
-    context_surface: "session_messages_matrix_current_session",
+    cross_session_search: crossSessionContext,
+    context_surface: crossSessionContext
+      ? "session_messages_matrix_target_session"
+      : "session_messages_matrix_current_session",
     context_scan: {
       endpoint: "/session/messages",
       page_limit: CHAT_MESSAGES_AROUND_PAGE_LIMIT,
@@ -734,9 +791,9 @@ function boolPayload(options, sourceKey, targetKey, payload) {
   }
 }
 
-function sessionStartPayload(options) {
+function sessionStartPayload(options, env = process.env) {
   const body = {
-    agent_id: requireOption(options, "agent id", "agentId", "agent"),
+    agent_id: requireAgentId(options, env),
   };
   const folder = optionalOption(options, "agentFolder", "folder");
   if (folder) body.agent_folder = folder;
@@ -770,6 +827,153 @@ function sessionStartPayload(options) {
       allowedUsers === "." ? ["."] : allowedUsers.split(",").map((entry) => entry.trim()).filter(Boolean);
   }
   return body;
+}
+
+function commaListOption(options, ...keys) {
+  const value = optionalOption(options, ...keys);
+  if (!value) return null;
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function sessionProfileUpdatePayload(options, env = process.env) {
+  const body = {};
+  boolPayload(options, "notificationsEnabled", "notifications_enabled", body);
+  boolPayload(options, "webEnabled", "web_enabled", body);
+  const webAccess = optionalOption(options, "webAccess", "access");
+  if (webAccess) body.web_access = webAccess;
+  const webPassword = optionalOption(options, "webPassword", "password");
+  if (webPassword) body.web_password = webPassword;
+  const allowedPaths = commaListOption(options, "allowedPaths");
+  if (allowedPaths) body.allowed_paths = allowedPaths;
+  boolPayload(options, "telegramEnabled", "telegram_enabled", body);
+  boolPayload(options, "telegramSendToolMessages", "telegram_send_tool_messages", body);
+  const telegramBotToken = optionalOption(options, "telegramBotToken");
+  if (telegramBotToken) body.telegram_bot_token = telegramBotToken;
+  const telegramAllowedUsers = optionalOption(options, "telegramAllowedUsers");
+  if (telegramAllowedUsers) {
+    body.telegram_allowed_users =
+      telegramAllowedUsers === "."
+        ? ["."]
+        : telegramAllowedUsers.split(",").map((entry) => entry.trim()).filter(Boolean);
+  }
+  boolPayload(options, "updateConfig", "update_config", body);
+  boolPayload(options, "persistConfig", "persist_config", body);
+  boolPayload(options, "persistSharedConfig", "persist_shared_config", body);
+  return body;
+}
+
+function hasSessionProfileUpdateBody(body) {
+  return Object.keys(body).some((key) => ![
+    "session_id",
+    "session_ref",
+    "update_config",
+    "persist_config",
+    "persist_shared_config",
+  ].includes(key));
+}
+
+function resolveHistorySessionRecord(data, sessionRef) {
+  const normalizedRef = normalizeString(sessionRef);
+  if (!normalizedRef) return null;
+  const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+  const idMatches = sessions.filter((entry) => normalizeString(entry.session_id) === normalizedRef);
+  if (idMatches.length === 1) return idMatches[0];
+  const nameMatches = sessions.filter((entry) => normalizeString(entry.session_name) === normalizedRef);
+  if (nameMatches.length === 1) return nameMatches[0];
+  if (idMatches.length > 1 || nameMatches.length > 1) {
+    fail(`session ref is ambiguous in history: ${normalizedRef}`);
+  }
+  return null;
+}
+
+async function resolveSessionResumeTarget({ options, env, fetchFn }) {
+  const direct =
+    optionalOption(options, "sessionId") ||
+    optionalOption(options, "sourceSessionId");
+  if (direct) {
+    return {
+      sessionId: direct,
+      agentId: requireAgentId(options, env),
+    };
+  }
+  const sessionRef =
+    optionalOption(options, "sourceSessionRef") ||
+    resolveSessionRef(options);
+  if (!sessionRef) {
+    return {
+      sessionId: requireSessionId(options, env),
+      agentId: requireAgentId(options, env),
+    };
+  }
+  const history = (await apiRequest({
+    method: "GET",
+    path: "/sessions/history",
+    options,
+    env,
+    fetchFn,
+  })).data;
+  const record = resolveHistorySessionRecord(history, sessionRef);
+  if (!record) fail(`session ref not found in history: ${sessionRef}`);
+  const sessionId = normalizeString(record.session_id);
+  if (!sessionId) fail(`history record for ${sessionRef} is missing session_id`);
+  const agentId = normalizeString(record.agent_id) || requireAgentId(options, env);
+  return { sessionId, agentId };
+}
+
+async function resolveLiveSessionTargetStatus({
+  options,
+  env,
+  fetchFn,
+  sessionTarget = null,
+} = {}) {
+  const target = sessionTarget || requireSessionTarget(options, env);
+  return (await apiRequest({
+    method: "GET",
+    path: `/session/status${query(target)}`,
+    options,
+    env,
+    fetchFn,
+  })).data;
+}
+
+async function resolveSessionMessagesTarget({ options, env, fetchFn }) {
+  const sessionTarget = requireSessionTarget(options, env);
+  const explicitAgentId = resolveAgentId(options, {});
+  const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+  const envAgentId = normalizeString(env.OYSTERUN_AGENT_ID);
+  if (
+    sessionTarget.session_id &&
+    (explicitAgentId || (envAgentId && sessionTarget.session_id === envSessionId))
+  ) {
+    return {
+      sessionTarget,
+      sessionId: sessionTarget.session_id,
+      agentId: explicitAgentId || envAgentId,
+    };
+  }
+  const status = await resolveLiveSessionTargetStatus({
+    options,
+    env,
+    fetchFn,
+    sessionTarget,
+  });
+  const statusAgentId = normalizeString(status?.agent_id);
+  if (explicitAgentId && statusAgentId && explicitAgentId !== statusAgentId) {
+    fail("target session agent id does not match explicit --agent-id");
+  }
+  const agentId =
+    explicitAgentId ||
+    statusAgentId ||
+    resolveAgentId(options, env);
+  if (!agentId) fail("target session agent id is required");
+  return {
+    sessionTarget,
+    sessionId: normalizeString(status?.session_id) || sessionTarget.session_id || null,
+    agentId,
+  };
 }
 
 async function runAuth({ action, options, env, fetchFn, stdout }) {
@@ -869,17 +1073,16 @@ async function runSessions({ action, rest, options, env, fetchFn }) {
     return (await apiRequest({
       method: "POST",
       path: "/session/start",
-      body: sessionStartPayload(options),
+      body: sessionStartPayload(options, env),
       options,
       env,
       fetchFn,
     })).data;
   }
   if (action === "status") {
-    const sessionId = requireSessionId(options, env);
     return (await apiRequest({
       method: "GET",
-      path: `/session/status${query({ session_id: sessionId })}`,
+      path: `/session/status${query(requireSessionTarget(options, env))}`,
       options,
       env,
       fetchFn,
@@ -887,19 +1090,105 @@ async function runSessions({ action, rest, options, env, fetchFn }) {
   }
   if (action === "url") {
     const target = resolveTarget({ options, env });
-    const sessionId = requireSessionId(options, env);
+    const sessionTarget = requireSessionTarget(options, env);
+    let sessionId = sessionTarget.session_id || "";
+    if (!sessionId) {
+      const status = await resolveLiveSessionTargetStatus({
+        options,
+        env,
+        fetchFn,
+        sessionTarget,
+      });
+      sessionId = normalizeString(status?.session_id);
+    }
+    if (!sessionId) fail("session id is required");
     return {
       status: "session_url",
       session_id: sessionId,
+      session_ref: sessionTarget.session_ref || null,
       target_url: `${target.origin}/app/sessions/${encodeURIComponent(sessionId)}/chat`,
     };
+  }
+  if (action === "profile") {
+    const profileAction = rest[0] || "";
+    const sessionTarget = requireSessionTarget(options, env);
+    if (profileAction === "get") {
+      const status = await resolveLiveSessionTargetStatus({
+        options,
+        env,
+        fetchFn,
+        sessionTarget,
+      });
+      return {
+        status: "session_profile",
+        session_id: status.session_id || sessionTarget.session_id || null,
+        session_ref: sessionTarget.session_ref || null,
+        session_name: status.session_name || null,
+        agent_id: status.agent_id || null,
+        profile_config: status.profile_config || {},
+        notification_settings: status.notification_settings || null,
+        website: status.website || null,
+        telegram: status.telegram || null,
+        telegram_runtime: status.telegram_runtime || null,
+      };
+    }
+    if (profileAction === "update") {
+      const persistFlags = {};
+      boolPayload(options, "updateConfig", "update_config", persistFlags);
+      boolPayload(options, "persistConfig", "persist_config", persistFlags);
+      boolPayload(options, "persistSharedConfig", "persist_shared_config", persistFlags);
+      const sessionName = optionalOption(options, "sessionName", "name");
+      const profileBody = {
+        ...sessionTarget,
+        ...sessionProfileUpdatePayload(options, env),
+      };
+      const result = {
+        status: "session_profile_updated",
+        session_id: sessionTarget.session_id || null,
+        session_ref: sessionTarget.session_ref || null,
+      };
+      if (sessionName) {
+        const renameResult = (await apiRequest({
+          method: "POST",
+          path: "/session/rename",
+          body: {
+            ...sessionTarget,
+            session_name: sessionName,
+            ...persistFlags,
+          },
+          options,
+          env,
+          fetchFn,
+        })).data;
+        result.rename = renameResult;
+        result.session_id = renameResult.session_id || result.session_id;
+        result.session_name = renameResult.session_name || sessionName;
+      }
+      if (hasSessionProfileUpdateBody(profileBody)) {
+        const profileResult = (await apiRequest({
+          method: "PATCH",
+          path: "/session/profile-config",
+          body: profileBody,
+          options,
+          env,
+          fetchFn,
+        })).data;
+        result.profile_config_update = profileResult;
+        result.session_id = profileResult.session_id || result.session_id;
+      }
+      if (!sessionName && !hasSessionProfileUpdateBody(profileBody)) {
+        fail("profile update requires at least one typed field");
+      }
+      return result;
+    }
+    fail(`unknown sessions profile action: ${profileAction}`);
   }
   if (action === "rename") {
     return (await apiRequest({
       method: "POST",
       path: "/session/rename",
       body: {
-        session_id: requireOption(options, "session id", "sessionId"),
+        ...requireSessionTarget(options, env),
         session_name: requireOption(options, "session name", "sessionName", "name"),
       },
       options,
@@ -909,7 +1198,7 @@ async function runSessions({ action, rest, options, env, fetchFn }) {
   }
   for (const dangerous of ["stop", "interrupt", "restart"]) {
     if (action === dangerous) {
-      const body = { session_id: requireOption(options, "session id", "sessionId") };
+      const body = requireSessionTarget(options, env);
       boolPayload(
         options,
         "confirmBetaProviderPermissionMode",
@@ -933,10 +1222,18 @@ async function runSessions({ action, rest, options, env, fetchFn }) {
     }
   }
   if (action === "resume" || action === "branch-resume") {
+    const resumeTarget = await resolveSessionResumeTarget({
+      options,
+      env,
+      fetchFn,
+    });
     const body = {
-      session_id: optionalOption(options, "sessionId") || optionalOption(options, "sourceSessionId"),
-      source_session_id: optionalOption(options, "sourceSessionId") || optionalOption(options, "sessionId"),
-      agent_id: requireOption(options, "agent id", "agentId", "agent"),
+      session_id: resumeTarget.sessionId,
+      source_session_id:
+        optionalOption(options, "sourceSessionId") ||
+        optionalOption(options, "sessionId") ||
+        resumeTarget.sessionId,
+      agent_id: resumeTarget.agentId,
     };
     const folder = optionalOption(options, "agentFolder", "folder");
     if (folder) body.agent_folder = folder;
@@ -965,12 +1262,12 @@ async function runSessions({ action, rest, options, env, fetchFn }) {
 }
 
 async function runSessionTelegram({ action, options, env, fetchFn }) {
-  const sessionId = requireSessionId(options, env);
+  const sessionTarget = requireSessionTarget(options, env);
   const preferRuntimeCapability = shouldPreferCurrentSessionRuntimeCapability(options, env);
   if (action === "get") {
     const status = (await apiRequest({
       method: "GET",
-      path: `/session/status${query({ session_id: sessionId })}`,
+      path: `/session/status${query(sessionTarget)}`,
       options,
       env,
       fetchFn,
@@ -978,7 +1275,8 @@ async function runSessionTelegram({ action, options, env, fetchFn }) {
     })).data;
     return {
       status: "session_telegram",
-      session_id: sessionId,
+      session_id: status.session_id || sessionTarget.session_id || null,
+      session_ref: sessionTarget.session_ref || null,
       telegram: status.telegram || {},
       telegram_runtime: status.telegram_runtime || {},
     };
@@ -986,7 +1284,7 @@ async function runSessionTelegram({ action, options, env, fetchFn }) {
   if (!["enable", "disable", "update"].includes(action)) {
     fail(`unknown sessions telegram action: ${action}`);
   }
-  const body = { session_id: sessionId };
+  const body = { ...sessionTarget };
   if (action === "enable") body.telegram_enabled = true;
   if (action === "disable") body.telegram_enabled = false;
   if (action === "update") {
@@ -1017,7 +1315,7 @@ async function runChat({ action, rest, options, env, fetchFn }) {
       method: "POST",
       path: "/session/send",
       body: {
-        session_id: requireSessionId(options, env),
+        ...requireSessionTarget(options, env),
         text: requireOption(options, "text", "text"),
         nickname: optionalOption(options, "nickname") || "Owner",
       },
@@ -1030,7 +1328,7 @@ async function runChat({ action, rest, options, env, fetchFn }) {
     return (await apiRequest({
       method: "GET",
       path: `/session/history${query({
-        session_id: requireSessionId(options, env),
+        ...requireSessionTarget(options, env),
       })}`,
       options,
       env,
@@ -1038,11 +1336,16 @@ async function runChat({ action, rest, options, env, fetchFn }) {
     })).data;
   }
   if (action === "messages") {
+    const targetContext = await resolveSessionMessagesTarget({
+      options,
+      env,
+      fetchFn,
+    });
     return (await apiRequest({
       method: "GET",
       path: `/session/messages${query({
-        session_id: requireSessionId(options, env),
-        agent_id: requireAgentId(options, env),
+        ...targetContext.sessionTarget,
+        agent_id: targetContext.agentId,
         limit: optionalOption(options, "limit"),
         after_seq: optionalOption(options, "afterSeq"),
       })}`,
@@ -1069,7 +1372,7 @@ async function runLoop({ action, options, env, fetchFn }) {
     return (await apiRequest({
       method: "GET",
       path: `/session/loops${query({
-        session_id: requireSessionId(options, env),
+        ...requireSessionTarget(options, env),
       })}`,
       options,
       env,
@@ -1081,7 +1384,7 @@ async function runLoop({ action, options, env, fetchFn }) {
       method: "POST",
       path: "/session/loops",
       body: {
-        session_id: requireSessionId(options, env),
+        ...requireSessionTarget(options, env),
         interval: requireOption(options, "interval", "interval"),
         command_text: requireOption(options, "text", "text", "prompt"),
         start_at: optionalOption(options, "startAt") || null,
@@ -1096,7 +1399,7 @@ async function runLoop({ action, options, env, fetchFn }) {
   if (["update", "enable", "disable", "delete"].includes(action)) {
     const scheduleId = requireOption(options, "loop id", "loopId", "scheduleId", "id");
     const body = {
-      session_id: requireSessionId(options, env),
+      ...requireSessionTarget(options, env),
     };
     if (action === "enable") body.enabled = true;
     if (action === "disable") body.enabled = false;
@@ -1133,16 +1436,115 @@ function schedulerPayload(options) {
     ["name", "name"],
     ["prompt", "prompt"],
     ["text", "prompt"],
-    ["interval", "interval"],
     ["startAt", "start_at"],
     ["endAt", "end_at"],
     ["provider", "provider"],
     ["model", "model"],
+    ["targetKind", "target_kind"],
+    ["savedSessionId", "saved_session_id"],
+    ["sessionSetupRecordId", "session_setup_record_id"],
+    ["frequency", "frequency"],
+    ["ruleType", "rule_type"],
+    ["runAt", "run_at"],
+    ["onceAt", "once_at"],
+    ["time", "time"],
+    ["timezone", "timezone"],
+    ["weekday", "weekday"],
   ]) {
     const value = optionalOption(options, optionKey);
     if (value) body[fieldName] = value;
   }
+  const weekdays = commaListOption(options, "weekdays", "selectedWeekdays");
+  if (weekdays) body.weekdays = weekdays;
   boolPayload(options, "enabled", "enabled", body);
+  return body;
+}
+
+function parseSchedulerJsonOption(options, key, bodyField) {
+  const value = optionalOption(options, key);
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    fail(`--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} must be JSON: ${err.message}`);
+  }
+}
+
+function applySchedulerJsonPayloadOptions(body, options) {
+  const setupSnapshot = parseSchedulerJsonOption(options, "setupSnapshot", "setup_snapshot");
+  if (setupSnapshot) body.setup_snapshot = setupSnapshot;
+  const sessionSetupPayload = parseSchedulerJsonOption(
+    options,
+    "sessionSetupPayload",
+    "session_setup_payload"
+  );
+  if (sessionSetupPayload) body.session_setup_payload = sessionSetupPayload;
+}
+
+function hasExplicitSchedulerTargetOptions(options = {}) {
+  return Boolean(
+    optionalOption(options, "targetKind") ||
+      optionalOption(options, "savedSessionId") ||
+      optionalOption(options, "sessionSetupRecordId") ||
+      optionalOption(options, "setupSnapshot") ||
+      optionalOption(options, "sessionSetupPayload")
+  );
+}
+
+function schedulerSessionTargetFromOptions(options = {}, env = process.env) {
+  const sessionId = optionalOption(options, "sessionId");
+  if (sessionId) return { session_id: sessionId };
+  const sessionRef = resolveSessionRef(options);
+  if (sessionRef) return { session_ref: sessionRef };
+  const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+  if (envSessionId) return { session_id: envSessionId };
+  return null;
+}
+
+function assertHostSchedulerRuleOptions(options = {}) {
+  if (optionalOption(options, "interval")) {
+    fail(
+      "scheduler create/update does not support --interval. Use `chat loop create --interval ...` for in-session loops, or use scheduler rule fields such as --frequency daily --time HH:mm or --frequency once --run-at <ISO time>."
+    );
+  }
+}
+
+async function buildSchedulerRequestBody({ options, env, fetchFn, includeDefaultSessionTarget = false }) {
+  assertHostSchedulerRuleOptions(options);
+  const body = schedulerPayload(options);
+  applySchedulerJsonPayloadOptions(body, options);
+  if (body.saved_session_id && !body.target_kind) {
+    body.target_kind = "saved_session";
+  }
+  if (
+    includeDefaultSessionTarget &&
+    !hasExplicitSchedulerTargetOptions(options)
+  ) {
+    const sessionTarget = schedulerSessionTargetFromOptions(options, env);
+    if (sessionTarget) {
+      let sessionId = sessionTarget.session_id || "";
+      let agentId = optionalOption(options, "agentId") || "";
+      const envSessionId = normalizeString(env.OYSTERUN_SESSION_ID);
+      const envAgentId = normalizeString(env.OYSTERUN_AGENT_ID);
+      if (!agentId && sessionId && sessionId === envSessionId) {
+        agentId = envAgentId;
+      }
+      if (!sessionId || !agentId || sessionTarget.session_ref) {
+        const status = await resolveLiveSessionTargetStatus({
+          options,
+          env,
+          fetchFn,
+          sessionTarget,
+        });
+        sessionId = normalizeString(status?.session_id) || sessionId;
+        agentId = agentId || normalizeString(status?.agent_id);
+      }
+      if (!sessionId) fail("scheduler target session id is required");
+      body.target_kind = "saved_session";
+      body.saved_session_id = sessionId;
+      if (agentId) body.agent_id = agentId;
+    }
+  }
   return body;
 }
 
@@ -1154,7 +1556,12 @@ async function runScheduler({ action, options, env, fetchFn }) {
     return (await apiRequest({
       method: "POST",
       path: "/scheduler/schedules",
-      body: schedulerPayload(options),
+      body: await buildSchedulerRequestBody({
+        options,
+        env,
+        fetchFn,
+        includeDefaultSessionTarget: true,
+      }),
       options,
       env,
       fetchFn,
@@ -1172,7 +1579,12 @@ async function runScheduler({ action, options, env, fetchFn }) {
     })).data;
   }
   if (["update", "enable", "disable", "delete"].includes(action)) {
-    const body = schedulerPayload(options);
+    const body = await buildSchedulerRequestBody({
+      options,
+      env,
+      fetchFn,
+      includeDefaultSessionTarget: false,
+    });
     if (action === "enable") body.enabled = true;
     if (action === "disable") body.enabled = false;
     const dry = withDryRun(`scheduler ${action}`, options, {

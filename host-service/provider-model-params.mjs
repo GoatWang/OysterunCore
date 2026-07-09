@@ -421,12 +421,28 @@ export function writeProviderModelParams(patch = {}, options = {}) {
 
 function statusTimestamp(params, providerId) {
   const providerModels = params.provider_models?.[providerId] || {};
+  const providerRuntime = params.provider_runtime?.[providerId] || {};
   return (
     normalizeString(providerModels.refreshed_at) ||
     normalizeString(providerModels.last_success_at) ||
+    normalizeString(providerRuntime.last_success_at) ||
+    normalizeString(providerRuntime.last_attempt_at) ||
     normalizeString(params.refresh?.last_success_at) ||
     null
   );
+}
+
+function parseStatusTimestamp(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function nextProviderRefreshAt(params, providerId) {
+  const refreshedAtMs = parseStatusTimestamp(statusTimestamp(params, providerId));
+  if (!refreshedAtMs) return null;
+  return new Date(refreshedAtMs + PROVIDER_MODEL_REFRESH_INTERVAL_MS).toISOString();
 }
 
 export function loadProviderModelCatalogState(providerId, options = {}) {
@@ -476,7 +492,10 @@ export function loadProviderModelCatalogState(providerId, options = {}) {
           normalizeString(providerRuntime?.last_error) ||
           null,
         refreshed_at: statusTimestamp(result.params, providerId),
-        next_refresh_at: normalizeString(result.params.refresh?.next_refresh_at),
+        next_refresh_at:
+          nextProviderRefreshAt(result.params, providerId) ||
+          normalizeString(result.params.refresh?.next_refresh_at),
+        refresh_scheduling_authority: "provider_last_refresh_plus_interval",
         runtime: cloneValue(providerRuntime),
       },
     };

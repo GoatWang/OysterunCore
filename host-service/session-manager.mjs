@@ -36,6 +36,10 @@ import {
 } from "./session-name.mjs";
 import { getSessionNameCounterStore } from "./session-name-counter-store.mjs";
 import {
+  buildProviderStartupLifecycleEvent,
+  logProviderStartupEvent,
+} from "./provider-startup-preflight.mjs";
+import {
   ensureProviderTrustedAgentRoot,
   getProviderTrustedFolderStatus,
 } from "./provider-trust.mjs";
@@ -62,8 +66,21 @@ const PROVIDER_SESSION_AUTH_FAILURE_CLASSIFICATION =
   "provider_session_authentication_failed";
 const PROVIDER_TURN_FAILED_NO_OUTPUT_MESSAGE =
   "The provider turn failed before producing a response. This session may be stale or the provider runtime may be unavailable. Start a new session or re-authenticate the provider, then try again.";
-const PROVIDER_SESSION_AUTH_FAILURE_MESSAGE =
-  "The provider session is no longer authenticated. Re-authenticate the provider or start a new session, then try again.";
+const PROVIDER_SESSION_AUTH_FAILURE_MESSAGE = [
+  "Provider login is required before this session can continue.",
+  "",
+  "1. Use machine terminal to login the agent provider",
+  "2. If remote terminal is unavailable, [Open Terminal](/app/terminal)",
+  "",
+  "and run the provider login command:",
+  "",
+  "- codex /login for Codex or",
+  "- claude /login for Claude.",
+  "",
+  "then use Restart session to resume this chat.",
+].join("\n");
+// TODO(P313): Prefer adapter-supplied structured auth metadata such as
+// error_scope="provider_authentication" over regex text classification.
 const PROVIDER_AUTH_FAILURE_PATTERN =
   /\b(auth|authentication|authenticated|credential|credentials|login|logged\s*out|session\s+expired|session\s+invalid|unauthorized|forbidden|401|403)\b/i;
 const PRODUCT_SKILL_COPY_CONTRACT =
@@ -341,62 +358,38 @@ function oysterunProviderSkillSourceRoot(productSkillRoots) {
   return join(productSkillRoots.hostAssetRoot, OYSTERUN_PROVIDER_SKILL_SET_NAME);
 }
 
-function assertOysterunProviderSkillSourceCurrent(productSkillRoots) {
-  assertProductSkillMirrorsCurrent(productSkillRoots);
-  const aggregateSourceRoot = join(
-    productSkillRoots.sourceRoot,
-    OYSTERUN_PROVIDER_SKILL_SET_NAME
-  );
-  const aggregateCodexRoot = join(
-    productSkillRoots.codexMirrorRoot,
-    OYSTERUN_PROVIDER_SKILL_SET_NAME
-  );
+function assertOysterunProviderSkillPackagedSourceCurrent(productSkillRoots) {
   const aggregateHostAssetRoot = oysterunProviderSkillSourceRoot(
     productSkillRoots
   );
-  for (const [label, skillRoot] of [
-    ["source", aggregateSourceRoot],
-    [".codex mirror", aggregateCodexRoot],
-    ["Host packaged", aggregateHostAssetRoot],
-  ]) {
-    const skillFile = join(skillRoot, "SKILL.md");
-    if (!existsSync(skillFile) || !statSync(skillFile).isFile()) {
-      throw productSkillError(`missing ${label} Oysterun aggregate skill`, {
-        statusCode: 409,
-        reason: "missing_oysterun_skill_set",
-      });
-    }
-    if (!readFileSync(skillFile, "utf8").includes(OYSTERUN_PROVIDER_SKILL_SET_MARKER)) {
-      throw productSkillError(`missing ${label} Oysterun ownership marker`, {
-        statusCode: 409,
-        reason: "missing_oysterun_skill_set_marker",
-      });
-    }
-    for (const skillName of PRODUCT_SKILL_NAMES) {
-      const moduleSkill = join(skillRoot, "modules", skillName, "SKILL.md");
-      if (!existsSync(moduleSkill) || !statSync(moduleSkill).isFile()) {
-        throw productSkillError(
-          `missing ${label} Oysterun module skill: ${skillName}`,
-          { statusCode: 409, reason: "missing_oysterun_skill_set_module" }
-        );
-      }
+  const skillFile = join(aggregateHostAssetRoot, "SKILL.md");
+  if (!existsSync(skillFile) || !statSync(skillFile).isFile()) {
+    throw productSkillError("missing packaged Oysterun aggregate skill", {
+      statusCode: 409,
+      reason: "missing_oysterun_skill_set",
+    });
+  }
+  if (!readFileSync(skillFile, "utf8").includes(OYSTERUN_PROVIDER_SKILL_SET_MARKER)) {
+    throw productSkillError("missing packaged Oysterun ownership marker", {
+      statusCode: 409,
+      reason: "missing_oysterun_skill_set_marker",
+    });
+  }
+  for (const skillName of PRODUCT_SKILL_NAMES) {
+    const moduleSkill = join(
+      aggregateHostAssetRoot,
+      "modules",
+      skillName,
+      "SKILL.md"
+    );
+    if (!existsSync(moduleSkill) || !statSync(moduleSkill).isFile()) {
+      throw productSkillError(
+        `missing packaged Oysterun module skill: ${skillName}`,
+        { statusCode: 409, reason: "missing_oysterun_skill_set_module" }
+      );
     }
   }
-  const sourceManifest = buildProductSkillFileManifest(aggregateSourceRoot);
-  for (const [label, mirrorRoot] of [
-    [".codex mirror", aggregateCodexRoot],
-    ["Host packaged", aggregateHostAssetRoot],
-  ]) {
-    if (
-      JSON.stringify(sourceManifest) !==
-      JSON.stringify(buildProductSkillFileManifest(mirrorRoot))
-    ) {
-      throw productSkillError(`stale Oysterun aggregate skill mirror: ${label}`, {
-        statusCode: 409,
-        reason: "oysterun_skill_set_mirror_drift",
-      });
-    }
-  }
+  buildProductSkillFileManifest(aggregateHostAssetRoot);
 }
 
 export function getOysterunProviderSkillInstallationStatus({
@@ -422,6 +415,7 @@ export function getOysterunProviderSkillInstallationStatus({
       target_root: null,
       skill_set_target: null,
       source: sourceRoot,
+      source_validation: "packaged_host_asset",
       installed: false,
       ownership_marker_valid: false,
       can_install: false,
@@ -431,7 +425,7 @@ export function getOysterunProviderSkillInstallationStatus({
       marker: OYSTERUN_PROVIDER_SKILL_SET_MARKER,
     };
   }
-  assertOysterunProviderSkillSourceCurrent(roots);
+  assertOysterunProviderSkillPackagedSourceCurrent(roots);
   const targetRoot = providerSkillTargetRootForAgent(agentRoot, normalizedProvider);
   const skillSetTarget = resolve(targetRoot, OYSTERUN_PROVIDER_SKILL_SET_NAME);
   assertPathInside(agentRoot, targetRoot, "provider skill target root");
@@ -444,6 +438,7 @@ export function getOysterunProviderSkillInstallationStatus({
       target_root: targetRoot,
       skill_set_target: skillSetTarget,
       source: sourceRoot,
+      source_validation: "packaged_host_asset",
       installed: false,
       ownership_marker_valid: false,
       can_install: true,
@@ -467,6 +462,7 @@ export function getOysterunProviderSkillInstallationStatus({
     target_root: targetRoot,
     skill_set_target: skillSetTarget,
     source: sourceRoot,
+    source_validation: "packaged_host_asset",
     installed: true,
     ownership_marker_valid: markerValid,
     can_install: markerValid,
@@ -1917,7 +1913,7 @@ export class SessionManager extends EventEmitter {
     return "";
   }
 
-  classifyProviderTerminalNoOutputFailure(_session, _message, event) {
+  classifyProviderAuthFailure(_session, _message, event) {
     const errorText = this.providerTerminalFailureErrorText(event);
     if (errorText && PROVIDER_AUTH_FAILURE_PATTERN.test(errorText)) {
       return {
@@ -1927,6 +1923,13 @@ export class SessionManager extends EventEmitter {
         errorScope: "provider_authentication",
       };
     }
+    return null;
+  }
+
+  classifyProviderTerminalNoOutputFailure(_session, _message, event) {
+    const authFailure = this.classifyProviderAuthFailure(_session, _message, event);
+    if (authFailure) return authFailure;
+    const errorText = this.providerTerminalFailureErrorText(event);
     if (errorText) return null;
     return {
       failureClassification: PROVIDER_TURN_FAILED_NO_OUTPUT_CLASSIFICATION,
@@ -1953,25 +1956,29 @@ export class SessionManager extends EventEmitter {
     );
   }
 
-  markProviderTerminalNoOutputFailure(session, message, event) {
-    if (
-      !this.isProviderTerminalNoOutputFailureCandidate(session, message, event)
-    ) {
+  applyProviderTerminalFailureClassification(
+    session,
+    message,
+    event,
+    classification,
+    { normalizeToLifecycleEvent = false } = {}
+  ) {
+    if (!classification || !message?.routeCMatrixDelivery || !event) {
       return null;
     }
-    const classification = this.classifyProviderTerminalNoOutputFailure(
-      session,
-      message,
-      event
-    );
-    if (!classification) return null;
     const delivery = message.routeCMatrixDelivery || null;
     const providerId =
       delivery?.provider_id || event.provider || session.provider || "provider";
     const agentTurnStarted =
       delivery?.host2_intake_proof?.agent_turn_started === true ||
-      delivery?.agent_turn_started === true;
+      delivery?.agent_turn_started === true ||
+      session._activeOutboxProgressSeen === true;
     const lastAgentMessagePresent = message.providerAssistantMessageSeen === true;
+    const originalRuntimeEventType = event.type || null;
+    const originalRuntimeError =
+      typeof event.error === "string"
+        ? event.error
+        : event.error?.message || event.error_code || event.error_message || null;
     message.providerTerminalNoOutputFailureEmitted = true;
     message.providerTerminalFailureClassification =
       classification.failureClassification;
@@ -1999,6 +2006,13 @@ export class SessionManager extends EventEmitter {
       }
     }
     Object.assign(event, {
+      ...(normalizeToLifecycleEvent
+        ? {
+            type: "session.lifecycle",
+            lifecycle: "failed",
+            lifecycle_reason: "provider_authentication_failed",
+          }
+        : {}),
       status: "failed",
       provider_completion_status: "failed",
       provider_completion_success: false,
@@ -2009,9 +2023,12 @@ export class SessionManager extends EventEmitter {
       agent_turn_started: agentTurnStarted,
       provider_started_for_target_event: agentTurnStarted,
       last_agent_message_present: lastAgentMessagePresent,
+      semantic_type: "session_lifecycle",
       semantic_body: classification.message,
       display_text: classification.message,
       body: classification.message,
+      provider_auth_failure_original_runtime_event_type: originalRuntimeEventType,
+      provider_auth_failure_original_error: originalRuntimeError,
       error:
         event.error || {
           code: classification.failureClassification,
@@ -2039,6 +2056,45 @@ export class SessionManager extends EventEmitter {
       provider_delivery_failure_reason: classification.failureClassification,
     };
     return classification;
+  }
+
+  markProviderTerminalNoOutputFailure(session, message, event) {
+    if (
+      !this.isProviderTerminalNoOutputFailureCandidate(session, message, event)
+    ) {
+      return null;
+    }
+    const classification = this.classifyProviderTerminalNoOutputFailure(
+      session,
+      message,
+      event
+    );
+    if (!classification) return null;
+    return this.applyProviderTerminalFailureClassification(
+      session,
+      message,
+      event,
+      classification
+    );
+  }
+
+  markProviderRuntimeAuthFailure(session, message, event) {
+    if (!session || !message?.routeCMatrixDelivery || !event) return null;
+    if (event.type !== "runtime.error") return null;
+    if (message.providerTerminalNoOutputFailureEmitted === true) return null;
+    const classification = this.classifyProviderAuthFailure(
+      session,
+      message,
+      event
+    );
+    if (!classification) return null;
+    return this.applyProviderTerminalFailureClassification(
+      session,
+      message,
+      event,
+      classification,
+      { normalizeToLifecycleEvent: true }
+    );
   }
 
   emitClaimedClaudeNoOutputDiagnostic(
@@ -2512,7 +2568,7 @@ export class SessionManager extends EventEmitter {
     { messageId = null, routeCMatrixDelivery = null } = {}
   ) {
     const normalizedText = typeof text === "string" ? text.trim() : "";
-    const overwrite = /(?:^|\s)(--overwrite|overwrite)(?:\s|$)/i.test(
+    const overwrite = /(?:^|\s)(--overwrite|overwrite|--update|update)(?:\s|$)/i.test(
       normalizedText
     );
     const delivery = this.normalizeRouteCMatrixDelivery(routeCMatrixDelivery);
@@ -2577,8 +2633,80 @@ export class SessionManager extends EventEmitter {
         file_count: Array.isArray(result.copied) ? result.copied.length : 0,
       },
     };
+    const outcome = state === "completed" ? "accepted" : "failed";
+    const localOutcomeMarker =
+      "p181_visible_composer_local_command_provider_suppression_outcome_v1";
+    const controlRequestId = `routec_local_oysterun_skill_install_${this.routeCStableHash(
+      `${session.id}:${message.id}:${normalizedText}`
+    ).slice(0, 32)}`;
+    const controlOutcomeId = `routec_local_oysterun_skill_install_outcome_${this.routeCStableHash(
+      `${session.id}:${message.id}:${normalizedText}:${outcome}`
+    ).slice(0, 32)}`;
+    const semanticBody =
+      outcome === "accepted"
+        ? `Oysterun skill install/update local command ${message.oysterunProviderSkillInstall.reason}. Provider delivery suppressed.`
+        : `Oysterun skill install/update local command failed (${message.oysterunProviderSkillInstall.reason}). Provider delivery suppressed.`;
+    const localOutcomeDelivery = delivery
+      ? {
+          ...delivery,
+          target_user_event_id: delivery.source_user_event_id,
+          semantic_type: "control.outcome",
+          semantic_contract: localOutcomeMarker,
+          provider_delivery_claimed: false,
+          provider_delivery_permitted: false,
+          provider_delivery_attempted: false,
+          provider_delivery_blocked_reason:
+            "local_oysterun_skill_install_command",
+          provider_delivery_state: "local_command_intercepted",
+        }
+      : null;
     session._outbox.push(message);
     this.emitOutboxMessageEvent(session, message);
+    if (localOutcomeDelivery) {
+      this.emit(
+        "runtimeEvent",
+        session.agentId,
+        this.decorateEvent(session, {
+          type: "control.outcome",
+          semantic_type: "control.outcome",
+          provider: session.provider || session.adapterId || "claude",
+          subtype: "local_oysterun_skill_install",
+          semantic_body: semanticBody,
+          control_kind: "command",
+          control_family: "provider_request",
+          control_origin: "host",
+          control_outcome: outcome,
+          outcome,
+          actor: "host",
+          control_request_id: controlRequestId,
+          control_outcome_id: controlOutcomeId,
+          target_id: delivery.source_user_event_id || message.id,
+          target_event_id: delivery.source_user_event_id,
+          target_user_event_id: delivery.source_user_event_id,
+          target_session_id: session.id,
+          source_id: "oysterun-host",
+          source_label: localOutcomeMarker,
+          semantic_contract: localOutcomeMarker,
+          durable: true,
+          replay_policy: "always",
+          provider_delivery_attempted: false,
+          normal_message_user_sent: false,
+          provider_received_event: false,
+          provider_started_event: false,
+          provider_started_for_target_event: false,
+          routec_matrix_delivery: localOutcomeDelivery,
+          payload: {
+            ...message.oysterunProviderSkillInstall,
+            command_name: "install_oysterun_skill",
+            local_command: true,
+            provider_delivery_suppressed: true,
+            provider_delivery_attempted: false,
+            normal_message_user_sent: false,
+            browser_visible_outcome_marker: localOutcomeMarker,
+          },
+        })
+      );
+    }
     this.emit(
       "runtimeEvent",
       session.agentId,
@@ -3121,6 +3249,23 @@ export class SessionManager extends EventEmitter {
       return;
     }
 
+    if (event.type === "runtime.error") {
+      const activeMessage = this.getActiveOutboxMessage(session);
+      const authFailure = this.markProviderRuntimeAuthFailure(
+        session,
+        activeMessage,
+        event
+      );
+      if (authFailure) {
+        this.clearClaimedProviderTurnNoOutputTimer(session, activeMessage.id);
+        this.setActiveOutboxMessageState(session, "failed", {
+          error: authFailure.message,
+          ambiguityReason: authFailure.failureClassification,
+        });
+        return;
+      }
+    }
+
     this.noteOutboxProgress(session, event);
 
     if (this.isClaimedClaudeProviderCompletionEvent(event)) {
@@ -3244,6 +3389,8 @@ export class SessionManager extends EventEmitter {
 
     if (event.type === "session.ready") {
       session._ready = true;
+      session.chatShellReady = true;
+      session.providerReady = true;
       if (typeof event.model === "string" && event.model.trim()) {
         session.model = event.model.trim();
       }
@@ -3342,6 +3489,9 @@ export class SessionManager extends EventEmitter {
     runtimeCapabilityRedactionValues,
     requiredProductSkills,
     installOysterunSkills = false,
+    providerStartupAttemptId = null,
+    providerStartupConfiguredCommand = null,
+    providerStartupResolvedCommand = null,
   }) {
     const id = sessionId || randomUUID();
     if (this.sessions.has(id)) {
@@ -3471,14 +3621,18 @@ export class SessionManager extends EventEmitter {
     session.toolsCount = Number.isInteger(session.toolsCount)
       ? session.toolsCount
       : null;
+    session.chatShellReady = session.alive === true;
+    session.providerReady = session._ready === true;
     // Claude accepts stdin before system.init arrives. Mark the session ready
-    // immediately so chat opens and /login can be sent through the normal path.
+    // immediately so chat opens and /login can be sent through the normal path,
+    // while providerReady stays false until the ACP session.ready event arrives.
     if (
       session.provider === "claude" &&
       session.alive === true &&
       session._ready !== true
     ) {
       session._ready = true;
+      session.providerReady = false;
     }
     session.approvalPolicy = session.approvalPolicy ?? approvalPolicy ?? null;
     session.sandboxMode = session.sandboxMode ?? sandboxMode ?? null;
@@ -3488,6 +3642,12 @@ export class SessionManager extends EventEmitter {
     session.historyRecordId = session.id;
     session.parentSessionId = parentSessionId || null;
     session.bookkeepingWarnings = [];
+    session.providerStartupAttemptId = providerStartupAttemptId || null;
+    session.providerStartupConfiguredCommand =
+      providerStartupConfiguredCommand || null;
+    session.providerStartupResolvedCommand =
+      providerStartupResolvedCommand || null;
+    session.providerStartupReadyAt = null;
 
     const recordBookkeepingWarning = (subtype, err) => {
       const warning = `${subtype}: ${err.message}`;
@@ -3553,6 +3713,13 @@ export class SessionManager extends EventEmitter {
       if (event.type === "session.exit") {
         session._lastProviderExitEvent = event;
       }
+      const providerStartupLifecycleEvent = buildProviderStartupLifecycleEvent({
+        session,
+        event,
+      });
+      if (providerStartupLifecycleEvent) {
+        logProviderStartupEvent(providerStartupLifecycleEvent);
+      }
       this.handleOutboxRuntimeEvent(session, event);
       this.syncSessionRuntimeState(session, event);
       if (
@@ -3597,15 +3764,42 @@ export class SessionManager extends EventEmitter {
       if (this.shouldSuppressExitDerivedRuntimeError(session, err)) {
         return;
       }
+      const runtimeErrorEvent = {
+        type: "runtime.error",
+        provider: session.provider,
+        error: err.message || String(err),
+      };
+      const providerStartupLifecycleEvent = buildProviderStartupLifecycleEvent({
+        session,
+        event: runtimeErrorEvent,
+      });
+      if (providerStartupLifecycleEvent) {
+        logProviderStartupEvent(providerStartupLifecycleEvent);
+      }
+      const activeMessage = this.getActiveOutboxMessage(session);
+      const authFailure = this.markProviderRuntimeAuthFailure(
+        session,
+        activeMessage,
+        runtimeErrorEvent
+      );
+      if (authFailure) {
+        this.clearClaimedProviderTurnNoOutputTimer(session, activeMessage.id);
+        this.setActiveOutboxMessageState(session, "failed", {
+          error: authFailure.message,
+          ambiguityReason: authFailure.failureClassification,
+        });
+        this.emit(
+          "runtimeEvent",
+          agentId,
+          this.decorateEvent(session, runtimeErrorEvent)
+        );
+        return;
+      }
       this.handleOutboxRuntimeError(session, err);
       this.emit(
         "runtimeEvent",
         agentId,
-        this.decorateEvent(session, {
-          type: "runtime.error",
-          provider: session.provider,
-          error: err.message || String(err),
-        })
+        this.decorateEvent(session, runtimeErrorEvent)
       );
     });
     session.on("exit", (code) => {
@@ -3631,6 +3825,17 @@ export class SessionManager extends EventEmitter {
         );
       }
       if (!providerExitEvent) {
+        const providerStartupLifecycleEvent = buildProviderStartupLifecycleEvent({
+          session,
+          event: {
+            type: "session.exit",
+            provider: session.provider,
+            code,
+          },
+        });
+        if (providerStartupLifecycleEvent) {
+          logProviderStartupEvent(providerStartupLifecycleEvent);
+        }
         this.emit(
           "runtimeEvent",
           agentId,

@@ -139,6 +139,18 @@ const OYSTERUN_SESSION_SETUP_TRANSCRIPT_PREVIEW_SOURCE =
 const OYSTERUN_SESSION_SETUP_TRANSCRIPT_PREVIEW_LIMIT = 20;
 const OYSTERUN_SESSION_SETUP_TRANSCRIPT_PREVIEW_MAX_LIMIT = 50;
 const OYSTERUN_SESSION_SETUP_TRANSCRIPT_PREVIEW_BODY_LIMIT = 500;
+const ROUTEC_TOOL_CALL_BODY_SUMMARY_LIMIT =
+  OYSTERUN_SESSION_SETUP_TRANSCRIPT_PREVIEW_BODY_LIMIT;
+const ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT = 240;
+const ROUTEC_TOOL_CALL_BODY_ARRAY_LIMIT = 12;
+const ROUTEC_TOOL_CALL_BODY_OBJECT_KEY_LIMIT = 24;
+const ROUTEC_TOOL_CALL_BODY_DEPTH_LIMIT = 3;
+const ROUTEC_TOOL_CALL_BODY_REDACTED_VALUE = "[redacted]";
+const ROUTEC_TOOL_CALL_BODY_REDACTED_PATH = "[redacted-local-path]";
+const ROUTEC_TOOL_CALL_BODY_REDACTED_DETAIL_PATH =
+  "[redacted-tool-detail-path]";
+const ROUTEC_TOOL_CALL_BODY_SENSITIVE_KEY_PATTERN =
+  /(?:authorization|cookie|set-cookie|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|bearer[_-]?token)/i;
 const OYSTERUN_ALLOWED_CINNY_SESSION_ROUTE_SOURCES = new Set([
   "query_session_id",
   "query_host_session_id",
@@ -1338,9 +1350,216 @@ function routeCMatrixPreviewSemanticSummary(semanticType) {
   return null;
 }
 
+function routeCFirstNonEmptyString(values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function routeCTruncateToolCallBodyText(value, limit) {
+  if (typeof value !== "string") return "";
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit - 1).trim()}…`;
+}
+
+function routeCRedactToolCallBodyText(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(
+      /\b(authorization|cookie|set-cookie)\s*[:=]\s*["']?[^"'\s,;}\]]+/gi,
+      `$1: ${ROUTEC_TOOL_CALL_BODY_REDACTED_VALUE}`
+    )
+    .replace(
+      /\b(access_token|refresh_token|id_token|api_key|password|secret)\s*[:=]\s*["']?[^"'\s,;}\]]+/gi,
+      `$1: ${ROUTEC_TOOL_CALL_BODY_REDACTED_VALUE}`
+    )
+    .replace(
+      /[^\s"'<>)]*large_tool_calls[^\s"'<>)]*/gi,
+      ROUTEC_TOOL_CALL_BODY_REDACTED_DETAIL_PATH
+    )
+    .replace(
+      /(?:\/Users|\/Volumes|\/private\/var|\/var\/folders|\/tmp)\/[^\s"'<>)]*/g,
+      ROUTEC_TOOL_CALL_BODY_REDACTED_PATH
+    );
+}
+
+function routeCNormalizeToolCallBodyString(value, limit) {
+  return routeCTruncateToolCallBodyText(
+    routeCRedactToolCallBodyText(value),
+    limit
+  );
+}
+
+function routeCSummarizeToolCallValue(value, depth = 0, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    return routeCNormalizeToolCallBodyString(
+      value,
+      ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT
+    );
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value !== "object") return String(value);
+  if (seen.has(value)) return "[circular]";
+  if (depth >= ROUTEC_TOOL_CALL_BODY_DEPTH_LIMIT) return "[truncated]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const entries = value
+      .slice(0, ROUTEC_TOOL_CALL_BODY_ARRAY_LIMIT)
+      .map((entry) => routeCSummarizeToolCallValue(entry, depth + 1, seen));
+    if (value.length > ROUTEC_TOOL_CALL_BODY_ARRAY_LIMIT) {
+      entries.push(`[${value.length - ROUTEC_TOOL_CALL_BODY_ARRAY_LIMIT} more]`);
+    }
+    return entries;
+  }
+  const summary = {};
+  const entries = Object.entries(value).slice(
+    0,
+    ROUTEC_TOOL_CALL_BODY_OBJECT_KEY_LIMIT
+  );
+  for (const [key, entryValue] of entries) {
+    summary[key] = ROUTEC_TOOL_CALL_BODY_SENSITIVE_KEY_PATTERN.test(key)
+      ? ROUTEC_TOOL_CALL_BODY_REDACTED_VALUE
+      : routeCSummarizeToolCallValue(entryValue, depth + 1, seen);
+  }
+  const omitted =
+    Object.keys(value).length - ROUTEC_TOOL_CALL_BODY_OBJECT_KEY_LIMIT;
+  if (omitted > 0) summary.__omitted_keys = omitted;
+  return summary;
+}
+
+function routeCJsonToolCallBodyText(value) {
+  try {
+    const summarized = routeCSummarizeToolCallValue(value);
+    const encoded = JSON.stringify(summarized, null, 2);
+    if (!encoded || encoded === "{}" || encoded === "[]" || encoded === "null") {
+      return null;
+    }
+    return routeCNormalizeToolCallBodyString(
+      encoded,
+      ROUTEC_TOOL_CALL_BODY_SUMMARY_LIMIT
+    );
+  } catch {
+    return null;
+  }
+}
+
+function routeCToolCallCommandBodyFromInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const command = routeCFirstNonEmptyString([
+    input.command,
+    input.cmd,
+    input.shell_command,
+  ]);
+  if (!command) return null;
+  const cwd = routeCNormalizeToolCallBodyString(
+    routeCFirstNonEmptyString([
+      input.cwd,
+      input.working_directory,
+      input.workingDir,
+    ]) || "",
+    ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT
+  );
+  const safeCommand = routeCNormalizeToolCallBodyString(
+    command,
+    ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT
+  );
+  if (!safeCommand) return null;
+  const lines = [safeCommand];
+  if (cwd && cwd !== "." && cwd !== safeCommand) lines.push(`cwd: ${cwd}`);
+  return routeCTruncateToolCallBodyText(
+    lines.join("\n"),
+    ROUTEC_TOOL_CALL_BODY_SUMMARY_LIMIT
+  );
+}
+
+function routeCToolCallBodyFromInput(input) {
+  if (input === null || input === undefined) return null;
+  if (typeof input === "string") {
+    return routeCNormalizeToolCallBodyString(
+      input,
+      ROUTEC_TOOL_CALL_BODY_SUMMARY_LIMIT
+    );
+  }
+  const commandBody = routeCToolCallCommandBodyFromInput(input);
+  if (commandBody) return commandBody;
+  return routeCJsonToolCallBodyText(input);
+}
+
+function routeCToolCallBodyFromMetadata({
+  toolName,
+  name,
+  toolCallId,
+  callId,
+  id,
+} = {}) {
+  const resolvedToolName = routeCNormalizeToolCallBodyString(
+    routeCFirstNonEmptyString([toolName, name]) || "",
+    ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT
+  );
+  const resolvedToolCallId = routeCNormalizeToolCallBodyString(
+    routeCFirstNonEmptyString([toolCallId, callId, id]) || "",
+    ROUTEC_TOOL_CALL_BODY_VALUE_LIMIT
+  );
+  if (resolvedToolName && resolvedToolCallId) {
+    return routeCTruncateToolCallBodyText(
+      `Tool call ${resolvedToolName} (${resolvedToolCallId}).`,
+      ROUTEC_TOOL_CALL_BODY_SUMMARY_LIMIT
+    );
+  }
+  if (resolvedToolName) return `Tool call ${resolvedToolName}.`;
+  if (resolvedToolCallId) return `Tool call ${resolvedToolCallId}.`;
+  return null;
+}
+
+export function routeCBuildToolCallSameEventFallbackBody({
+  semanticType,
+  explicitBodies = [],
+  toolInput,
+  input,
+  toolName,
+  name,
+  toolCallId,
+  callId,
+  id,
+} = {}) {
+  if (semanticType !== "tool.call") return null;
+  const explicitBody = routeCFirstNonEmptyString(explicitBodies);
+  if (explicitBody) return explicitBody;
+  for (const candidate of [toolInput, input]) {
+    const body = routeCToolCallBodyFromInput(candidate);
+    if (body) return body;
+  }
+  const metadataBody = routeCToolCallBodyFromMetadata({
+    toolName,
+    name,
+    toolCallId,
+    callId,
+    id,
+  });
+  if (metadataBody) return metadataBody;
+  return routeCMatrixPreviewSemanticSummary(semanticType);
+}
+
 function routeCMatrixPreviewBody({ event, content, semanticType }) {
   const body = typeof content.body === "string" ? content.body.trim() : "";
   if (body) return body;
+  const semantic = routeCMatrixSemanticPayload(content);
+  const toolCallBody = routeCBuildToolCallSameEventFallbackBody({
+    semanticType,
+    explicitBodies: [semantic?.body],
+    toolInput: semantic?.tool_input,
+    input: semantic?.input ?? content?.input,
+    toolName: semantic?.tool_name,
+    name: semantic?.name ?? content?.name,
+    toolCallId: semantic?.tool_call_id,
+    callId: semantic?.call_id,
+    id: semantic?.id,
+  });
+  if (toolCallBody) return toolCallBody;
   const filename =
     typeof content.filename === "string" ? content.filename.trim() : "";
   if (filename) return filename;
@@ -3826,6 +4045,12 @@ function routeCSemanticBodyForRuntimeEvent(event, semanticType) {
     return `Control request ${controlKind} is awaiting action.`;
   }
   if (semanticType === "control.outcome") {
+    const explicitBody =
+      normalizeRouteCSemanticString(event?.semantic_body) ||
+      normalizeRouteCSemanticString(event?.body) ||
+      normalizeRouteCSemanticString(event?.display_text) ||
+      normalizeRouteCSemanticString(event?.text);
+    if (explicitBody) return explicitBody;
     const outcome =
       normalizeRouteCSemanticString(event?.outcome) ||
       normalizeRouteCSemanticString(event?.control_outcome) ||
@@ -3865,6 +4090,24 @@ function routeCSemanticBodyForRuntimeEvent(event, semanticType) {
     if (stderr) lines.push(`stderr:\n${stderr}`);
     return lines.join("\n");
   }
+  const toolCallBody = routeCBuildToolCallSameEventFallbackBody({
+    semanticType,
+    explicitBodies: [
+      event?.semantic_body,
+      event?.body,
+      event?.display_text,
+      event?.text,
+      typeof event?.content === "string" ? event.content : null,
+    ],
+    toolInput: event?.tool_input,
+    input: event?.input,
+    toolName: event?.tool_name,
+    name: event?.name,
+    toolCallId: event?.tool_call_id,
+    callId: event?.call_id,
+    id: event?.id,
+  });
+  if (toolCallBody) return toolCallBody;
   const candidates = [
     event?.semantic_body,
     event?.body,
@@ -4046,7 +4289,19 @@ function routeCControlKindFromSubtype(subtype, event = {}) {
   );
 }
 
+function routeCIsControlSemanticType(semanticType) {
+  const normalized = normalizeRouteCSemanticString(semanticType);
+  return (
+    normalized === "control.request" ||
+    normalized === "control.outcome" ||
+    normalized === "control.cancel.request" ||
+    normalized === "control.cancel.outcome"
+  );
+}
+
 function routeCControlKindForRuntimeEvent(event, semanticType) {
+  const normalizedSemanticType = normalizeRouteCSemanticString(semanticType);
+  if (!routeCIsControlSemanticType(normalizedSemanticType)) return null;
   const explicit = routeCControlKindFromSubtype(
     event?.control_kind ||
       event?.controlKind ||
@@ -4059,6 +4314,8 @@ function routeCControlKindForRuntimeEvent(event, semanticType) {
     event?.semantic_type
   );
   if (
+    normalizedSemanticType === "control.cancel.request" ||
+    normalizedSemanticType === "control.cancel.outcome" ||
     explicitSemanticType === "control.cancel.request" ||
     explicitSemanticType === "control.cancel.outcome" ||
     normalizeRouteCSemanticString(event?.cancel_outcome) ||
@@ -4069,8 +4326,8 @@ function routeCControlKindForRuntimeEvent(event, semanticType) {
     return "cancel";
   }
   if (
-    semanticType === "control.request" ||
-    semanticType === "control.outcome"
+    normalizedSemanticType === "control.request" ||
+    normalizedSemanticType === "control.outcome"
   ) {
     throw new Error(
       `Route C ${semanticType} runtime event is missing control_kind`
@@ -5661,6 +5918,20 @@ export function createRouteCMatrixFacade({
             : Number.isFinite(Number(delivery.duplicate_user_row_count))
             ? Number(delivery.duplicate_user_row_count)
             : null,
+          normal_message_user_sent:
+            typeof event.normal_message_user_sent === "boolean"
+              ? event.normal_message_user_sent
+              : null,
+          provider_delivery_attempted:
+            typeof event.provider_delivery_attempted === "boolean"
+              ? event.provider_delivery_attempted
+              : typeof delivery.provider_delivery_attempted === "boolean"
+              ? delivery.provider_delivery_attempted
+              : null,
+          host_db_transcript_product_truth:
+            typeof event.host_db_transcript_product_truth === "boolean"
+              ? event.host_db_transcript_product_truth
+              : null,
           outbox_delivery_state: normalizeRouteCSemanticString(
             event.outbox_delivery_state
           ),
@@ -6849,6 +7120,18 @@ export function createRouteCMatrixFacade({
       const endpointProviderId = body.provider_id || body.provider || null;
       const endpointToolSemanticFields =
         routeCToolSemanticFieldsForEndpointBody(body, semanticType);
+      const endpointSemanticBody =
+        routeCBuildToolCallSameEventFallbackBody({
+          semanticType,
+          explicitBodies: [body.body],
+          toolInput: body.tool_input,
+          input: body.input,
+          toolName: body.tool_name,
+          name: body.name,
+          toolCallId: body.tool_call_id,
+          callId: body.call_id,
+          id: body.id,
+        }) || body.body;
       const endpointSenderActor = routeCResolveSemanticSenderActor({
         binding,
         semanticType,
@@ -6860,7 +7143,7 @@ export function createRouteCMatrixFacade({
       const content = buildOysterunSemanticMatrixContent({
         semanticType,
         category: body.category,
-        body: body.body,
+        body: endpointSemanticBody,
         semanticId: body.semantic_id || null,
         lifecycle: body.lifecycle || "final",
         correlation: {
