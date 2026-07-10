@@ -4,8 +4,12 @@
   "interface_type": "coding",
   "provider": "codex",
   "model": "",
+  "web": {
+    "enabled": false
+  },
   "metadata": {
     "template": "oysterun-github-tracker",
-    "public_safe": true
+    "public_safe": true,
+    "sample_kind": "github_tracker"
   }
 }

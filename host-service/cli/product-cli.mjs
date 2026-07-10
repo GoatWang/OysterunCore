@@ -270,9 +270,18 @@ function hasLiveSessionRuntimeCapabilityEnv(env = process.env) {
   );
 }
 
+function hasSchedulerRunRuntimeCapabilityEnv(env = process.env) {
+  return Boolean(
+    normalizeString(env.OYSTERUN_HOST_ORIGIN) &&
+      resolveRuntimeCapabilityToken({ env }) &&
+      normalizeString(env.OYSTERUN_SCHEDULE_RUN_ID)
+  );
+}
+
 function shouldPreferCurrentSessionRuntimeCapability(options = {}, env = process.env) {
   return (
-    hasLiveSessionRuntimeCapabilityEnv(env) &&
+    (hasLiveSessionRuntimeCapabilityEnv(env) ||
+      hasSchedulerRunRuntimeCapabilityEnv(env)) &&
     !hasExplicitDashboardAuth({ options, env })
   );
 }
@@ -783,6 +792,47 @@ function readTextInput(options, env = process.env) {
     optionalOption(options, "text", "body") ||
     normalizeString(env.OYSTERUN_CLI_TEXT)
   );
+}
+
+function optionalMailHtmlFilePath(options = {}) {
+  return optionalOption(
+    options,
+    "htmlFile",
+    "bodyHtmlFile",
+    "bodyFile",
+    "file"
+  );
+}
+
+function assertMailHtmlOnlyOptions(options = {}, env = process.env, { requireBody = false } = {}) {
+  const requestedFormat = optionalOption(options, "bodyFormat");
+  if (requestedFormat && requestedFormat.toLowerCase() !== "html") {
+    fail("mail body_format must be html; markdown, auto, and plain text Mail are not supported");
+  }
+  if (optionalOption(options, "text", "body") || normalizeString(env.OYSTERUN_CLI_TEXT)) {
+    fail("mail send requires a .html file deliverable; use --html-file <path>.html");
+  }
+  const filePath = optionalMailHtmlFilePath(options);
+  if (!filePath) {
+    if (requireBody) {
+      fail("mail send requires a .html file deliverable; use --html-file <path>.html");
+    }
+    return null;
+  }
+  if (!filePath.toLowerCase().endsWith(".html")) {
+    fail("mail deliverable must use a .html extension");
+  }
+  return filePath;
+}
+
+function readMailHtmlBody(options = {}, env = process.env, { requireBody = false } = {}) {
+  const filePath = assertMailHtmlOnlyOptions(options, env, { requireBody });
+  if (!filePath) return null;
+  const bodyHtml = readFileSync(filePath, "utf8");
+  if (!normalizeString(bodyHtml)) {
+    fail("mail html file must not be empty");
+  }
+  return bodyHtml;
 }
 
 function boolPayload(options, sourceKey, targetKey, payload) {
@@ -1636,12 +1686,11 @@ async function runScheduler({ action, options, env, fetchFn }) {
   fail(`unknown scheduler action: ${action}`);
 }
 
-function mailPayload(options, env) {
-  return {
+function mailPayload(options, env, { requireBody = false } = {}) {
+  const bodyHtml = readMailHtmlBody(options, env, { requireBody });
+  const payload = {
     title: optionalOption(options, "title"),
     summary: optionalOption(options, "summary"),
-    body_markdown: readTextInput(options, env),
-    body_format: optionalOption(options, "bodyFormat") || "markdown",
     source_type: optionalOption(options, "sourceType") || "cli",
     source_name: optionalOption(options, "sourceName") || "Oysterun CLI",
     source_ref: optionalOption(options, "sourceRef"),
@@ -1651,13 +1700,17 @@ function mailPayload(options, env) {
     severity: optionalOption(options, "severity"),
     idempotency_key: optionalOption(options, "idempotencyKey"),
   };
+  if (bodyHtml !== null) {
+    payload.body_format = "html";
+    payload.body_html = bodyHtml;
+  }
+  return payload;
 }
 
 async function runMail({ action, options, env, fetchFn }) {
   if (action === "send") {
-    const body = mailPayload(options, env);
+    const body = mailPayload(options, env, { requireBody: true });
     if (!body.title) fail("title is required");
-    if (!body.body_markdown) fail("body/text is required");
     return (await apiRequest({ method: "POST", path: "/mail/send", body, options, env, fetchFn })).data;
   }
   if (action === "unread-count") {

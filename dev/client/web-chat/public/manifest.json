@@ -1,0 +1,19 @@
+{
+  "name": "Oysterun",
+  "short_name": "Oysterun",
+  "description": "Oysterun Route C chat client",
+  "dir": "auto",
+  "lang": "en-US",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "./",
+  "background_color": "#fff",
+  "theme_color": "#fff",
+  "icons": [
+    {
+      "src": "/static/favicons/oysterun_logo_v5.PNG",
+      "sizes": "1024x1024",
+      "type": "image/png"
+    }
+  ]
+}

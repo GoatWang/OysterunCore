@@ -124,7 +124,14 @@ function addCodexConfigArg(args, key, value) {
 }
 
 function buildCodexExecArgs({ runtime, prompt, cwd }) {
-  const args = ["exec", "--ephemeral", "--cd", cwd, "--json"];
+  const args = [
+    "exec",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--cd",
+    cwd,
+    "--json",
+  ];
   const nativeArgs = Array.isArray(runtime?.native?.args)
     ? runtime.native.args
     : [];

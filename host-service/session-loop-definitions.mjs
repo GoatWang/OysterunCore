@@ -548,13 +548,38 @@ export class SessionLoopDefinitionService {
       throw new Error("Loop definition not found for this session");
     }
     if (runtimeOnly === true) {
+      if (typeof enabled !== "boolean") {
+        throw new Error("Runtime-only loop toggle requires explicit desired enabled state");
+      }
+      const beforeState =
+        runtime.states.get(beforeDefinition.id) || createRuntimeState(beforeDefinition);
+      const previousEnabled = beforeState.enabled === true;
+      if (previousEnabled === enabled) {
+        return {
+          status: "unchanged",
+          idempotent: true,
+          desired_enabled: enabled,
+          previous_enabled: previousEnabled,
+          file_mutated: false,
+          storage_owner: SESSION_LOOP_DEFINITION_STORAGE_OWNER,
+          runtime_state_owner: SESSION_LOOP_RUNTIME_OWNER,
+          schedule: this.serializeForGui({ definition: beforeDefinition, runtime }),
+          feedback_schedule: this.serializeForFeedback({
+            definition: beforeDefinition,
+            runtime,
+          }),
+        };
+      }
       this.setRuntimeEnabled({
         runtime,
         definition: beforeDefinition,
-        enabled: enabled === true,
+        enabled,
       });
       return {
         status: "updated",
+        idempotent: false,
+        desired_enabled: enabled,
+        previous_enabled: previousEnabled,
         file_mutated: false,
         storage_owner: SESSION_LOOP_DEFINITION_STORAGE_OWNER,
         runtime_state_owner: SESSION_LOOP_RUNTIME_OWNER,
@@ -580,14 +605,24 @@ export class SessionLoopDefinitionService {
       agentFolder,
     });
     if (typeof enabled === "boolean") {
+      const beforeState =
+        refreshed.runtime.states.get(result.definition.id) ||
+        createRuntimeState(result.definition);
       this.setRuntimeEnabled({
         runtime: refreshed.runtime,
         definition: result.definition,
         enabled,
       });
+      result.desired_enabled = enabled;
+      result.previous_enabled = beforeState.enabled === true;
     }
     return {
       status: result.status,
+      idempotent: false,
+      desired_enabled:
+        typeof result.desired_enabled === "boolean" ? result.desired_enabled : null,
+      previous_enabled:
+        typeof result.previous_enabled === "boolean" ? result.previous_enabled : null,
       file_mutated: result.file_mutated,
       storage_owner: SESSION_LOOP_DEFINITION_STORAGE_OWNER,
       runtime_state_owner: SESSION_LOOP_RUNTIME_OWNER,

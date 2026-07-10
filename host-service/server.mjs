@@ -2227,6 +2227,9 @@ function classifyLoopFeedbackAction({ result, before = null, deleted = false }) 
   if (result?.status === "created") return "created";
   if (result?.status === "enabled_existing") return "enabled";
   if (result?.status === "already_exists") return "already exists";
+  if (result?.status === "unchanged") {
+    return result?.schedule?.enabled === true ? "already enabled" : "already disabled";
+  }
   if (!before) return "updated";
   const schedule = result?.schedule || {};
   const beforeEnabled = before.enabled === true;
@@ -2496,18 +2499,24 @@ function bodyHasHostSchedulerPrompt(body) {
 
 function buildPortableSchedulerSetupSnapshotFromTargetBinding(targetBinding) {
   if (targetBinding.kind === "setup_snapshot") {
+    const setupPayload =
+      completeSchedulerSetupPayloadFromTargetBinding(targetBinding, {
+        label: "setup_snapshot",
+      }).sessionPayload;
     return {
       agentId: normalizeString(targetBinding.agent_id),
       targetBinding: {
         kind: "setup_snapshot",
         agent_id: normalizeString(targetBinding.agent_id),
-        setup_snapshot: { ...(targetBinding.setup_snapshot || {}) },
+        setup_snapshot: setupPayload,
       },
     };
   }
   if (targetBinding.kind === "session_setup_record") {
     const setupPayload =
-      buildSchedulerSetupPayloadFromTargetBinding(targetBinding);
+      completeSchedulerSetupPayloadFromTargetBinding(targetBinding, {
+        label: "session_setup_record",
+      }).sessionPayload;
     const setupFields = isObjectRecord(targetBinding.session_setup_fields)
       ? targetBinding.session_setup_fields
       : {};
@@ -2552,12 +2561,18 @@ function buildPortableSchedulerSetupSnapshotFromTargetBinding(targetBinding) {
         "saved_session source agent_folder"
       );
     }
+    const completedSetupPayload =
+      completeSchedulerSessionSetupPayloadForRuntime({
+        agentFolder: setupPayload.agent_folder,
+        sessionPayload: setupPayload,
+        label: "saved_session",
+      }).sessionPayload;
     return {
       agentId,
       targetBinding: {
         kind: "setup_snapshot",
         agent_id: agentId,
-        setup_snapshot: setupPayload,
+        setup_snapshot: completedSetupPayload,
         setup_snapshot_source: "saved_session_copy",
         source_session_references_removed: true,
       },
@@ -2829,10 +2844,40 @@ function respondMailApiError(res, err) {
   });
 }
 
+function getSchedulerRunCapabilityState(grant) {
+  const scheduleId = normalizeString(grant?.schedule_id);
+  const runId = normalizeString(grant?.schedule_run_id);
+  if (!scheduleId || !runId) {
+    return { ok: false, reason: "scheduler_run_binding_missing" };
+  }
+  let run;
+  try {
+    run = schedulerService.getScheduleRunForCapability({
+      scheduleId,
+      runId,
+    });
+  } catch {
+    run = null;
+  }
+  if (!run) return { ok: false, reason: "scheduler_run_not_found" };
+  const currentTokenHash = normalizeString(run.metadata?.mail_capability?.token_hash);
+  if (!currentTokenHash) {
+    return { ok: false, reason: "scheduler_run_capability_missing" };
+  }
+  if (currentTokenHash !== grant.token_hash) {
+    return { ok: false, reason: "stale_scheduler_run_capability_token" };
+  }
+  if (run.status !== "claimed" || normalizeString(run.completed_at)) {
+    return { ok: false, reason: "scheduler_run_not_active" };
+  }
+  return { ok: true, run };
+}
+
 function authenticateMailCreateCapability(req, res) {
   const token = getBearerToken(req);
   const verification = mailStore.verifyCapabilityToken(token, {
     scope: MAIL_CREATE_SCOPE,
+    allowExpiredGrantKinds: ["live_session", "scheduler_run"],
   });
   if (!verification.ok) {
     const status = verification.reason === "missing_token" ? 401 : 403;
@@ -2853,6 +2898,26 @@ function authenticateMailCreateCapability(req, res) {
         error: "Mail create capability disabled",
         capability_scope: MAIL_CREATE_SCOPE,
         reason: "live_session_not_running",
+        raw_token_returned: false,
+      });
+      return null;
+    }
+    if (session.runtimeCapabilityGrant?.token_hash !== grant.token_hash) {
+      respond(res, 403, {
+        error: "Mail create capability disabled",
+        capability_scope: MAIL_CREATE_SCOPE,
+        reason: "stale_live_session_runtime_token",
+        raw_token_returned: false,
+      });
+      return null;
+    }
+  } else if (grant.grant_kind === "scheduler_run") {
+    const state = getSchedulerRunCapabilityState(grant);
+    if (!state.ok) {
+      respond(res, 403, {
+        error: "Mail create capability disabled",
+        capability_scope: MAIL_CREATE_SCOPE,
+        reason: state.reason,
         raw_token_returned: false,
       });
       return null;
@@ -2911,28 +2976,120 @@ function buildSchedulerSetupPayloadFromTargetBinding(targetBinding) {
   return setupPayload;
 }
 
-function resolveSchedulerSetupSnapshotDirectTarget({ targetBinding }) {
+function resolveSchedulerSessionSetupRuntimeBase({ agentFolder, sessionPayload }) {
+  const explicitProvider = readExplicitRequestedProvider(sessionPayload);
+  if (explicitProvider.error) {
+    const err = new Error(explicitProvider.error);
+    err.code = "scheduler_session_setup_provider_invalid";
+    throw err;
+  }
+  const resolved = resolveAgentRuntimeConfig(
+    agentFolder,
+    buildRuntimeOverridesFromBody(
+      sessionPayload,
+      explicitProvider.requestedProvider ?? undefined
+    )
+  );
+  if (
+    explicitProvider.requestedProvider &&
+    resolved.runtime.provider !== explicitProvider.requestedProvider
+  ) {
+    const err = new Error(
+      providerMismatchResponse(
+        explicitProvider.requestedProvider,
+        resolved.runtime.provider
+      ).error
+    );
+    err.code = "scheduler_session_setup_provider_mismatch";
+    throw err;
+  }
+  if (!resolved.runtime.providerInfo.runtimeSupported) {
+    const err = new Error(
+      `Provider "${resolved.runtime.provider}" is not runtime-supported yet`
+    );
+    err.code = "scheduler_session_setup_provider_unsupported";
+    throw err;
+  }
+  return { explicitProvider, resolved };
+}
+
+function completeSchedulerSessionSetupPayloadForRuntime({
+  agentFolder,
+  sessionPayload,
+  label,
+}) {
+  const completedPayload = { ...(sessionPayload || {}) };
+  const normalizedAgentFolder = requireSchedulerTargetString(
+    agentFolder || completedPayload.agent_folder || completedPayload.cwd,
+    `${label} agent_folder`
+  );
+  completedPayload.agent_folder = normalizedAgentFolder;
+  if (!completedPayload.cwd) completedPayload.cwd = normalizedAgentFolder;
+
+  const initialRuntime = resolveSchedulerSessionSetupRuntimeBase({
+    agentFolder: normalizedAgentFolder,
+    sessionPayload: completedPayload,
+  });
+  const provider = initialRuntime.resolved.runtime.provider;
+  if (!completedPayload.provider) completedPayload.provider = provider;
+  if (!completedPayload.model && initialRuntime.resolved.runtime.model) {
+    completedPayload.model = initialRuntime.resolved.runtime.model;
+  }
+  if (
+    !completedPayload.reasoning_effort &&
+    initialRuntime.resolved.runtime.reasoningEffort
+  ) {
+    completedPayload.reasoning_effort =
+      initialRuntime.resolved.runtime.reasoningEffort;
+  }
+  if (provider === "codex" && !completedPayload.approval_policy) {
+    completedPayload.approval_policy =
+      initialRuntime.resolved.runtime.approvalPolicy;
+  } else if (provider === "claude" && !completedPayload.permission_mode) {
+    completedPayload.permission_mode =
+      initialRuntime.resolved.runtime.permissionMode;
+  }
+
+  const runtimeResolution = resolveSchedulerSessionSetupRuntime({
+    agentFolder: normalizedAgentFolder,
+    sessionPayload: completedPayload,
+  });
+  return {
+    sessionPayload: completedPayload,
+    agentFolder: normalizedAgentFolder,
+    runtimeResolution,
+  };
+}
+
+function completeSchedulerSetupPayloadFromTargetBinding(
+  targetBinding,
+  { label = "scheduler_setup" } = {}
+) {
   const sessionPayload =
     buildSchedulerSetupPayloadFromTargetBinding(targetBinding);
+  return completeSchedulerSessionSetupPayloadForRuntime({
+    agentFolder: sessionPayload.agent_folder || sessionPayload.cwd,
+    sessionPayload,
+    label,
+  });
+}
+
+function resolveSchedulerSetupSnapshotDirectTarget({ targetBinding }) {
   const agentId = requireSchedulerTargetString(
     targetBinding.agent_id,
     "setup_snapshot target agent_id"
   );
-  const agentFolder = requireSchedulerTargetString(
-    sessionPayload.agent_folder || sessionPayload.cwd,
-    "setup_snapshot agent_folder"
+  const completed = completeSchedulerSetupPayloadFromTargetBinding(
+    targetBinding,
+    { label: "setup_snapshot" }
   );
-  const runtimeResolution = resolveSchedulerSessionSetupRuntime({
-    agentFolder,
-    sessionPayload,
-  });
   return {
     source: "portable_scheduler_setup_snapshot",
     agentId,
-    agentFolder,
-    sessionPayload,
-    resolved: runtimeResolution.resolved,
-    explicitProvider: runtimeResolution.explicitProvider,
+    agentFolder: completed.agentFolder,
+    sessionPayload: completed.sessionPayload,
+    resolved: completed.runtimeResolution.resolved,
+    explicitProvider: completed.runtimeResolution.explicitProvider,
   };
 }
 
@@ -2970,39 +3127,10 @@ function buildSavedSessionSetupPayloadFromHistory(sourceRecord) {
 }
 
 function resolveSchedulerSessionSetupRuntime({ agentFolder, sessionPayload }) {
-  const explicitProvider = readExplicitRequestedProvider(sessionPayload);
-  if (explicitProvider.error) {
-    const err = new Error(explicitProvider.error);
-    err.code = "scheduler_session_setup_provider_invalid";
-    throw err;
-  }
-  const resolved = resolveAgentRuntimeConfig(
+  const { explicitProvider, resolved } = resolveSchedulerSessionSetupRuntimeBase({
     agentFolder,
-    buildRuntimeOverridesFromBody(
-      sessionPayload,
-      explicitProvider.requestedProvider ?? undefined
-    )
-  );
-  if (
-    explicitProvider.requestedProvider &&
-    resolved.runtime.provider !== explicitProvider.requestedProvider
-  ) {
-    const err = new Error(
-      providerMismatchResponse(
-        explicitProvider.requestedProvider,
-        resolved.runtime.provider
-      ).error
-    );
-    err.code = "scheduler_session_setup_provider_mismatch";
-    throw err;
-  }
-  if (!resolved.runtime.providerInfo.runtimeSupported) {
-    const err = new Error(
-      `Provider "${resolved.runtime.provider}" is not runtime-supported yet`
-    );
-    err.code = "scheduler_session_setup_provider_unsupported";
-    throw err;
-  }
+    sessionPayload,
+  });
   const proofFields = buildSessionSetupProviderModelPermissionFields({
     body: sessionPayload,
     requestedProvider: explicitProvider.requestedProvider,
@@ -3022,30 +3150,21 @@ function resolveSchedulerSessionSetupRuntime({ agentFolder, sessionPayload }) {
 }
 
 function resolveSchedulerSessionSetupRecordDirectTarget({ targetBinding }) {
-  const sessionPayload =
-    buildSchedulerSetupPayloadFromTargetBinding(targetBinding);
   const agentId = requireSchedulerTargetString(
     targetBinding.agent_id,
     "session_setup_record target agent_id"
   );
-  const setupFields = isObjectRecord(targetBinding.session_setup_fields)
-    ? targetBinding.session_setup_fields
-    : {};
-  const agentFolder =
-    normalizeString(sessionPayload.agent_folder) ||
-    normalizeString(setupFields.agent_folder) ||
-    normalizeString(setupFields.agentFolder);
-  const runtimeResolution = resolveSchedulerSessionSetupRuntime({
-    agentFolder,
-    sessionPayload,
-  });
+  const completed = completeSchedulerSetupPayloadFromTargetBinding(
+    targetBinding,
+    { label: "session_setup_record" }
+  );
   return {
     source: "session_setup_record_direct_provider",
     agentId,
-    agentFolder,
-    sessionPayload,
-    resolved: runtimeResolution.resolved,
-    explicitProvider: runtimeResolution.explicitProvider,
+    agentFolder: completed.agentFolder,
+    sessionPayload: completed.sessionPayload,
+    resolved: completed.runtimeResolution.resolved,
+    explicitProvider: completed.runtimeResolution.explicitProvider,
   };
 }
 
@@ -3085,17 +3204,18 @@ function resolveSchedulerSavedSessionDirectTarget({ targetBinding }) {
     normalizeString(setupFields.agent_folder) ||
     normalizeString(setupFields.agentFolder) ||
     sourceRecord.agent_folder;
-  const runtimeResolution = resolveSchedulerSessionSetupRuntime({
+  const completed = completeSchedulerSessionSetupPayloadForRuntime({
     agentFolder,
     sessionPayload,
+    label: "saved_session",
   });
   return {
     source: "saved_session_direct_provider_snapshot",
     agentId,
-    agentFolder,
-    sessionPayload,
-    resolved: runtimeResolution.resolved,
-    explicitProvider: runtimeResolution.explicitProvider,
+    agentFolder: completed.agentFolder,
+    sessionPayload: completed.sessionPayload,
+    resolved: completed.runtimeResolution.resolved,
+    explicitProvider: completed.runtimeResolution.explicitProvider,
   };
 }
 
@@ -8953,7 +9073,13 @@ function requireRuntimeCapability(claims, res, { scope, sessionId, agentId }) {
   }
   const verification = mailStore.verifyCapabilityToken(
     claims._runtimeCapabilityToken,
-    { scope: normalizedScope }
+    {
+      scope: normalizedScope,
+      allowExpiredGrantKinds:
+        normalizedScope === MAIL_CREATE_SCOPE
+          ? ["live_session", "scheduler_run"]
+          : ["live_session"],
+    }
   );
   if (!verification.ok) {
     respondRuntimeCapabilityDenied(res, verification.reason === "missing_token" ? 401 : 403, {
@@ -8963,6 +9089,29 @@ function requireRuntimeCapability(claims, res, { scope, sessionId, agentId }) {
     return null;
   }
   const grant = verification.grant;
+  if (grant.grant_kind === "scheduler_run") {
+    if (normalizedScope !== MAIL_CREATE_SCOPE) {
+      respondRuntimeCapabilityDenied(res, 403, {
+        reason: "scheduler_run_scope_not_allowed",
+        capability_scope: normalizedScope,
+      });
+      return null;
+    }
+    const state = getSchedulerRunCapabilityState(grant);
+    if (!state.ok) {
+      respondRuntimeCapabilityDenied(res, 403, {
+        reason: state.reason,
+        capability_scope: normalizedScope,
+      });
+      return null;
+    }
+    return {
+      mode: "runtime_capability",
+      grant,
+      schedulerRun: state.run,
+      scope: normalizedScope,
+    };
+  }
   if (grant.grant_kind !== "live_session") {
     respondRuntimeCapabilityDenied(res, 403, {
       reason: "grant_kind_not_live_session",
@@ -8985,6 +9134,14 @@ function requireRuntimeCapability(claims, res, { scope, sessionId, agentId }) {
       reason: "live_session_not_running",
       capability_scope: normalizedScope,
       session_id: boundSessionId,
+    });
+    return null;
+  }
+  if (actorSession.runtimeCapabilityGrant?.token_hash !== grant.token_hash) {
+    respondRuntimeCapabilityDenied(res, 403, {
+      reason: "stale_live_session_runtime_token",
+      capability_scope: normalizedScope,
+      session_id: actorSession.id,
     });
     return null;
   }
@@ -11722,12 +11879,17 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       try {
         const actor = buildRuntimeCapabilityAuditActor(auth, claims);
+        const createInput =
+          auth.mode === "runtime_capability" &&
+          auth.grant?.grant_kind === "scheduler_run"
+            ? buildMailCreateInputFromBody(body, auth.grant)
+            : buildDashboardMailCreateInputFromBody(
+                body,
+                actor.actorId,
+                actor.actorType
+              );
         const result = mailStore.createMailItem(
-          buildDashboardMailCreateInputFromBody(
-            body,
-            actor.actorId,
-            actor.actorType
-          )
+          createInput
         );
         if (result.created) {
           emitCommittedMailNotification(result.mail);
@@ -12636,6 +12798,12 @@ const server = createServer(async (req, res) => {
           parentPath: body.parent_path,
           demoId: body.demo_id,
         });
+        if (payload?.copied_path) {
+          payload.scheduler_registration =
+            schedulerService.registerCopiedDemoAgentSchedules({
+              agentFolder: payload.copied_path,
+            });
+        }
         recordTelemetryCounter("demo_agent_created_count");
         recordTelemetryFeature("file_explorer");
         return respond(res, 201, payload);
@@ -13759,6 +13927,30 @@ const server = createServer(async (req, res) => {
       );
       if (!session) return;
       try {
+        let desiredEnabled;
+        if (Object.prototype.hasOwnProperty.call(body, "desired_enabled")) {
+          if (typeof body.desired_enabled !== "boolean") {
+            return respond(res, 400, {
+              error: "desired_enabled must be a boolean when provided",
+              scheduler_command: "session_loop_gui",
+            });
+          }
+          desiredEnabled = body.desired_enabled;
+        } else if (Object.prototype.hasOwnProperty.call(body, "enabled")) {
+          if (typeof body.enabled !== "boolean") {
+            return respond(res, 400, {
+              error: "enabled must be a boolean when provided",
+              scheduler_command: "session_loop_gui",
+            });
+          }
+          desiredEnabled = body.enabled;
+        }
+        if (body.runtime_only === true && typeof desiredEnabled !== "boolean") {
+          return respond(res, 400, {
+            error: "runtime_only loop toggle requires desired_enabled or enabled boolean",
+            scheduler_command: "session_loop_gui",
+          });
+        }
         const before = schedulerService
           .listSessionLoopSchedulesForGui({
             hostSessionId: session.id,
@@ -13797,7 +13989,7 @@ const server = createServer(async (req, res) => {
           prompt: body.command_text ?? body.prompt_text ?? body.prompt,
           startAt: body.start_at ?? null,
           endAt: body.end_at ?? null,
-          enabled: body.enabled === true,
+          enabled: desiredEnabled,
           runtimeOnly: body.runtime_only === true,
         });
         const feedback = await writeLoopFeedbackOrThrow({
@@ -13949,6 +14141,11 @@ const server = createServer(async (req, res) => {
           const result = await schedulerService.runHostScheduleTestForDashboard({
             scheduleId,
             dispatcher: schedulerSessionDispatcher,
+            dispatchOrigin: "host_api_scheduler_test_run",
+            dispatchAuthority:
+              auth.mode === "runtime_capability"
+                ? "runtime_capability_scheduler_run"
+                : "dashboard_authenticated_scheduler_run",
           });
           recordTelemetryCounter("scheduler_run_count");
           if (result.status === "test_run_dispatched") {
@@ -15280,6 +15477,21 @@ const server = createServer(async (req, res) => {
         "interrupt",
         session.id
       );
+      const includeInterruptDiagnosticProof =
+        body.routec_p186_interrupt_diagnostic_proof === true ||
+        body.interrupt_diagnostic_proof === true;
+      const buildInterruptDiagnosticProof = (interruptResult) => ({
+        schema_version: "routec.p186.interrupt_diagnostic_proof.v1",
+        enabled_by_request: true,
+        raw_provider_response_exposed: false,
+        raw_secret_material_exposed: false,
+        token_redacted: true,
+        session_id: session.id,
+        agent_id: session.agentId,
+        provider: session.provider || session.adapterId || "claude",
+        delivery_state: session._deliveryState || null,
+        interrupt_result: interruptResult || null,
+      });
       await requireRouteCSessionControlSemanticCommit({
         session,
         stage: "interrupt_action",
@@ -15331,12 +15543,40 @@ const server = createServer(async (req, res) => {
           session_id: session.id,
           agent_id: session.agentId,
           shell_exec_ids: interruptedShellExecIds,
+          interrupt_result: {
+            schema_version: "routec.session_interrupt_result.v1",
+            status: "shell_exec_interrupted",
+            accepted: true,
+            idempotent: false,
+            provider: session.provider || session.adapterId || "claude",
+            provider_interrupt_attempted: false,
+            provider_interrupt_method: "host_shell_exec_interrupt",
+            raw_provider_response_exposed: false,
+          },
+          provider_interrupt_attempted: false,
+          interrupt_idempotent: false,
+          ...(includeInterruptDiagnosticProof
+            ? {
+                routec_p186_interrupt_diagnostic_proof:
+                  buildInterruptDiagnosticProof({
+                    schema_version: "routec.session_interrupt_result.v1",
+                    status: "shell_exec_interrupted",
+                    accepted: true,
+                    idempotent: false,
+                    provider: session.provider || session.adapterId || "claude",
+                    provider_interrupt_attempted: false,
+                    provider_interrupt_method: "host_shell_exec_interrupt",
+                    raw_provider_response_exposed: false,
+                  }),
+              }
+            : {}),
           ...sessionRefResolutionResponseFields(sessionTarget.resolution),
         });
       }
 
+      let interruptResult;
       try {
-        sessionManager.interruptSession(session.id);
+        interruptResult = sessionManager.interruptSession(session.id);
       } catch (err) {
         await writeRouteCSessionControlSemanticEvent(session, {
           type: "control.outcome",
@@ -15384,6 +15624,17 @@ const server = createServer(async (req, res) => {
         status: "interrupted",
         session_id: session.id,
         agent_id: session.agentId,
+        interrupt_result: interruptResult,
+        interrupt_outcome: interruptResult?.status || "accepted",
+        provider_interrupt_attempted:
+          interruptResult?.provider_interrupt_attempted === true,
+        interrupt_idempotent: interruptResult?.idempotent === true,
+        ...(includeInterruptDiagnosticProof
+          ? {
+              routec_p186_interrupt_diagnostic_proof:
+              buildInterruptDiagnosticProof(interruptResult),
+            }
+          : {}),
         ...sessionRefResolutionResponseFields(sessionTarget.resolution),
       });
     }
@@ -15654,6 +15905,24 @@ const server = createServer(async (req, res) => {
             `[restart] Failed to re-resolve config: ${err.message}`
           );
         }
+      }
+
+      let restartRuntimeCapabilityGrant;
+      try {
+        restartRuntimeCapabilityGrant = buildLiveSessionRuntimeCapabilityGrant({
+          sessionId: currentSession.id,
+          agentId: currentSession.agentId,
+          capabilities: currentSession.runtimeCapabilities,
+        });
+        overrides.runtimeCapabilityEnv = restartRuntimeCapabilityGrant.env;
+        overrides.runtimeCapabilityGrant = restartRuntimeCapabilityGrant.metadata;
+        overrides.runtimeCapabilityRedactionValues =
+          restartRuntimeCapabilityGrant.redactionValues;
+      } catch (err) {
+        return respond(res, 500, {
+          error: err.message || String(err),
+          runtime_capability_grant: false,
+        });
       }
 
       let restarted;

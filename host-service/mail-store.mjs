@@ -77,25 +77,19 @@ function normalizeScopes(value) {
 }
 
 function normalizeBodyFormat(value, { bodyMarkdown, bodyHtml } = {}) {
-  const format = normalizeOptionalString(value, "markdown").toLowerCase();
-  if (format === "trusted_html") return "html";
-  if (format === "html" || format === "markdown") return format;
-  if (format === "auto") {
-    const htmlSource = normalizeOptionalString(bodyHtml);
-    const markdownSource = normalizeOptionalString(bodyMarkdown);
-    if (htmlSource || looksLikeDocumentHtml(markdownSource)) return "html";
-    return "markdown";
+  const format = normalizeOptionalString(value, "html").toLowerCase();
+  const markdownSource = normalizeOptionalString(bodyMarkdown);
+  const htmlSource = normalizeOptionalString(bodyHtml);
+  if (markdownSource) {
+    throw new Error("mail body_markdown is not supported; use body_html");
   }
-  throw new Error(`Unsupported mail body_format: ${format}`);
-}
-
-function looksLikeDocumentHtml(value) {
-  const normalized = normalizeOptionalString(value).toLowerCase();
-  return (
-    normalized.startsWith("<!doctype html") ||
-    normalized.startsWith("<html") ||
-    normalized.startsWith("<body")
-  );
+  if (format !== "html") {
+    throw new Error("mail body_format must be html");
+  }
+  if (!htmlSource) {
+    throw new Error("mail body_html required");
+  }
+  return "html";
 }
 
 function normalizeMailFilter(value) {
@@ -573,13 +567,13 @@ export class MailStore {
     const bodyMarkdown =
       input.bodyMarkdown !== undefined
         ? normalizeOptionalString(input.bodyMarkdown)
-        : current.body_markdown;
+        : "";
     const bodyHtml =
       input.bodyHtml !== undefined
         ? normalizeOptionalString(input.bodyHtml)
         : current.body_html;
     const bodyFormat = normalizeBodyFormat(
-      input.bodyFormat || current.body_format,
+      input.bodyFormat || "html",
       { bodyMarkdown, bodyHtml }
     );
     this.statements.updateMailItem.run({
@@ -593,7 +587,7 @@ export class MailStore {
           ? normalizeOptionalString(input.summary)
           : current.summary,
       body_format: bodyFormat,
-      body_markdown: bodyMarkdown,
+      body_markdown: "",
       body_html: bodyHtml,
       source_name:
         input.sourceName !== undefined
@@ -796,7 +790,10 @@ export class MailStore {
     };
   }
 
-  verifyCapabilityToken(token, { scope = MAIL_CREATE_SCOPE } = {}) {
+  verifyCapabilityToken(
+    token,
+    { scope = MAIL_CREATE_SCOPE, allowExpiredGrantKinds = [] } = {}
+  ) {
     this.initialize();
     if (typeof token !== "string" || !token.trim()) {
       return { ok: false, reason: "missing_token" };
@@ -805,7 +802,14 @@ export class MailStore {
     const grant = this.getCapabilityGrantByHash(tokenHash);
     if (!grant) return { ok: false, reason: "unknown_token" };
     if (grant.revoked_at) return { ok: false, reason: "revoked" };
-    if (Date.parse(grant.expires_at) <= Date.parse(nowIso(this.clock))) {
+    const isExpired =
+      Date.parse(grant.expires_at) <= Date.parse(nowIso(this.clock));
+    // Lifecycle-bound callers must perform their own session/run liveness
+    // checks before accepting an expired grant.
+    const allowExpired = Array.isArray(allowExpiredGrantKinds)
+      ? allowExpiredGrantKinds.includes(grant.grant_kind)
+      : false;
+    if (isExpired && !allowExpired) {
       return { ok: false, reason: "expired" };
     }
     const normalizedScope = normalizeRequiredString(scope, "capability scope");
@@ -816,6 +820,7 @@ export class MailStore {
     return {
       ok: true,
       grant: this.getCapabilityGrantByHash(tokenHash),
+      expired: isExpired,
     };
   }
 
@@ -862,9 +867,6 @@ export class MailStore {
     this.requireHostAppUser(recipientUserId);
     const bodyMarkdown = normalizeOptionalString(input.bodyMarkdown);
     const bodyHtml = normalizeOptionalString(input.bodyHtml);
-    if (!bodyMarkdown && !bodyHtml) {
-      throw new Error("mail body_markdown or body_html required");
-    }
     const createdAt = nowIso(this.clock);
     return {
       id: normalizeOptionalString(input.id, `mail_${randomUUID()}`),
@@ -879,7 +881,7 @@ export class MailStore {
         bodyMarkdown,
         bodyHtml,
       }),
-      body_markdown: bodyMarkdown,
+      body_markdown: "",
       body_html: bodyHtml,
       source_type: normalizeRequiredString(input.sourceType, "sourceType"),
       source_name: normalizeOptionalString(input.sourceName),

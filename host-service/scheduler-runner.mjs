@@ -73,6 +73,8 @@ export class SchedulerRunner {
       const result = await this.service.drainDueSchedules({
         now: new Date(this.clock()).toISOString(),
         dispatcher: this.sessionDispatcher,
+        dispatchOrigin: "host_scheduler_runner_tick",
+        dispatchAuthority: "host_scheduler_runner",
       });
       this.lastTickResult = result;
       this.lastTickError = null;

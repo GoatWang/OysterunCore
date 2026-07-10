@@ -48,6 +48,70 @@ rule fields such as `--frequency daily --time HH:mm`, `--frequency weekly
 <ISO time>`. Do not use `--interval` for Host scheduler rows; use `chat loop
 create --interval ...` for in-session loops.
 
+## Scheduler Setup Snapshot Contract
+
+When creating or updating a Host scheduler, prefer an existing session config:
+
+```bash
+node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --prompt "..." --frequency daily --time 09:00
+node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --session-ref "My Agent Session" --prompt "..." --frequency daily --time 09:00
+```
+
+Do not import Host scheduler internals, call `/scheduler/*` endpoints directly,
+write SQLite rows, or use a local fake dispatcher as evidence that the real
+product scheduler provider path works. Product scheduler evidence must come
+from the P86 CLI/product skill path and the Host scheduler run/log APIs.
+
+If a scheduler task creates an Oysterun Mail report, it must write a durable
+`.html` deliverable first and then call the Mail product CLI, preferably through
+the injected binary:
+
+```bash
+$OYSTERUN_CLI_BIN mail send --title "Report ready" --html-file data/latest_report.html
+```
+
+Do not send markdown, auto-format, stdin, `--text`, `--body`, or raw HTML held
+only in an environment variable. Do not call Host `/mail/*` endpoints directly.
+The `.html` file extension is the Mail deliverable contract.
+
+If a route explicitly requires an explicit setup snapshot instead of a current
+or saved session, the snapshot must include the full provider runtime proof:
+
+```text
+provider
+model
+agent_folder
+cwd
+approval_policy, for Codex
+permission_mode, for Claude
+allowed_paths / workspace permission fields, when the session uses them
+prompt or command text
+schedule rule
+```
+
+Missing `model`, missing provider permission mode, or mismatched provider/model
+proof can cause the Host scheduler to reject the schedule or fail the run before
+provider spawn. A pre-spawn failure should be inspected with `runs` and
+`run-log`; do not treat a separate local no-mail dispatcher run as proof that
+the persisted scheduler target is valid.
+
+## Scheduler Mail
+
+Scheduler jobs that need to send Oysterun Mail should use the normal product
+Mail CLI, not a separate scheduler-only Mail stack. Inside a Host-injected
+scheduler/runtime environment, prefer:
+
+```bash
+$OYSTERUN_CLI_BIN mail send --title "Digest ready" --text "Daily tracker finished"
+```
+
+The Host injects a scheduler-run scoped `mail:create` capability for Mail send
+only. The CLI preserves `OYSTERUN_SCHEDULE_ID`,
+`OYSTERUN_SCHEDULE_RUN_ID`, and `OYSTERUN_AGENT_ID` as Mail attribution. Do
+not call `/mail/*` endpoints directly, do not print capability tokens, and use
+the legacy `send_mail.mjs` helper only for old generated scripts that already
+depend on it.
+
 ## P183/P307 Runtime Authority
 
 P183/P307 runtime authority alignment means every command in this skill is

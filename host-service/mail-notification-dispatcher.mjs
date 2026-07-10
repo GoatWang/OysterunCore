@@ -32,8 +32,8 @@ function truncateNotificationBody(text) {
 function mailNotificationBody(mail) {
   return truncateNotificationBody(
     normalizeString(mail?.summary) ||
-      normalizeString(mail?.body_markdown) ||
-      stripHtml(mail?.body_html)
+      stripHtml(mail?.body_html) ||
+      normalizeString(mail?.body_markdown)
   );
 }
 

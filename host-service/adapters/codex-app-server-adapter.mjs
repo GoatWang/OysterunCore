@@ -605,7 +605,7 @@ export class CodexAppServerAdapter {
   }
 
   respondToControl(session, payload) {
-    session.respondToControl(payload);
+    return session.respondToControl(payload);
   }
 
   stopSession(session) {
@@ -613,7 +613,7 @@ export class CodexAppServerAdapter {
   }
 
   interruptSession(session) {
-    session.interrupt();
+    return session.interrupt();
   }
 
   killSession(session) {
@@ -3649,11 +3649,35 @@ export class CodexAppServerSession extends EventEmitter {
 
   interrupt() {
     if (!this.alive) throw new Error(`Session ${this.id} is not alive`);
-    if (!this.threadId || !this.activeTurnId) return;
+    if (!this.threadId || !this.activeTurnId) {
+      return {
+        status: "no_active_turn",
+        accepted: false,
+        idempotent: true,
+        provider: "codex",
+        provider_interrupt_attempted: false,
+        provider_interrupt_method: "turn/interrupt",
+        provider_thread_id_present: Boolean(this.threadId),
+        provider_turn_id_present: Boolean(this.activeTurnId),
+        reason: "codex_active_turn_missing",
+        raw_provider_response_exposed: false,
+      };
+    }
     this.request("turn/interrupt", {
       threadId: this.threadId,
       turnId: this.activeTurnId,
     }).catch((err) => this.emit("error", err));
+    return {
+      status: "accepted",
+      accepted: true,
+      idempotent: false,
+      provider: "codex",
+      provider_interrupt_attempted: true,
+      provider_interrupt_method: "turn/interrupt",
+      provider_thread_id_present: true,
+      provider_turn_id_present: true,
+      raw_provider_response_exposed: false,
+    };
   }
 
   request(method, params) {

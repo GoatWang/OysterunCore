@@ -1,6 +1,6 @@
 {
   "name": "oysterun-host-service",
-  "version": "1.4.5",
+  "version": "1.4.8",
   "type": "module",
   "description": "Oysterun host service — runs on Mac mini, manages Claude Code sessions",
   "scripts": {

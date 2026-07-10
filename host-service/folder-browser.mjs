@@ -1,5 +1,6 @@
+import { randomUUID } from "crypto";
 import { spawn } from "child_process";
-import { cp, mkdir, realpath, rename, rm, stat } from "fs/promises";
+import { cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "fs/promises";
 import { dirname, isAbsolute, join } from "path";
 import { fileURLToPath } from "url";
 import { resolveDefaultBrowsePathAsync, resolveDirectoryPathAsync } from "./config.mjs";
@@ -17,6 +18,7 @@ const DEFAULT_WORKER_PATH = join(__dirname, "folder-browser-worker.mjs");
 const DEMO_AGENT_ID = "oysterun-github-tracker";
 const DEMO_AGENT_BASE_FOLDER_NAME = "oysterun-github-tracker";
 const DEMO_AGENT_TEMPLATE_ROOT = join(__dirname, "templates", "demo-agents");
+const DEMO_AGENT_PATH_PLACEHOLDER = "__OYSTERUN_DEMO_AGENT_FOLDER__";
 const NODE_FOLDER_ACCESS_PERMISSION = "node_folder_access";
 
 function normalizeOffset(rawOffset) {
@@ -78,6 +80,119 @@ function buildFolderValidationError(message, status = 400, code = "invalid_folde
   error.status = status;
   error.code = code;
   return error;
+}
+
+function isObjectRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function taipeiDateParts(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)])
+  );
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+  };
+}
+
+function computeNextTaipeiDailyRunAt(time = "11:30", now = new Date()) {
+  const match = String(time || "11:30").match(/^(\d{1,2}):(\d{2})$/);
+  const hour = match ? Number(match[1]) : 11;
+  const minute = match ? Number(match[2]) : 30;
+  const parts = taipeiDateParts(now);
+  let targetUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    hour - 8,
+    minute,
+    0,
+    0
+  );
+  if (targetUtc <= now.getTime()) targetUtc += 24 * 60 * 60 * 1000;
+  return new Date(targetUtc).toISOString();
+}
+
+function replaceDemoAgentPathValues(value, copiedPath) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => replaceDemoAgentPathValues(entry, copiedPath));
+  }
+  if (isObjectRecord(value)) {
+    const next = {};
+    for (const [key, entry] of Object.entries(value)) {
+      next[key] = replaceDemoAgentPathValues(entry, copiedPath);
+    }
+    return next;
+  }
+  if (typeof value === "string" && value === DEMO_AGENT_PATH_PLACEHOLDER) {
+    return copiedPath;
+  }
+  return value;
+}
+
+async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
+  const schedulersPath = join(copiedPath, ".oysterun", "schedulers.json");
+  const raw = await readFile(schedulersPath, "utf8");
+  const payload = JSON.parse(raw);
+  if (!isObjectRecord(payload) || !Array.isArray(payload.schedulers)) {
+    throw buildFolderMutationError(
+      "Demo agent scheduler file is invalid",
+      500,
+      "demo_agent_scheduler_invalid"
+    );
+  }
+  const timestamp = nowIso();
+  const normalizedSchedulers = payload.schedulers.map((entry) => {
+    const schedule = replaceDemoAgentPathValues(entry, copiedPath);
+    const time =
+      schedule?.schedule_rule?.timezone === "Asia/Taipei"
+        ? schedule.schedule_rule.time
+        : "11:30";
+    const id = randomUUID();
+    schedule.id = id;
+    schedule.agent_id = schedule.agent_id || DEMO_AGENT_ID;
+    schedule.created_by = "oysterun-demo-agent-copy";
+    schedule.enabled = true;
+    schedule.status = "active";
+    schedule.next_run_at = computeNextTaipeiDailyRunAt(time);
+    schedule.created_at = timestamp;
+    schedule.updated_at = timestamp;
+    if (isObjectRecord(schedule.setup_snapshot)) {
+      schedule.setup_snapshot.agent_folder = copiedPath;
+      schedule.setup_snapshot.cwd = copiedPath;
+    }
+    if (isObjectRecord(schedule.metadata?.target_binding?.setup_snapshot)) {
+      schedule.metadata.target_binding.setup_snapshot.agent_folder = copiedPath;
+      schedule.metadata.target_binding.setup_snapshot.cwd = copiedPath;
+    }
+    return schedule;
+  });
+  await writeFile(
+    schedulersPath,
+    `${JSON.stringify({ version: 1, schedulers: normalizedSchedulers }, null, 2)}\n`
+  );
+  return {
+    scheduler_count: normalizedSchedulers.length,
+    scheduler_ids: normalizedSchedulers.map((entry) => entry.id),
+  };
 }
 
 function isFolderPermissionErrorCode(code) {
@@ -357,6 +472,11 @@ export async function copyDemoAgent({
     resolvedParentPath,
     `.oysterun-demo-copy-${normalizedDemoId}-${process.pid}-${Date.now()}`
   );
+  let copiedPath = "";
+  let schedulerRegistration = {
+    scheduler_count: 0,
+    scheduler_ids: [],
+  };
 
   try {
     await cp(templatePath, tempPath, {
@@ -365,8 +485,13 @@ export async function copyDemoAgent({
       errorOnExist: true,
     });
     await rename(tempPath, targetPath);
+    copiedPath = await realpath(targetPath);
+    schedulerRegistration = await normalizeCopiedDemoAgentSchedulers(copiedPath);
   } catch (err) {
     await rm(tempPath, { recursive: true, force: true });
+    if (copiedPath) {
+      await rm(copiedPath, { recursive: true, force: true });
+    }
     if (err?.code === "EEXIST") {
       throw buildFolderMutationError(
         `Folder already exists: ${folderName}`,
@@ -389,7 +514,9 @@ export async function copyDemoAgent({
     demo_id: normalizedDemoId,
     parent_path: resolvedParentPath,
     folder_name: folderName,
-    copied_path: await realpath(targetPath),
+    copied_path: copiedPath,
+    portable_scheduler_count: schedulerRegistration.scheduler_count,
+    portable_scheduler_ids: schedulerRegistration.scheduler_ids,
     start_session_available: true,
   };
 }

@@ -1346,7 +1346,17 @@ export class ClaudeCodeSession extends EventEmitter {
 
   interrupt() {
     if (!this.ready || !this.providerSessionId) {
-      return false;
+      return {
+        status: "not_ready",
+        accepted: false,
+        idempotent: true,
+        provider: "claude",
+        provider_interrupt_attempted: false,
+        provider_interrupt_method: "session/cancel",
+        provider_session_id_present: Boolean(this.providerSessionId),
+        reason: "claude_acp_session_not_ready",
+        raw_provider_response_exposed: false,
+      };
     }
     this.rpc.notify("session/cancel", { sessionId: this.providerSessionId });
     this.emit("event", {
@@ -1354,7 +1364,16 @@ export class ClaudeCodeSession extends EventEmitter {
       status: "interrupted",
       stop_reason: "client_cancel",
     });
-    return true;
+    return {
+      status: "accepted",
+      accepted: true,
+      idempotent: false,
+      provider: "claude",
+      provider_interrupt_attempted: true,
+      provider_interrupt_method: "session/cancel",
+      provider_session_id_present: true,
+      raw_provider_response_exposed: false,
+    };
   }
 
   stop() {

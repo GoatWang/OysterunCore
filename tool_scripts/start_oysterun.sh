@@ -76,47 +76,22 @@ if [[ -n "${PERSISTENT_PLIST}" ]]; then
   HOST_PID="$(wait_for_host_identity_files "Host service" "${HOST_DIR}")"
 else
   collect_routec_host_env_args
-  if is_macos; then
-    echo "[oysterun-service] Starting ${STACK_NAME} Host service on ${HOST_URL}..."
-    prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
-    printf -v HOST_COMMAND 'export PATH=%q; cd %q && exec /usr/bin/env OYSTERUN_CONFIG_DIR=%q OYSTERUN_PORT=%q OYSTERUN_REPO_ROOT=%q OYSTERUN_NODE_BIN=%q' "${LAUNCH_PATH}" "${HOST_DIR}" "${CONFIG_DIR}" "${HOST_PORT}" "${ROOT_DIR}" "${NODE_BIN}"
-    if (( ${#ROUTEC_HOST_ENV_ARGS[@]} > 0 )); then
-      for routec_host_env_arg in "${ROUTEC_HOST_ENV_ARGS[@]}"; do
-        printf -v HOST_COMMAND '%s %q' "${HOST_COMMAND}" "${routec_host_env_arg}"
-      done
-    fi
-    printf -v HOST_COMMAND '%s %q server.mjs' "${HOST_COMMAND}" "${NODE_BIN}"
-    submit_launchctl_job "${HOST_LABEL}" "${HOST_LOG}" "${HOST_COMMAND}"
-    STARTED_HOST=1
-    HOST_PID="$(launchctl_pid_for_label "${HOST_LABEL}")"
-    wait_for_http "${HOST_URL}/health" "Host service" "${HOST_PID}" "${HOST_LOG}" "${HOST_LABEL}"
-    write_pid_file_from_label "${HOST_LABEL}" "${HOST_PID_FILE}"
-    HOST_PID="$(pid_from_file "${HOST_PID_FILE}")"
-    verify_process_cwd "${HOST_PID}" "${HOST_DIR}" "Host service"
-    write_host_origin_file "${HOST_PID}" "${HOST_LABEL}"
-  else
-    echo "[oysterun-service] Starting ${STACK_NAME} pid-file Host service on ${HOST_URL}..."
-    prepare_host_log_for_service_start "${HOST_LOG}" "Host service"
-    (
-      trap '' HUP
-      export PATH="${LAUNCH_PATH}"
-      cd "${HOST_DIR}"
-      exec /usr/bin/env \
-        OYSTERUN_CONFIG_DIR="${CONFIG_DIR}" \
-        OYSTERUN_PORT="${HOST_PORT}" \
-        OYSTERUN_REPO_ROOT="${ROOT_DIR}" \
-        OYSTERUN_NODE_BIN="${NODE_BIN}" \
-        "${ROUTEC_HOST_ENV_ARGS[@]}" \
-        "${NODE_BIN}" server.mjs
-    ) >> "${HOST_LOG}" 2>&1 &
-    STARTED_HOST=1
-    HOST_PID="$!"
-    printf '%s\n' "${HOST_PID}" > "${HOST_PID_FILE}"
-    disown "${HOST_PID}" 2>/dev/null || true
-    wait_for_http "${HOST_URL}/health" "Host service" "${HOST_PID}" "${HOST_LOG}"
-    verify_process_cwd "${HOST_PID}" "${HOST_DIR}" "Host service"
-    write_host_origin_file "${HOST_PID}" "${HOST_LABEL}"
-  fi
+  echo "[oysterun-service] Starting ${STACK_NAME} pid-file Host service on ${HOST_URL}..."
+  start_pid_file_host_process \
+    "${HOST_PID_FILE}" \
+    "${HOST_LOG}" \
+    "${HOST_DIR}" \
+    "${LAUNCH_PATH}" \
+    "${CONFIG_DIR}" \
+    "${HOST_PORT}" \
+    "${ROOT_DIR}" \
+    "${NODE_BIN}" \
+    "${ROUTEC_HOST_ENV_ARGS[@]}"
+  STARTED_HOST=1
+  HOST_PID="$(pid_from_file "${HOST_PID_FILE}")"
+  wait_for_http "${HOST_URL}/health" "Host service" "${HOST_PID}" "${HOST_LOG}"
+  verify_process_cwd "${HOST_PID}" "${HOST_DIR}" "Host service"
+  write_host_origin_file "${HOST_PID}" "${HOST_LABEL}"
 fi
 
 write_current_routec_stack_readiness "tool_scripts/start_oysterun.sh" >/dev/null
@@ -127,7 +102,7 @@ trap - ERR
 echo
 if [[ -n "${PERSISTENT_PLIST}" ]]; then
   echo "[oysterun-service] LaunchAgent:      ${PERSISTENT_PLIST}"
-elif ! is_macos; then
+else
   echo "[oysterun-service] Service manager: pid-file"
 fi
 echo "[oysterun-service] Stack:          ${STACK_NAME}"

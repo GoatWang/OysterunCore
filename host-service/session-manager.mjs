@@ -763,6 +763,7 @@ export class SessionManager extends EventEmitter {
     session._claimedProviderTurnNoOutputGeneration = 0;
     session._claimedProviderTurnNoOutputToolProgressSeen = false;
     session._claimedProviderTurnNoOutputFinalEventSeen = false;
+    session._interruptResult = null;
   }
 
   getEffectiveProviderResumeId(session) {
@@ -1093,6 +1094,11 @@ export class SessionManager extends EventEmitter {
         typeof delivery.matrix_txn_id === "string"
           ? delivery.matrix_txn_id.trim()
           : null,
+      client_request_id:
+        typeof delivery.client_request_id === "string" &&
+        delivery.client_request_id.trim()
+          ? delivery.client_request_id.trim()
+          : null,
       source_user_event_id: sourceUserEventId,
       source_user_event_id_hash:
         typeof delivery.source_user_event_id_hash === "string" &&
@@ -1106,6 +1112,16 @@ export class SessionManager extends EventEmitter {
           ? delivery.target_user_event_id.trim()
           : null,
       provider_id: providerId,
+      provider_delivery_idempotency_key:
+        typeof delivery.provider_delivery_idempotency_key === "string" &&
+        delivery.provider_delivery_idempotency_key.trim()
+          ? delivery.provider_delivery_idempotency_key.trim()
+          : null,
+      provider_delivery_idempotency_key_kind:
+        typeof delivery.provider_delivery_idempotency_key_kind === "string" &&
+        delivery.provider_delivery_idempotency_key_kind.trim()
+          ? delivery.provider_delivery_idempotency_key_kind.trim()
+          : null,
       provider_delivery_claim_id:
         typeof delivery.provider_delivery_claim_id === "string"
           ? delivery.provider_delivery_claim_id.trim()
@@ -3932,6 +3948,8 @@ export class SessionManager extends EventEmitter {
     const providerId = session.provider || session.adapterId || "unknown";
     const realProviderDeliveryMarker =
       routeCRealProviderDeliveryMarker(providerId);
+    const providerDeliveryIdempotencyKey =
+      normalizeProviderMetadataId(txnId) || serverEventId;
     if (!realProviderDeliveryMarker) {
       const proof = blockRouteCHost2IntakeProviderDelivery({
         hostSessionId: session.id,
@@ -3953,8 +3971,14 @@ export class SessionManager extends EventEmitter {
       matrix_room_id: matrixRoomId,
       matrix_user_id: matrixUserId,
       matrix_txn_id: txnId,
+      client_request_id: providerDeliveryIdempotencyKey,
       source_user_event_id: serverEventId,
       source_user_event_id_hash: this.routeCStableHash(serverEventId),
+      provider_delivery_idempotency_key: providerDeliveryIdempotencyKey,
+      provider_delivery_idempotency_key_kind:
+        normalizeProviderMetadataId(txnId)
+          ? "matrix_txn_or_client_request_id"
+          : "matrix_server_event_id",
       provider_id: providerId,
       provider_delivery_claim_id: null,
       provider_delivery_claimed: false,
@@ -3981,9 +4005,13 @@ export class SessionManager extends EventEmitter {
       full_provider_parity_claimed: false,
     };
     const deterministicMessageId = `routec_host2_${this.routeCStableHash(
-      `${session.id}:${matrixRoomId}:${serverEventId}`
+      `${session.id}:${matrixRoomId}:${providerDeliveryIdempotencyKey}`
     ).slice(0, 32)}`;
     try {
+      const duplicateMessage = this.getOutboxMessage(
+        session,
+        deterministicMessageId
+      );
       const queuedMessage = this.sendToSession(
         session.id,
         matrixUserId || "routec-matrix-user",
@@ -3995,6 +4023,7 @@ export class SessionManager extends EventEmitter {
           providerTextOverride: providerText,
         }
       );
+      const providerDeliveryDuplicatePrevented = duplicateMessage !== null;
       if (queuedMessage.localCommand === true) {
         return {
           status:
@@ -4005,6 +4034,9 @@ export class SessionManager extends EventEmitter {
           provider_delivery_claimed: false,
           provider_delivery_permitted: false,
           provider_delivery_attempted: false,
+          provider_delivery_duplicate_prevented:
+            providerDeliveryDuplicatePrevented,
+          provider_delivery_idempotency_key: providerDeliveryIdempotencyKey,
           provider_delivery_blocked_reason:
             queuedMessage.routeCMatrixDelivery
               ?.provider_delivery_blocked_reason ||
@@ -4037,6 +4069,9 @@ export class SessionManager extends EventEmitter {
         provider_delivery_attempted:
           queuedMessage.routeCMatrixDelivery?.provider_delivery_attempted ===
           true,
+        provider_delivery_duplicate_prevented:
+          providerDeliveryDuplicatePrevented,
+        provider_delivery_idempotency_key: providerDeliveryIdempotencyKey,
         provider_delivery_blocked_reason:
           queuedMessage.routeCMatrixDelivery
             ?.provider_delivery_blocked_reason || null,
@@ -4173,7 +4208,42 @@ export class SessionManager extends EventEmitter {
   interruptAgent(agentId) {
     const session = this.getAgentSession(agentId);
     if (!session) throw new Error(`No active session for agent ${agentId}`);
-    this.interruptSession(session.id);
+    return this.interruptSession(session.id);
+  }
+
+  buildSessionInterruptResult(session, result = {}) {
+    const provider = session.provider || session.adapterId || "claude";
+    const accepted = result.accepted === true || result.status === "accepted";
+    const status =
+      typeof result.status === "string" && result.status.trim()
+        ? result.status.trim()
+        : accepted
+        ? "accepted"
+        : "unknown";
+    return {
+      schema_version: "routec.session_interrupt_result.v1",
+      status,
+      accepted,
+      idempotent: result.idempotent === true,
+      provider,
+      provider_interrupt_attempted:
+        result.provider_interrupt_attempted === true ||
+        result.providerInterruptAttempted === true,
+      provider_interrupt_method:
+        typeof result.provider_interrupt_method === "string"
+          ? result.provider_interrupt_method
+          : typeof result.providerInterruptMethod === "string"
+          ? result.providerInterruptMethod
+          : null,
+      reason:
+        typeof result.reason === "string" && result.reason.trim()
+          ? result.reason.trim()
+          : null,
+      raw_provider_response_exposed: false,
+      provider_session_id_present: result.provider_session_id_present === true,
+      provider_thread_id_present: result.provider_thread_id_present === true,
+      provider_turn_id_present: result.provider_turn_id_present === true,
+    };
   }
 
   interruptSession(sessionId) {
@@ -4188,9 +4258,34 @@ export class SessionManager extends EventEmitter {
         }" does not support interrupt`
       );
     }
+    if (session._deliveryState === "interrupting") {
+      const result = this.buildSessionInterruptResult(session, {
+        status: "already_interrupting",
+        accepted: true,
+        idempotent: true,
+        provider_interrupt_attempted: false,
+        reason: "interrupt_already_in_flight",
+      });
+      session._interruptResult = result;
+      this.emitDeliveryStateNotice(session);
+      return result;
+    }
     session._deliveryState = "interrupting";
     this.emitDeliveryStateNotice(session);
-    adapter.interruptSession(session);
+    const result = this.buildSessionInterruptResult(
+      session,
+      adapter.interruptSession(session) || {
+        status: "accepted",
+        accepted: true,
+        provider_interrupt_attempted: true,
+      }
+    );
+    session._interruptResult = result;
+    if (result.accepted !== true) {
+      session._deliveryState = "ready";
+      this.emitDeliveryStateNotice(session);
+    }
+    return result;
   }
 
   waitForSessionExit(session, timeoutMs = 8000) {

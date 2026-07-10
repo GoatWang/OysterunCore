@@ -4,7 +4,7 @@ import { readFileSync } from "fs";
 import { stdin as processStdin } from "process";
 import { pathToFileURL } from "url";
 
-const BODY_FORMATS = new Set(["markdown", "html", "auto"]);
+const BODY_FORMATS = new Set(["html"]);
 const MULTI_VALUE_FLAGS = new Set(["tag", "link", "link-json"]);
 
 function normalizeString(value) {
@@ -68,7 +68,7 @@ function pushOption(options, key, value) {
 
 export function parseArgs(argv = []) {
   const options = {
-    bodyFormat: "auto",
+    bodyFormat: "html",
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -108,13 +108,11 @@ export function isFullDocumentHtml(body) {
   );
 }
 
-export function resolveBodyFormat(body, requestedFormat = "auto") {
-  const normalizedFormat = normalizeString(requestedFormat || "auto").toLowerCase();
+export function resolveBodyFormat(body, requestedFormat = "html") {
+  void body;
+  const normalizedFormat = normalizeString(requestedFormat || "html").toLowerCase();
   if (!BODY_FORMATS.has(normalizedFormat)) {
-    throw new Error("body_format must be one of markdown, html, or auto");
-  }
-  if (normalizedFormat === "auto") {
-    return isFullDocumentHtml(body) ? "html" : "markdown";
+    throw new Error("body_format must be html");
   }
   return normalizedFormat;
 }
@@ -129,13 +127,21 @@ function readStdinSync(stdin = processStdin) {
 }
 
 export function resolveBodyInput(options, stdin = processStdin) {
-  if (options.body !== undefined) return String(options.body);
-  if (options.bodyFile !== undefined) {
-    const filePath = requireString(options.bodyFile, "body file path");
-    if (filePath === "-") return readStdinSync(stdin);
-    return readFileSync(filePath, "utf8");
+  void stdin;
+  if (options.body !== undefined) {
+    throw new Error("Mail body must come from a .html file; use --html-file <path>.html");
   }
-  return readStdinSync(stdin);
+  const filePath = requireString(
+    options.htmlFile ||
+      options.bodyHtmlFile ||
+      options.bodyFile ||
+      options.file,
+    "html file path"
+  );
+  if (!filePath.toLowerCase().endsWith(".html")) {
+    throw new Error("Mail deliverable must use a .html extension");
+  }
+  return readFileSync(filePath, "utf8");
 }
 
 function parseJsonObject(value, label) {
@@ -223,13 +229,9 @@ export function buildMailPayload(options, runtime, stdin = processStdin) {
   const bodyFormat = resolveBodyFormat(body, options.bodyFormat);
   const payload = {
     title,
-    body_format: bodyFormat,
+    body_format: "html",
+    body_html: body,
   };
-  if (bodyFormat === "html") {
-    payload.body_html = body;
-  } else {
-    payload.body_markdown = body;
-  }
   addIfPresent(payload, "id", options.id);
   addIfPresent(payload, "recipient_user_id", options.recipientUserId);
   addIfPresent(payload, "recipient_synapse_user_id", options.recipientSynapseUserId);
@@ -293,11 +295,11 @@ export function formatSuccessOutput(responseBody) {
 
 export function buildUsageText() {
   return [
-    "Usage: node .codex/skills/oysterun-mail/scripts/send_mail.mjs --title <title> --body <text> [options]",
+    "Usage: node .codex/skills/oysterun-mail/scripts/send_mail.mjs --title <title> --html-file <path>.html [options]",
     "",
     "Required env: OYSTERUN_HOST_ORIGIN and OYSTERUN_MAIL_WRITE_TOKEN or OYSTERUN_CAPABILITY_TOKEN",
-    "Body options: --body <text>, --body-file <path>, or --body-file -",
-    "Format: --body-format markdown|html|auto",
+    "Body options: --html-file <path>.html, --body-html-file <path>.html, or --body-file <path>.html",
+    "Format: HTML only; markdown, auto, stdin, and plain text bodies are rejected.",
   ].join("\n");
 }
 

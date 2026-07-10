@@ -1,4 +1,7 @@
 import { createHash } from "crypto";
+import { existsSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { SchedulerStore } from "./scheduler-store.mjs";
 import {
   PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER,
@@ -41,6 +44,9 @@ const HOST_SCHEDULE_ACTIVE_REASON =
   "P12.4 Host scheduler model runner is enabled";
 const HOST_SCHEDULE_UI_PAUSED_REASON =
   "P12.5 Host scheduler UI row is disabled";
+const HOST_SERVICE_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(HOST_SERVICE_DIR, "..");
+const OYSTERUN_PRODUCT_CLI_BIN = resolve(REPO_ROOT, "bin", "oysterun.mjs");
 export const DEMOTED_LOOP_STOP_COMMAND_ERROR =
   "Legacy /stoploop is no longer a Loop command. Open Loop to enable, disable, or delete rows.";
 
@@ -415,6 +421,9 @@ function buildProviderRunMetadata({
   triggerType,
   targetBinding,
   fallbackLogSummary,
+  dispatchOrigin,
+  dispatchAuthority,
+  hostDispatchPath,
   extra = {},
 }) {
   const exitCode = Number.isInteger(providerRun?.exit_code)
@@ -427,6 +436,12 @@ function buildProviderRunMetadata({
   const completedAt = normalizeOptionalString(providerRun?.completed_at);
   return {
     ...extra,
+    ...buildHostScheduleDispatchProvenance({
+      dispatchOrigin,
+      dispatchAuthority,
+      hostDispatchPath,
+      providerRun,
+    }),
     trigger_type: triggerType,
     outcome,
     target_kind: targetBinding?.kind || null,
@@ -536,6 +551,32 @@ function getHostScheduleDispatchMetadata(plan, extra = {}) {
       ? { session_runtime_run: true, direct_provider_run: false }
       : { direct_provider_run: true }),
     ...extra,
+  };
+}
+
+function buildHostScheduleDispatchProvenance({
+  dispatchOrigin,
+  dispatchAuthority,
+  hostDispatchPath,
+  providerRun = null,
+}) {
+  const providerReportedHostDispatchPath = normalizeOptionalString(
+    providerRun?.host_dispatch_path
+  );
+  return {
+    dispatch_origin:
+      normalizeOptionalString(dispatchOrigin) ||
+      "direct_scheduler_service_call",
+    dispatch_authority:
+      normalizeOptionalString(dispatchAuthority) ||
+      "unspecified_scheduler_service_caller",
+    host_dispatch_path:
+      normalizeOptionalString(hostDispatchPath) ||
+      providerReportedHostDispatchPath ||
+      null,
+    ...(providerReportedHostDispatchPath
+      ? { provider_reported_host_dispatch_path: providerReportedHostDispatchPath }
+      : {}),
   };
 }
 
@@ -1074,6 +1115,44 @@ export class SchedulerService {
       .map((schedule) => this.serializeHostScheduleForDashboardUi(schedule));
   }
 
+  registerCopiedDemoAgentSchedules({ agentFolder } = {}) {
+    this.initialize();
+    const realFolder = this.portableDefinitionStore.rememberKnownFolder(
+      null,
+      normalizeRequiredString(agentFolder, "agentFolder")
+    );
+    const definitions =
+      this.portableDefinitionStore.readDefinitionsForFolder(realFolder);
+    const registered = [];
+    for (const definition of definitions) {
+      this.portableDefinitionStore.rememberKnownFolder(
+        definition.agent_id,
+        realFolder
+      );
+      const portableHash =
+        this.portableDefinitionStore.buildPortableHash(definition);
+      this.store.markPortableScheduleOwnerToggle({
+        scheduleId: definition.id,
+        agentFolder: realFolder,
+        portableHash,
+        enabled: definition.enabled === true,
+      });
+      const schedule = this.portableDefinitionStore.definitionToSchedule(
+        definition,
+        { agentFolder: realFolder, ownerManaged: true }
+      );
+      registered.push(this.serializeHostScheduleForDashboardUi(schedule));
+    }
+    return {
+      status: "demo_agent_schedulers_registered",
+      agent_folder: realFolder,
+      registered_count: registered.length,
+      schedules: registered,
+      storage_owner: PORTABLE_SCHEDULER_STORAGE_OWNER,
+      runtime_state_owner: PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER,
+    };
+  }
+
   getHostScheduleForDashboard(scheduleId) {
     return this.serializeHostScheduleForDashboardUi(
       this.requireHostSchedule(scheduleId)
@@ -1099,6 +1178,17 @@ export class SchedulerService {
     });
     if (!log) throw new Error("Scheduler run log not found");
     return this.serializeHostScheduleRunLogForDashboard(schedule, run, log);
+  }
+
+  getScheduleRunForCapability({ scheduleId, runId }) {
+    this.initialize();
+    const normalizedScheduleId = normalizeRequiredString(scheduleId, "scheduleId");
+    const normalizedRunId = normalizeRequiredString(runId, "runId");
+    return (
+      this.store
+        .listScheduleRuns(normalizedScheduleId)
+        .find((candidate) => candidate.id === normalizedRunId) || null
+    );
   }
 
   requireHostSchedule(scheduleId) {
@@ -1159,6 +1249,8 @@ export class SchedulerService {
     now = nowIso(this.clock),
     dispatcher,
     limit = 50,
+    dispatchOrigin = "direct_scheduler_service_call",
+    dispatchAuthority = "unspecified_scheduler_service_caller",
   } = {}) {
     if (!dispatcher) {
       throw new Error("Scheduler dispatch requires dispatcher");
@@ -1221,7 +1313,12 @@ export class SchedulerService {
       }
     }
     for (const schedule of dueHostSchedules) {
-      const run = await this.drainSingleDueSchedule(schedule, { now, dispatcher });
+      const run = await this.drainSingleDueSchedule(schedule, {
+        now,
+        dispatcher,
+        dispatchOrigin,
+        dispatchAuthority,
+      });
       result.runs.push(run);
       if (run.status === "dispatched") {
         result.dispatched_count += 1;
@@ -1236,9 +1333,17 @@ export class SchedulerService {
     return result;
   }
 
-  async drainSingleDueSchedule(schedule, { now, dispatcher }) {
+  async drainSingleDueSchedule(
+    schedule,
+    { now, dispatcher, dispatchOrigin, dispatchAuthority }
+  ) {
     if (schedule.schedule_kind === HOST_SCHEDULE_KIND) {
-      return await this.drainSingleHostSchedule(schedule, { now, dispatcher });
+      return await this.drainSingleHostSchedule(schedule, {
+        now,
+        dispatcher,
+        dispatchOrigin,
+        dispatchAuthority,
+      });
     }
     return {
       status: "skipped",
@@ -1343,7 +1448,10 @@ export class SchedulerService {
     }
   }
 
-  async drainSingleHostSchedule(schedule, { now, dispatcher }) {
+  async drainSingleHostSchedule(
+    schedule,
+    { now, dispatcher, dispatchOrigin, dispatchAuthority }
+  ) {
     const triggeredAt = normalizeRequiredString(now, "now");
     const targetBinding = getTargetBindingFromMetadata(schedule);
     assertOutsideSchedulerTargetBindingAllowed(targetBinding);
@@ -1354,6 +1462,9 @@ export class SchedulerService {
         triggeredAt,
         reason: dispatchPlan.unavailableReason,
         logSummary: dispatchPlan.unavailableLogSummary,
+        dispatchOrigin,
+        dispatchAuthority,
+        hostDispatchPath: dispatchPlan.pendingPath,
       });
     }
     const messageId = buildHostScheduleMessageId(schedule, triggeredAt);
@@ -1367,7 +1478,11 @@ export class SchedulerService {
         outcome: "running",
         trigger_basis: "schedule_rule_after_actual_trigger_time",
         actual_triggered_at: triggeredAt,
-        host_dispatch_path: dispatchPlan.pendingPath,
+        ...buildHostScheduleDispatchProvenance({
+          dispatchOrigin,
+          dispatchAuthority,
+          hostDispatchPath: dispatchPlan.pendingPath,
+        }),
         target_kind: targetBinding.kind,
         live_run_row: true,
         ...getHostScheduleDispatchMetadata(dispatchPlan),
@@ -1429,6 +1544,9 @@ export class SchedulerService {
               providerRun: safeProviderRun,
               triggerType: "scheduled",
               targetBinding,
+              dispatchOrigin,
+              dispatchAuthority,
+              hostDispatchPath: dispatchPlan.defaultPath,
               fallbackLogSummary:
                 dispatchPlan.sessionRuntime
                   ? "Host scheduler ACP session runtime dispatch failed; no spin retry"
@@ -1476,14 +1594,14 @@ export class SchedulerService {
           ...(mailCapability
             ? { mail_capability: mailCapability.metadata }
             : {}),
-          host_dispatch_path:
-            safeProviderRun.host_dispatch_path ||
-            dispatchPlan.defaultPath,
           target_kind: targetBinding.kind,
           ...buildProviderRunMetadata({
             providerRun: safeProviderRun,
             triggerType: "scheduled",
             targetBinding,
+            dispatchOrigin,
+            dispatchAuthority,
+            hostDispatchPath: dispatchPlan.defaultPath,
             fallbackLogSummary:
               dispatchPlan.sessionRuntime
                 ? "Dispatched Host schedule through ACP session runtime"
@@ -1533,7 +1651,11 @@ export class SchedulerService {
           catch_up_burst: false,
           no_spin: true,
           target_kind: targetBinding.kind,
-          host_dispatch_path: dispatchPlan.pendingPath,
+          ...buildHostScheduleDispatchProvenance({
+            dispatchOrigin,
+            dispatchAuthority,
+            hostDispatchPath: dispatchPlan.pendingPath,
+          }),
           ...getHostScheduleDispatchMetadata(dispatchPlan),
           log_summary: "Host scheduler dispatch failed; no spin retry",
           error_summary: reason,
@@ -1561,6 +1683,8 @@ export class SchedulerService {
     scheduleId,
     dispatcher,
     now = nowIso(this.clock),
+    dispatchOrigin = "direct_scheduler_service_call",
+    dispatchAuthority = "unspecified_scheduler_service_caller",
   }) {
     if (!dispatcher) {
       throw new Error("Scheduler test run requires dispatcher");
@@ -1593,7 +1717,11 @@ export class SchedulerService {
         trigger_basis: "manual_dashboard_test_run",
         actual_triggered_at: triggeredAt,
         next_run_at_preserved: schedule.next_run_at,
-        host_dispatch_path: dispatchPlan.pendingPath,
+        ...buildHostScheduleDispatchProvenance({
+          dispatchOrigin,
+          dispatchAuthority,
+          hostDispatchPath: dispatchPlan.pendingPath,
+        }),
         target_kind: targetBinding.kind,
         ...getHostScheduleDispatchMetadata(dispatchPlan),
         bounded_test_run: true,
@@ -1656,6 +1784,9 @@ export class SchedulerService {
               providerRun: safeProviderRun,
               triggerType: "manual_test",
               targetBinding,
+              dispatchOrigin,
+              dispatchAuthority,
+              hostDispatchPath: dispatchPlan.defaultPath,
               fallbackLogSummary:
                 dispatchPlan.sessionRuntime
                   ? "Host scheduler dashboard test run ACP session runtime dispatch failed; no spin retry"
@@ -1710,14 +1841,14 @@ export class SchedulerService {
           ...(mailCapability
             ? { mail_capability: mailCapability.metadata }
             : {}),
-          host_dispatch_path:
-            safeProviderRun.host_dispatch_path ||
-            dispatchPlan.defaultPath,
           target_kind: targetBinding.kind,
           ...buildProviderRunMetadata({
             providerRun: safeProviderRun,
             triggerType: "manual_test",
             targetBinding,
+            dispatchOrigin,
+            dispatchAuthority,
+            hostDispatchPath: dispatchPlan.defaultPath,
             fallbackLogSummary:
               dispatchPlan.sessionRuntime
                 ? "Dashboard test run dispatched Host schedule through ACP session runtime"
@@ -1776,7 +1907,11 @@ export class SchedulerService {
           bounded_test_run: true,
           no_spin: true,
           target_kind: targetBinding.kind,
-          host_dispatch_path: dispatchPlan.pendingPath,
+          ...buildHostScheduleDispatchProvenance({
+            dispatchOrigin,
+            dispatchAuthority,
+            hostDispatchPath: dispatchPlan.pendingPath,
+          }),
           ...getHostScheduleDispatchMetadata(dispatchPlan),
           log_summary:
             "Host scheduler dashboard test run dispatch failed; no spin retry",
@@ -1813,7 +1948,15 @@ export class SchedulerService {
 
   recordHostScheduleTestFailure(
     schedule,
-    { triggeredAt, reason, logSummary, providerRun = null }
+    {
+      triggeredAt,
+      reason,
+      logSummary,
+      providerRun = null,
+      dispatchOrigin = "direct_scheduler_service_call",
+      dispatchAuthority = "unspecified_scheduler_service_caller",
+      hostDispatchPath = "schedulerDashboardTestRun.failed_before_dispatch",
+    }
   ) {
     const targetBinding = getTargetBindingFromMetadata(schedule);
     const run = this.store.createScheduleRun({
@@ -1836,6 +1979,9 @@ export class SchedulerService {
               providerRun,
               triggerType: "manual_test",
               targetBinding,
+              dispatchOrigin,
+              dispatchAuthority,
+              hostDispatchPath,
               fallbackLogSummary: logSummary,
               extra: {
                 direct_provider_run: true,
@@ -1843,6 +1989,11 @@ export class SchedulerService {
               },
             })
           : {
+              ...buildHostScheduleDispatchProvenance({
+                dispatchOrigin,
+                dispatchAuthority,
+                hostDispatchPath,
+              }),
               trigger_type: "manual_test",
               outcome: "failed",
               log_summary: logSummary,
@@ -1873,6 +2024,9 @@ export class SchedulerService {
       this.getHostOrigin(),
       "OYSTERUN_HOST_ORIGIN"
     );
+    if (!existsSync(OYSTERUN_PRODUCT_CLI_BIN)) {
+      throw new Error(`Oysterun product CLI bin is required: ${OYSTERUN_PRODUCT_CLI_BIN}`);
+    }
     const { token, grant } = this.mailStore.createCapabilityGrant({
       grantKind: "scheduler_run",
       actorType: "scheduler",
@@ -1895,6 +2049,7 @@ export class SchedulerService {
         OYSTERUN_SCHEDULE_ID: schedule.id,
         OYSTERUN_SCHEDULE_RUN_ID: run.id,
         OYSTERUN_AGENT_ID: schedule.agent_id,
+        OYSTERUN_CLI_BIN: OYSTERUN_PRODUCT_CLI_BIN,
       },
       redactionValues: [token],
       metadata: {
@@ -1913,6 +2068,7 @@ export class SchedulerService {
           "OYSTERUN_SCHEDULE_ID",
           "OYSTERUN_SCHEDULE_RUN_ID",
           "OYSTERUN_AGENT_ID",
+          "OYSTERUN_CLI_BIN",
         ],
         raw_token_returned: false,
         raw_token_persisted: false,
@@ -2021,7 +2177,16 @@ export class SchedulerService {
 
   recordHostScheduleFailedRun(
     schedule,
-    { triggeredAt, reason, logSummary, providerRun = null, triggerType = "scheduled" }
+    {
+      triggeredAt,
+      reason,
+      logSummary,
+      providerRun = null,
+      triggerType = "scheduled",
+      dispatchOrigin = "direct_scheduler_service_call",
+      dispatchAuthority = "unspecified_scheduler_service_caller",
+      hostDispatchPath = "schedulerHostDispatch.failed_before_dispatch",
+    }
   ) {
     const targetBinding = getTargetBindingFromMetadata(schedule);
     const nextRunAt = this.computeNextHostScheduleRun(schedule, triggeredAt);
@@ -2044,6 +2209,9 @@ export class SchedulerService {
               providerRun,
               triggerType,
               targetBinding,
+              dispatchOrigin,
+              dispatchAuthority,
+              hostDispatchPath,
               fallbackLogSummary: logSummary,
               extra: {
                 missed_run_policy: "skip_without_catch_up",
@@ -2052,6 +2220,11 @@ export class SchedulerService {
               },
             })
           : {
+              ...buildHostScheduleDispatchProvenance({
+                dispatchOrigin,
+                dispatchAuthority,
+                hostDispatchPath,
+              }),
               trigger_type: triggerType,
               outcome: "failed",
               log_summary: logSummary,
@@ -2195,7 +2368,29 @@ export class SchedulerService {
   }
 
   recordHostScheduleProviderRunLog(run, providerRun) {
-    if (!run?.id || !run?.schedule_id || !providerRun) return null;
+    if (!run?.id || !run?.schedule_id) return null;
+    if (!providerRun) {
+      const metadata = isObjectRecord(run.metadata) ? run.metadata : {};
+      const logSummary =
+        normalizeOptionalString(metadata.log_summary) ||
+        "Host scheduler dispatch failed before provider output was available";
+      const errorSummary =
+        normalizeOptionalString(metadata.error_summary) ||
+        normalizeOptionalString(run.error) ||
+        normalizeOptionalString(metadata.failure_reason);
+      if (!logSummary && !errorSummary) return null;
+      return this.store.recordScheduleRunLog({
+        runId: run.id,
+        scheduleId: run.schedule_id,
+        stdout: "",
+        stderr: [logSummary, errorSummary]
+          .filter((entry, index, list) => entry && list.indexOf(entry) === index)
+          .join("\n"),
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        sourceOwner: "host_scheduler_pre_spawn",
+      });
+    }
     return this.store.recordScheduleRunLog({
       runId: run.id,
       scheduleId: run.schedule_id,

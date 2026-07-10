@@ -1193,6 +1193,81 @@ submit_launchctl_job() {
   return 1
 }
 
+start_pid_file_host_process() {
+  local pid_file="$1"
+  local log_file="$2"
+  local host_dir="$3"
+  local launch_path="$4"
+  local config_dir="$5"
+  local host_port="$6"
+  local root_dir="$7"
+  local node_bin="$8"
+  shift 8
+
+  "${node_bin}" --input-type=module - -- \
+    "${pid_file}" \
+    "${log_file}" \
+    "${host_dir}" \
+    "${launch_path}" \
+    "${config_dir}" \
+    "${host_port}" \
+    "${root_dir}" \
+    "${node_bin}" \
+    "$@" <<'NODE'
+import { openSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+
+const [
+  pidFile,
+  logFile,
+  hostDir,
+  launchPath,
+  configDir,
+  hostPort,
+  rootDir,
+  nodeBin,
+  ...extraEnvArgs
+] = process.argv.slice(3);
+
+if (!pidFile || !logFile || !hostDir || !launchPath || !configDir || !hostPort || !rootDir || !nodeBin) {
+  throw new Error("missing required Host pid-file supervision argument");
+}
+
+const env = {
+  ...process.env,
+  PATH: launchPath,
+  OYSTERUN_CONFIG_DIR: configDir,
+  OYSTERUN_PORT: hostPort,
+  OYSTERUN_REPO_ROOT: rootDir,
+  OYSTERUN_NODE_BIN: nodeBin,
+};
+
+for (const rawArg of extraEnvArgs) {
+  const separator = rawArg.indexOf("=");
+  if (separator <= 0) {
+    throw new Error(`invalid Host environment argument: ${rawArg}`);
+  }
+  env[rawArg.slice(0, separator)] = rawArg.slice(separator + 1);
+}
+
+mkdirSync(dirname(pidFile), { recursive: true });
+mkdirSync(dirname(logFile), { recursive: true });
+const out = openSync(logFile, "a");
+const err = openSync(logFile, "a");
+const child = spawn(nodeBin, ["server.mjs"], {
+  cwd: hostDir,
+  detached: true,
+  env,
+  stdio: ["ignore", out, err],
+});
+
+writeFileSync(pidFile, `${child.pid}\n`);
+child.unref();
+NODE
+}
+
 wait_for_exit() {
   local pid="$1"
   local attempts=0

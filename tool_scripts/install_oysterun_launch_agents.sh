@@ -53,6 +53,8 @@ fi
 INSTALL_HOST_PORT_OVERRIDE="${HOST_PORT_OVERRIDE}"
 
 NODE_BIN="$(require_node_runtime "LaunchAgent install")"
+NODE_BIN_DIR="$(dirname "${NODE_BIN}")"
+LAUNCH_AGENT_PATH="${NODE_BIN_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 ensure_dashboard_static_app "${NODE_BIN}"
 
@@ -111,6 +113,8 @@ install_stack_agent() {
   <dict>
     <key>OYSTERUN_NODE_BIN</key>
     <string>${NODE_BIN}</string>
+    <key>PATH</key>
+    <string>${LAUNCH_AGENT_PATH}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

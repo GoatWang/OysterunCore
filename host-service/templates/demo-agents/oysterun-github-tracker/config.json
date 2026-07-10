@@ -1,0 +1,18 @@
+{
+  "repositories": [
+    {
+      "owner": "anthropics",
+      "repo": "claude-code",
+      "branch": "main",
+      "track_releases": true,
+      "track_commits": true
+    },
+    {
+      "owner": "openai",
+      "repo": "codex",
+      "branch": "main",
+      "track_releases": true,
+      "track_commits": true
+    }
+  ]
+}
