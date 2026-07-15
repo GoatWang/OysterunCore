@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Mail
 
-Canonical product skill source lives at `skills/oysterun-mail/`. The repo-local Codex mirror at `.codex/skills/oysterun-mail/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-mail/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-mail/`. The repo-local Codex mirror at `.codex/skills/Oysterun/modules/oysterun-mail/` and Host packaged assets at `host-service/assets/product-skills/oysterun-mail/` and `host-service/assets/product-skills/Oysterun/modules/oysterun-mail/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product Mail operations. It wraps the P86 product CLI contract:
 
@@ -27,7 +27,7 @@ $OYSTERUN_CLI_BIN mail send \
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-mail/scripts/oysterun_mail.mjs list
+node .claude/skills/Oysterun/modules/oysterun-mail/scripts/oysterun_mail.mjs list
 ```
 
 ## Commands
@@ -90,7 +90,7 @@ The legacy `send_mail.mjs` helper remains available only for old generated
 scripts that already call it:
 
 ```bash
-node .claude/skills/oysterun-mail/scripts/send_mail.mjs --title "Digest ready" --html-file data/latest_report.html
+node .claude/skills/Oysterun/modules/oysterun-mail/scripts/send_mail.mjs --title "Digest ready" --html-file data/latest_report.html
 ```
 
 External operator shells should prefer `oysterun_mail.mjs` with dashboard CLI

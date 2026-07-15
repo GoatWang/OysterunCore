@@ -37,16 +37,6 @@ function cloneJson(value, label) {
   }
 }
 
-function assertNoRawPathInPublicValue(value, label) {
-  const encoded = JSON.stringify(value);
-  if (
-    encoded.includes("/tool_event_details/") ||
-    encoded.includes("\\tool_event_details\\")
-  ) {
-    throw new Error(`${label} must not expose raw tool_event_details paths`);
-  }
-}
-
 function writeJsonAtomic(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
@@ -133,7 +123,8 @@ function normalizeDetailRecord({ detail, identity }) {
       value: cloneJson(field.value, field.field || "field"),
     })),
     created_at: new Date().toISOString(),
-    raw_path_exposed: false,
+    resolver_path_fields_exposed: false,
+    tool_payload_local_paths_preserved: true,
   };
 }
 function loadRecord(path) {
@@ -251,9 +242,9 @@ function publicResponse(record, page, pageSizeBytes) {
     selected_detail_truncated: pageResult.selected_detail_truncated,
     truncated_field_count: pageResult.truncated_field_count,
     items: pageResult.items,
-    raw_path_exposed: false,
+    resolver_path_fields_exposed: false,
+    tool_payload_local_paths_preserved: true,
   };
-  assertNoRawPathInPublicValue(response, "tool event detail response");
   return response;
 }
 
@@ -281,7 +272,7 @@ export function createToolEventDetailStore({ configDir }) {
         0
       ),
       detail_storage_kind: "host_tool_event_detail_store",
-      raw_path_exposed: false,
+      resolver_path_fields_exposed: false,
     };
   }
 
@@ -307,15 +298,22 @@ export function createToolEventDetailStore({ configDir }) {
         matrix_event_id: identity.matrixEventId,
         page: normalizedPage,
         items: [],
-        raw_path_exposed: false,
+        resolver_path_fields_exposed: false,
       };
     }
     return publicResponse(record, normalizedPage, normalizedPageSize);
   }
 
+  function readToolEventDetailRecord({ sessionId, matrixRoomId, matrixEventId }) {
+    const identity = requireIdentity({ sessionId, matrixRoomId, matrixEventId });
+    const record = loadRecord(recordPath(root, identity));
+    return record ? cloneJson(record, "stored detail record") : null;
+  }
+
   return {
     root,
     writeToolEventDetail,
+    readToolEventDetailRecord,
     resolveToolEventDetail,
   };
 }

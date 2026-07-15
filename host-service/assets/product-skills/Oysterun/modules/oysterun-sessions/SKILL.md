@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Sessions
 
-Canonical product skill source lives at `skills/oysterun-sessions/`. The repo-local Codex mirror at `.codex/skills/oysterun-sessions/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-sessions/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-sessions/`. The repo-local Codex mirror at `.codex/skills/Oysterun/modules/oysterun-sessions/` and Host packaged assets at `host-service/assets/product-skills/oysterun-sessions/` and `host-service/assets/product-skills/Oysterun/modules/oysterun-sessions/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product session operations. It wraps the P86 product CLI contract:
 
@@ -18,13 +18,13 @@ oysterun sessions <action> [options]
 The helper delegates to the same CLI surface:
 
 ```bash
-node .codex/skills/oysterun-sessions/scripts/oysterun_sessions.mjs list --host http://localhost:2322
+node .codex/skills/Oysterun/modules/oysterun-sessions/scripts/oysterun_sessions.mjs list --host http://localhost:2322
 ```
 
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-sessions/scripts/oysterun_sessions.mjs list
+node .claude/skills/Oysterun/modules/oysterun-sessions/scripts/oysterun_sessions.mjs list
 ```
 
 Inside a live Host session, current-session commands should omit the session

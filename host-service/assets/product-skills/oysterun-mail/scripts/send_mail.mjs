@@ -295,7 +295,7 @@ export function formatSuccessOutput(responseBody) {
 
 export function buildUsageText() {
   return [
-    "Usage: node .codex/skills/oysterun-mail/scripts/send_mail.mjs --title <title> --html-file <path>.html [options]",
+    "Usage: node .codex/skills/Oysterun/modules/oysterun-mail/scripts/send_mail.mjs --title <title> --html-file <path>.html [options]",
     "",
     "Required env: OYSTERUN_HOST_ORIGIN and OYSTERUN_MAIL_WRITE_TOKEN or OYSTERUN_CAPABILITY_TOKEN",
     "Body options: --html-file <path>.html, --body-html-file <path>.html, or --body-file <path>.html",

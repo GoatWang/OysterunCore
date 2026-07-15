@@ -2,7 +2,7 @@
   "version": 1,
   "schedulers": [
     {
-      "id": "oysterun-github-tracker-daily-template",
+      "id": "oysterun-github-tracker-daily-codex-template",
       "agent_id": "oysterun-github-tracker",
       "created_by": "oysterun-demo-agent-copy",
       "command_text": "Read and execute .codex/prompts/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, prompt files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
@@ -19,7 +19,7 @@
       "timezone": "Asia/Taipei",
       "setup_snapshot": {
         "provider": "codex",
-        "session_name": "GitHub Tracker Daily Scheduler",
+        "session_name": "GitHub Tracker Daily Scheduler (Codex)",
         "model": "gpt-5.5",
         "reasoning_effort": "max",
         "approval_policy": "never",
@@ -29,15 +29,72 @@
       "metadata": {
         "source": "oysterun_demo_agent_template",
         "sample_kind": "github_tracker",
+        "provider_template": "codex",
         "target_binding": {
           "kind": "setup_snapshot",
           "agent_id": "oysterun-github-tracker",
           "setup_snapshot": {
             "provider": "codex",
-            "session_name": "GitHub Tracker Daily Scheduler",
+            "session_name": "GitHub Tracker Daily Scheduler (Codex)",
             "model": "gpt-5.5",
             "reasoning_effort": "max",
             "approval_policy": "never",
+            "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
+            "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+          }
+        },
+        "target_binding_scope": "portable_setup_snapshot",
+        "setup_snapshot_copied": true,
+        "source_session_references_present": false,
+        "storage_owner": "agent_folder_oysterun_schedulers_json",
+        "runtime_state_owner": "host_config_oysterun_sqlite_runtime",
+        "missed_run_policy": "skip_without_catch_up",
+        "catch_up_burst": false
+      },
+      "created_at": null,
+      "updated_at": null,
+      "storage_owner": "agent_folder_oysterun_schedulers_json",
+      "source_session_references_present": false,
+      "run_logs_persisted_in_file": false
+    },
+    {
+      "id": "oysterun-github-tracker-daily-claude-template",
+      "agent_id": "oysterun-github-tracker",
+      "created_by": "oysterun-demo-agent-copy",
+      "command_text": "Read and execute .claude/commands/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, command files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
+      "normalized_command": "Read and execute .claude/commands/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, command files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
+      "enabled": true,
+      "status": "active",
+      "next_run_at": null,
+      "schedule_rule": {
+        "type": "daily",
+        "time": "11:30",
+        "timezone": "Asia/Taipei",
+        "missed_run_policy": "skip_without_catch_up"
+      },
+      "timezone": "Asia/Taipei",
+      "setup_snapshot": {
+        "provider": "claude",
+        "session_name": "GitHub Tracker Daily Scheduler (Claude)",
+        "model": "opus",
+        "reasoning_effort": "high",
+        "permission_mode": "bypassPermissions",
+        "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
+        "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+      },
+      "metadata": {
+        "source": "oysterun_demo_agent_template",
+        "sample_kind": "github_tracker",
+        "provider_template": "claude",
+        "target_binding": {
+          "kind": "setup_snapshot",
+          "agent_id": "oysterun-github-tracker",
+          "setup_snapshot": {
+            "provider": "claude",
+            "session_name": "GitHub Tracker Daily Scheduler (Claude)",
+            "model": "opus",
+            "reasoning_effort": "high",
+            "permission_mode": "bypassPermissions",
             "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
             "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
           }

@@ -1302,6 +1302,7 @@ function routeCMatrixPreviewRole(semanticType, actor) {
   }
   if (
     semanticType === "tool.call" ||
+    semanticType === "tool.update" ||
     semanticType === "tool.output" ||
     semanticType === "tool.result" ||
     semanticType === "tool.failure" ||
@@ -3906,6 +3907,8 @@ function routeCSemanticTypeForRuntimeEvent(event, forcedSemanticType = null) {
       return "thinking.reasoning";
     case "tool.call":
       return "tool.call";
+    case "tool.update":
+      return "tool.update";
     case "tool.output":
     case "stderr":
       return "tool.output";
@@ -4133,6 +4136,7 @@ function routeCToolSemanticFieldsForRuntimeEvent(event, semanticType) {
       tool_input: null,
       tool_content: null,
       tool_is_error: null,
+      tool_update_kind: null,
     };
   }
   const toolName =
@@ -4159,7 +4163,10 @@ function routeCToolSemanticFieldsForRuntimeEvent(event, semanticType) {
   return {
     tool_name: toolName,
     tool_call_id: toolCallId,
-    tool_input: semanticType === "tool.call" ? toolInput : null,
+    tool_input:
+      semanticType === "tool.call" || semanticType === "tool.update"
+        ? toolInput
+        : null,
     tool_content: semanticType === "tool.call" ? null : toolContent,
     tool_is_error:
       semanticType === "tool.failure"
@@ -4168,6 +4175,11 @@ function routeCToolSemanticFieldsForRuntimeEvent(event, semanticType) {
         ? event.tool_is_error
         : typeof event?.is_error === "boolean"
         ? event.is_error
+        : null,
+    tool_update_kind:
+      semanticType === "tool.update"
+        ? normalizeRouteCSemanticString(event?.tool_update_kind) ||
+          normalizeRouteCSemanticString(event?.update_kind)
         : null,
   };
 }
@@ -4180,13 +4192,14 @@ function routeCToolSemanticFieldsForEndpointBody(body, semanticType) {
       tool_input: null,
       tool_content: null,
       tool_is_error: null,
+      tool_update_kind: null,
     };
   }
   return {
     tool_name: body.tool_name || body.name || null,
     tool_call_id: body.tool_call_id || body.call_id || null,
     tool_input:
-      semanticType === "tool.call"
+      semanticType === "tool.call" || semanticType === "tool.update"
         ? body.tool_input ?? body.input ?? null
         : null,
     tool_content:
@@ -4204,6 +4217,11 @@ function routeCToolSemanticFieldsForEndpointBody(body, semanticType) {
         ? body.tool_is_error
         : typeof body.is_error === "boolean"
         ? body.is_error
+        : null,
+    tool_update_kind:
+      semanticType === "tool.update"
+        ? normalizeRouteCSemanticString(body.tool_update_kind) ||
+          normalizeRouteCSemanticString(body.update_kind)
         : null,
   };
 }

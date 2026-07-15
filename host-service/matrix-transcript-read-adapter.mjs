@@ -50,6 +50,7 @@ function messageRole(semanticType, actor) {
   }
   if (
     semanticType === "tool.call" ||
+    semanticType === "tool.update" ||
     semanticType === "tool.output" ||
     semanticType === "tool.result" ||
     semanticType === "tool.failure" ||
@@ -104,6 +105,19 @@ function bodyForEvent(content, semanticType) {
   return "";
 }
 
+function semanticString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function semanticBoolean(value) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function semanticNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function hasAttachment(content) {
   return Boolean(
     content?.url ||
@@ -118,12 +132,13 @@ function hasAttachment(content) {
 function transcriptToolEvent({ semantic, semanticType, eventId }) {
   if (!semanticType?.startsWith("tool.")) return null;
   const isCall = semanticType === "tool.call";
+  const isUpdate = semanticType === "tool.update";
   return {
-    type: isCall ? "tool.call" : "tool.result",
+    type: isCall ? "tool.call" : isUpdate ? "tool.update" : "tool.result",
     provider: semantic.provider_id || semantic.provider || null,
     call_id: semantic.tool_call_id || null,
     name: semantic.tool_name || null,
-    input: isCall ? semantic.tool_input ?? null : null,
+    input: isCall || isUpdate ? semantic.tool_input ?? null : null,
     content: isCall ? null : semantic.tool_content ?? semantic.body ?? null,
     is_error: semanticType === "tool.failure" || semantic.tool_is_error === true,
     session_id: semantic.host_session_id || null,
@@ -187,10 +202,30 @@ function matrixEventToTranscriptMessage({ binding, event, index }) {
     tool_transfer_projection: semantic.tool_transfer_projection || null,
     link_annotations: linkAnnotations,
     message_type: messageType(semanticType),
+    lifecycle: semanticString(semantic.lifecycle),
+    semantic_lifecycle:
+      semanticString(semantic.semantic_lifecycle) ||
+      semanticString(semantic.lifecycle),
     turn_id:
       typeof semantic.turn_id === "string" && semantic.turn_id.trim()
         ? semantic.turn_id.trim()
         : null,
+    source_user_event_id: semanticString(semantic.source_user_event_id),
+    target_user_event_id: semanticString(semantic.target_user_event_id),
+    provider_id:
+      semanticString(semantic.provider_id) || semanticString(semantic.provider),
+    provider:
+      semanticString(semantic.provider) || semanticString(semantic.provider_id),
+    provider_turn_id: semanticString(semantic.provider_turn_id),
+    provider_turn_id_kind: semanticString(semantic.provider_turn_id_kind),
+    provider_runtime_event_index: semanticNumber(
+      semantic.provider_runtime_event_index
+    ),
+    provider_completion_marker: semanticString(semantic.provider_completion_marker),
+    provider_completion_state: semanticString(semantic.provider_completion_state),
+    provider_completion_status: semanticString(semantic.provider_completion_status),
+    provider_completion_success: semanticBoolean(semantic.provider_completion_success),
+    provider_completion_turn_id: semanticString(semantic.provider_completion_turn_id),
     has_attachments: hasAttachment(content),
     attachments: [],
     media: Array.isArray(semantic.multi_media_attachments)

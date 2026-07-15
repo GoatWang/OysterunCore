@@ -34,7 +34,6 @@ import {
   getConfigValue,
   isProviderPermissionDebugModeEnabled,
   normalizeClaudePermissionMode,
-  normalizeProviderModel,
   normalizeProviderPermissionPolicy,
   normalizeProviderReasoningEffort,
   normalizeSessionDefaults,
@@ -172,8 +171,9 @@ import {
   ensureRouteCMatrixRoomStorage,
   getRouteCMatrixRoomTimelineReplaySourceProof,
   readRouteCHostOwnerMessageNeighbors,
-  readRouteCMatrixToolEventDetail,
+  readRouteCMatrixToolRun,
   runRouteCMatrixStorageWriteBatch,
+  triggerRouteCMatrixStorageBootMigration,
 } from "./routec-matrix-storage-adapter.mjs";
 import {
   cancelRouteCHost2IntakeForMatrixEvent,
@@ -185,18 +185,40 @@ import {
   SchedulerService,
 } from "./scheduler-service.mjs";
 import {
+  OYSTERUN_SESSION_SETUP_PROVIDER_MODEL_PERMISSION_PROOF_CONTRACT,
+  buildRuntimeOverridesFromBody,
+  buildSchedulerSetupPayloadFromTargetBinding,
+  buildSessionSetupProviderModelPermissionFields,
+  buildSessionSetupProviderModelPermissionProof,
+  completeSchedulerSessionSetupPayloadForRuntime,
+  completeSchedulerSetupPayloadFromTargetBinding,
+  providerMismatchResponse,
+  readExplicitRequestedProvider,
+  requireSchedulerTargetString,
+  resolveSchedulerSessionSetupRuntime,
+  resolveSchedulerSessionSetupRuntimeBase,
+  sessionSetupProviderModelPermissionMismatchResponse,
+  sessionSetupProviderModelPermissionProofMismatchResponse,
+} from "./scheduler-setup-snapshot-contract.mjs";
+import {
   ROUTEC_LARGE_TOOL_EVENT_THRESHOLD,
   ROUTEC_LARGE_TOOL_EVENT_COUNT_LABEL,
   ROUTEC_LARGE_TOOL_JSONL_PAGE_SIZE,
   ROUTEC_LARGE_TOOL_NOTICE_BODY,
   ROUTEC_LARGE_TOOL_NOTICE_KIND,
   createLargeToolCallStore,
+  shouldResetRouteCToolRunAfterSemanticWrite,
 } from "./large-tool-call-store.mjs";
 import {
-  ROUTEC_TOOL_EVENT_DETAIL_PAGE_SIZE_BYTES,
   ROUTEC_TOOL_EVENT_DETAIL_SELECTED_DETAIL_LIMIT_BYTES,
   createToolEventDetailStore,
 } from "./tool-event-detail-store.mjs";
+import {
+  ROUTEC_UNIFIED_TOOL_DETAIL_PAGE_SIZE,
+  buildUnifiedToolLifecycleDetail,
+  normalizeJsonlToolPhysicalRecord,
+  normalizeMatrixToolPhysicalRecord,
+} from "./unified-tool-lifecycle-detail.mjs";
 import { SchedulerRunner } from "./scheduler-runner.mjs";
 import { runSchedulerDirectProviderCommand } from "./scheduler-direct-provider-runner.mjs";
 import { getHostSystemTimezone } from "./scheduler-rule-model.mjs";
@@ -2502,6 +2524,7 @@ function buildPortableSchedulerSetupSnapshotFromTargetBinding(targetBinding) {
     const setupPayload =
       completeSchedulerSetupPayloadFromTargetBinding(targetBinding, {
         label: "setup_snapshot",
+        requireExplicitRuntimeProof: true,
       }).sessionPayload;
     return {
       agentId: normalizeString(targetBinding.agent_id),
@@ -2631,8 +2654,25 @@ function buildHostSchedulerPatchPayloadFromBody(body) {
   return payload;
 }
 
-function getSchedulerMailHostOrigin() {
+function getLoopbackHostOrigin() {
   return `http://127.0.0.1:${PORT}`;
+}
+
+function getProductRuntimeHostOrigin() {
+  const activeDirectHostUrl = normalizeString(DIRECT_HOST_URL);
+  if (activeDirectHostUrl) return activeDirectHostUrl.replace(/\/+$/, "");
+  const config = readConfig();
+  const configuredDirectHostUrl = normalizeString(
+    config.direct_host_url || config.public_base_url
+  );
+  if (configuredDirectHostUrl) {
+    return configuredDirectHostUrl.replace(/\/+$/, "");
+  }
+  return getLoopbackHostOrigin();
+}
+
+function getSchedulerMailHostOrigin() {
+  return getProductRuntimeHostOrigin();
 }
 
 function getBearerToken(req) {
@@ -2926,154 +2966,6 @@ function authenticateMailCreateCapability(req, res) {
   return grant;
 }
 
-function requireSchedulerTargetString(value, label) {
-  const normalized = normalizeString(value);
-  if (!normalized) {
-    const err = new Error(`${label} required`);
-    err.code = "scheduler_target_required_field_missing";
-    throw err;
-  }
-  return normalized;
-}
-
-function buildSchedulerSetupPayloadFromTargetBinding(targetBinding) {
-  const setupPayload = isObjectRecord(targetBinding.setup_snapshot)
-    ? { ...targetBinding.setup_snapshot }
-    : isObjectRecord(targetBinding.session_setup_payload)
-    ? { ...targetBinding.session_setup_payload }
-    : {};
-  const setupFields = isObjectRecord(targetBinding.session_setup_fields)
-    ? targetBinding.session_setup_fields
-    : {};
-  const provider =
-    normalizeString(setupPayload.provider) ||
-    normalizeString(setupFields.provider);
-  const model =
-    normalizeString(setupPayload.model) || normalizeString(setupFields.model);
-  if (provider) setupPayload.provider = provider;
-  if (model) setupPayload.model = model;
-  const agentFolder =
-    normalizeString(setupPayload.agent_folder) ||
-    normalizeString(setupPayload.cwd) ||
-    normalizeString(setupFields.agent_folder) ||
-    normalizeString(setupFields.agentFolder);
-  if (agentFolder) {
-    setupPayload.agent_folder = agentFolder;
-    if (!setupPayload.cwd) setupPayload.cwd = agentFolder;
-  }
-  const permissionPolicy =
-    normalizeString(setupPayload.approval_policy) ||
-    normalizeString(setupPayload.permission_mode) ||
-    normalizeString(setupFields.approval_policy) ||
-    normalizeString(setupFields.approvalPolicy) ||
-    normalizeString(setupFields.permission_mode) ||
-    normalizeString(setupFields.permissionMode);
-  if (provider === "codex" && permissionPolicy) {
-    setupPayload.approval_policy = permissionPolicy;
-  } else if (provider === "claude" && permissionPolicy) {
-    setupPayload.permission_mode = permissionPolicy;
-  }
-  return setupPayload;
-}
-
-function resolveSchedulerSessionSetupRuntimeBase({ agentFolder, sessionPayload }) {
-  const explicitProvider = readExplicitRequestedProvider(sessionPayload);
-  if (explicitProvider.error) {
-    const err = new Error(explicitProvider.error);
-    err.code = "scheduler_session_setup_provider_invalid";
-    throw err;
-  }
-  const resolved = resolveAgentRuntimeConfig(
-    agentFolder,
-    buildRuntimeOverridesFromBody(
-      sessionPayload,
-      explicitProvider.requestedProvider ?? undefined
-    )
-  );
-  if (
-    explicitProvider.requestedProvider &&
-    resolved.runtime.provider !== explicitProvider.requestedProvider
-  ) {
-    const err = new Error(
-      providerMismatchResponse(
-        explicitProvider.requestedProvider,
-        resolved.runtime.provider
-      ).error
-    );
-    err.code = "scheduler_session_setup_provider_mismatch";
-    throw err;
-  }
-  if (!resolved.runtime.providerInfo.runtimeSupported) {
-    const err = new Error(
-      `Provider "${resolved.runtime.provider}" is not runtime-supported yet`
-    );
-    err.code = "scheduler_session_setup_provider_unsupported";
-    throw err;
-  }
-  return { explicitProvider, resolved };
-}
-
-function completeSchedulerSessionSetupPayloadForRuntime({
-  agentFolder,
-  sessionPayload,
-  label,
-}) {
-  const completedPayload = { ...(sessionPayload || {}) };
-  const normalizedAgentFolder = requireSchedulerTargetString(
-    agentFolder || completedPayload.agent_folder || completedPayload.cwd,
-    `${label} agent_folder`
-  );
-  completedPayload.agent_folder = normalizedAgentFolder;
-  if (!completedPayload.cwd) completedPayload.cwd = normalizedAgentFolder;
-
-  const initialRuntime = resolveSchedulerSessionSetupRuntimeBase({
-    agentFolder: normalizedAgentFolder,
-    sessionPayload: completedPayload,
-  });
-  const provider = initialRuntime.resolved.runtime.provider;
-  if (!completedPayload.provider) completedPayload.provider = provider;
-  if (!completedPayload.model && initialRuntime.resolved.runtime.model) {
-    completedPayload.model = initialRuntime.resolved.runtime.model;
-  }
-  if (
-    !completedPayload.reasoning_effort &&
-    initialRuntime.resolved.runtime.reasoningEffort
-  ) {
-    completedPayload.reasoning_effort =
-      initialRuntime.resolved.runtime.reasoningEffort;
-  }
-  if (provider === "codex" && !completedPayload.approval_policy) {
-    completedPayload.approval_policy =
-      initialRuntime.resolved.runtime.approvalPolicy;
-  } else if (provider === "claude" && !completedPayload.permission_mode) {
-    completedPayload.permission_mode =
-      initialRuntime.resolved.runtime.permissionMode;
-  }
-
-  const runtimeResolution = resolveSchedulerSessionSetupRuntime({
-    agentFolder: normalizedAgentFolder,
-    sessionPayload: completedPayload,
-  });
-  return {
-    sessionPayload: completedPayload,
-    agentFolder: normalizedAgentFolder,
-    runtimeResolution,
-  };
-}
-
-function completeSchedulerSetupPayloadFromTargetBinding(
-  targetBinding,
-  { label = "scheduler_setup" } = {}
-) {
-  const sessionPayload =
-    buildSchedulerSetupPayloadFromTargetBinding(targetBinding);
-  return completeSchedulerSessionSetupPayloadForRuntime({
-    agentFolder: sessionPayload.agent_folder || sessionPayload.cwd,
-    sessionPayload,
-    label,
-  });
-}
-
 function resolveSchedulerSetupSnapshotDirectTarget({ targetBinding }) {
   const agentId = requireSchedulerTargetString(
     targetBinding.agent_id,
@@ -3081,7 +2973,7 @@ function resolveSchedulerSetupSnapshotDirectTarget({ targetBinding }) {
   );
   const completed = completeSchedulerSetupPayloadFromTargetBinding(
     targetBinding,
-    { label: "setup_snapshot" }
+    { label: "setup_snapshot", requireExplicitRuntimeProof: true }
   );
   return {
     source: "portable_scheduler_setup_snapshot",
@@ -3124,29 +3016,6 @@ function buildSavedSessionSetupPayloadFromHistory(sourceRecord) {
     sessionPayload.permission_mode = resolved.runtime.permissionMode;
   }
   return sessionPayload;
-}
-
-function resolveSchedulerSessionSetupRuntime({ agentFolder, sessionPayload }) {
-  const { explicitProvider, resolved } = resolveSchedulerSessionSetupRuntimeBase({
-    agentFolder,
-    sessionPayload,
-  });
-  const proofFields = buildSessionSetupProviderModelPermissionFields({
-    body: sessionPayload,
-    requestedProvider: explicitProvider.requestedProvider,
-    resolved,
-  });
-  if (!proofFields.request_response_provider_model_permission_match) {
-    const err = new Error(
-      "Session setup provider/model/Oysterun permission proof mismatch"
-    );
-    err.code = "session_setup_provider_model_permission_mismatch";
-    throw err;
-  }
-  return {
-    explicitProvider,
-    resolved,
-  };
 }
 
 function resolveSchedulerSessionSetupRecordDirectTarget({ targetBinding }) {
@@ -3482,6 +3351,7 @@ const routeCP67SemanticBridgeTurnIds = new Set();
 const routeCP135SemanticBridgeQueues = new Map();
 const ROUTEC_P82_TOOL_SEMANTIC_TYPES = new Set([
   "tool.call",
+  "tool.update",
   "tool.output",
   "tool.result",
   "tool.failure",
@@ -3520,6 +3390,7 @@ function routeCSemanticBridgeTargetTurnId(event) {
 
 function routeCP82RuntimeToolSemanticType(event) {
   if (event?.type === "tool.call") return "tool.call";
+  if (event?.type === "tool.update") return "tool.update";
   if (event?.type === "tool.output" || event?.type === "stderr") {
     return "tool.output";
   }
@@ -3696,12 +3567,19 @@ function routeCP82NoteRetainedMatrixEvent(state, result) {
 async function routeCP82WriteSemanticBridgeEvent(enrichedEvent) {
   const semanticType = routeCSemanticBridgeSemanticType(enrichedEvent);
   if (!ROUTEC_P82_TOOL_SEMANTIC_TYPES.has(semanticType)) {
-    if (semanticType) {
+    const writeResult =
+      await routeCMatrixFacade.writeProviderSemanticEventFromRuntime({
+        event: enrichedEvent,
+      });
+    if (
+      shouldResetRouteCToolRunAfterSemanticWrite({
+        semanticType,
+        writeResult,
+      })
+    ) {
       routeCP82ResetToolRunState(enrichedEvent);
     }
-    return routeCMatrixFacade.writeProviderSemanticEventFromRuntime({
-      event: enrichedEvent,
-    });
+    return writeResult;
   }
 
   const state = routeCP82GetOrCreateToolRunState(enrichedEvent);
@@ -3735,7 +3613,7 @@ async function routeCP82WriteSemanticBridgeEvent(enrichedEvent) {
       large_tool_summary: appendResult.index,
       matrix_large_ref_written: false,
       matrix_large_tool_ref_written: false,
-      raw_path_exposed: false,
+      resolver_path_fields_exposed: false,
     };
   }
   return {
@@ -3745,7 +3623,7 @@ async function routeCP82WriteSemanticBridgeEvent(enrichedEvent) {
     large_tool_summary: appendResult.index,
     matrix_large_ref_written: false,
     matrix_large_tool_ref_written: false,
-    raw_path_exposed: false,
+    resolver_path_fields_exposed: false,
   };
 }
 
@@ -4155,10 +4033,22 @@ function buildSessionTelegramRuntimeStatusPayload(session) {
         : null,
     bot_username_configured: runtime?.bot_username_configured === true,
     bound_chat: runtime?.bound_chat === true,
+    bound_chat_type: normalizeString(runtime?.bound_chat_type),
+    bound_chat_hash: normalizeString(runtime?.bound_chat_hash),
     send_tool_messages: runtime?.send_tool_messages === true,
     latest_transcript_seq: Number.isInteger(runtime?.latest_transcript_seq)
       ? runtime.latest_transcript_seq
       : null,
+    outbound_turn_active: runtime?.outbound_turn_active === true,
+    last_outbound_delivery:
+      runtime?.last_outbound_delivery &&
+      typeof runtime.last_outbound_delivery === "object"
+        ? runtime.last_outbound_delivery
+        : null,
+    last_outbound_scan:
+      runtime?.last_outbound_scan && typeof runtime.last_outbound_scan === "object"
+        ? runtime.last_outbound_scan
+        : null,
     token_redacted: true,
     allowed_users_redacted: true,
   };
@@ -5354,6 +5244,7 @@ function recordRuntimeEventTelemetry(event = {}) {
     }
     return;
   }
+  if (semanticType === "tool.update") return;
   if (
     semanticType === "control.request" &&
     !isSessionControlRuntimeEvent(event)
@@ -5493,9 +5384,6 @@ function normalizeTelegramAllowedUsersInput(value) {
     const trimmed = entry.trim();
     if (!normalized.includes(trimmed)) normalized.push(trimmed);
   }
-  if (normalized.length === 0) {
-    throw new Error("telegram.allowed_users must include at least one user id");
-  }
   return normalized;
 }
 
@@ -5629,6 +5517,29 @@ function buildSessionTelegramRuntimeConfig(config = {}) {
   };
 }
 
+function serializeOwnerVisibleAgentTelegramConfig(config = {}) {
+  const payload = serializeAgentTelegramConfig(config);
+  const botToken = typeof config.botToken === "string" ? config.botToken : "";
+  const allowedUsers = Array.isArray(config.allowedUsers)
+    ? config.allowedUsers
+        .filter((entry) => typeof entry === "string" && entry.trim())
+        .map((entry) => entry.trim())
+    : [];
+  return {
+    ...payload,
+    bot_token: botToken,
+    allowed_users: allowedUsers,
+    raw_token_returned: true,
+    raw_allowed_users_returned: true,
+  };
+}
+
+function serializeAgentTelegramConfigForClaims(config = {}, claims = null) {
+  return isDashboardOnly(claims)
+    ? serializeOwnerVisibleAgentTelegramConfig(config)
+    : serializeAgentTelegramConfig(config);
+}
+
 function buildResolvedSessionTelegramConfig(layers = {}) {
   return buildSessionTelegramRuntimeConfig(
     resolveAgentTelegramConfigFromLayers(layers)
@@ -5636,6 +5547,53 @@ function buildResolvedSessionTelegramConfig(layers = {}) {
 }
 
 const P95_TELEGRAM_TEST_MESSAGE_TEXT = "Oysterun Telegram test message.";
+
+function normalizeTelegramTestSendTargetInput(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw new Error("Telegram Test Send User/Chat ID must be a string.");
+  }
+  const target = String(value).trim();
+  if (!target) return "";
+  if (target === ".") {
+    throw new Error(
+      "Telegram Test Send requires an explicit user/chat id. Dot only allows inbound Telegram users."
+    );
+  }
+  return target;
+}
+
+function resolveTelegramTestSendTargetInput(body = {}) {
+  if (
+    Object.prototype.hasOwnProperty.call(body, "telegram_test_send_chat_id")
+  ) {
+    return normalizeTelegramTestSendTargetInput(
+      body.telegram_test_send_chat_id
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "telegramTestSendChatId")
+  ) {
+    return normalizeTelegramTestSendTargetInput(
+      body.telegramTestSendChatId
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "telegram_test_send_target")
+  ) {
+    return normalizeTelegramTestSendTargetInput(
+      body.telegram_test_send_target
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "telegramTestSendTarget")
+  ) {
+    return normalizeTelegramTestSendTargetInput(
+      body.telegramTestSendTarget
+    );
+  }
+  return "";
+}
 
 function buildEffectiveTelegramRuntimeConfig(
   baseConfig = {},
@@ -5695,19 +5653,13 @@ function assertTelegramTestSendReady(config = {}) {
   if (!normalizeString(effective.botToken)) {
     throw new Error("Telegram Bot Token is required for Test Send.");
   }
-  if (!Array.isArray(effective.allowedUsers) || effective.allowedUsers.length === 0) {
-    throw new Error("Telegram Allowed Users are required for Test Send.");
-  }
 }
 
-function resolveTelegramTestSendTarget(config = {}) {
-  const effective = buildSessionTelegramRuntimeConfig(config);
-  const target = effective.allowedUsers.find(
-    (entry) => normalizeString(entry) && normalizeString(entry) !== "."
-  );
+function resolveTelegramTestSendTarget(body = {}) {
+  const target = resolveTelegramTestSendTargetInput(body);
   if (!target) {
     throw new Error(
-      "Telegram Test Send requires an explicit allowed user or chat id."
+      "Telegram Test Send User/Chat ID is required."
     );
   }
   return target;
@@ -5721,6 +5673,7 @@ function buildTelegramTestSendResponse(base = {}) {
     allowed_users_redacted: true,
     raw_token_returned: false,
     raw_allowed_users_returned: false,
+    test_send_target_redacted: true,
     mock_fallback_used: false,
     provider_session_started: false,
     provider_delivery_attempted: false,
@@ -7718,34 +7671,6 @@ function readWritableAgentConfig(
   return parsed;
 }
 
-function readExplicitRequestedProvider(body = {}) {
-  if (!Object.prototype.hasOwnProperty.call(body, "provider")) {
-    return { requestedProvider: null, hasExplicitProvider: false };
-  }
-  if (typeof body.provider !== "string" || !body.provider.trim()) {
-    return {
-      error: "provider must be a non-empty string",
-      requestedProvider: null,
-      hasExplicitProvider: true,
-    };
-  }
-  const normalizedProvider = body.provider.trim();
-  try {
-    return {
-      requestedProvider: requireProvider(normalizedProvider, {
-        config: readConfig(),
-      }).id,
-      hasExplicitProvider: true,
-    };
-  } catch (err) {
-    return {
-      error: err.message,
-      requestedProvider: null,
-      hasExplicitProvider: true,
-    };
-  }
-}
-
 const ROUTEC_RESUMABLE_HISTORY_RUNTIMES = new Set(["claude", "codex"]);
 
 function resolveProviderResumeMetadataFromHistory(sourceRecord, resumeAdapter) {
@@ -7786,250 +7711,6 @@ function resolveProviderResumeMetadataFromHistory(sourceRecord, resumeAdapter) {
     ok: true,
     runtime,
     providerResumeId,
-  };
-}
-
-function buildRuntimeOverridesFromBody(
-  body = {},
-  requestedProvider = undefined
-) {
-  const overrides = {};
-
-  if (requestedProvider !== undefined) overrides.provider = requestedProvider;
-  else if (Object.prototype.hasOwnProperty.call(body, "provider"))
-    overrides.provider = body.provider;
-  if (Object.prototype.hasOwnProperty.call(body, "model"))
-    overrides.model = body.model;
-  if (Object.prototype.hasOwnProperty.call(body, "reasoning_effort")) {
-    const providerId = requestedProvider || body.provider || "claude";
-    overrides.reasoningEffort = normalizeProviderReasoningEffort(
-      providerId,
-      body.reasoning_effort
-    );
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "permission_mode")) {
-    overrides.permissionMode = normalizeProviderPermissionPolicy(
-      "claude",
-      body.permission_mode
-    );
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "approval_policy")) {
-    overrides.approvalPolicy = normalizeProviderPermissionPolicy(
-      "codex",
-      body.approval_policy
-    );
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "allowed_paths")) {
-    overrides.allowedPaths = normalizeStringArray(body.allowed_paths);
-  }
-  if (
-    Object.prototype.hasOwnProperty.call(
-      body,
-      "allow_dangerously_skip_permissions"
-    )
-  ) {
-    overrides.allowDangerouslySkipPermissions =
-      body.allow_dangerously_skip_permissions;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "dangerous_mode")) {
-    overrides.dangerousMode = body.dangerous_mode;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "search_enabled")) {
-    overrides.searchEnabled = body.search_enabled;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "image_input_enabled")) {
-    overrides.imageInputEnabled = body.image_input_enabled;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "provider_args")) {
-    overrides.providerArgs = body.provider_args;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "provider_config_overrides")) {
-    overrides.providerConfigOverrides = body.provider_config_overrides;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "provider_commands")) {
-    overrides.providerCommands = body.provider_commands;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, "provider_profile")) {
-    overrides.providerProfile = body.provider_profile;
-  }
-
-  return overrides;
-}
-
-function providerMismatchResponse(requestedProvider, resolvedProvider) {
-  return {
-    error: `Resolved runtime provider mismatch: requested "${requestedProvider}" but resolved "${resolvedProvider}"`,
-    requested_provider: requestedProvider,
-    resolved_provider: resolvedProvider,
-  };
-}
-
-const OYSTERUN_SESSION_SETUP_PROVIDER_MODEL_PERMISSION_PROOF_CONTRACT =
-  "oysterun_session_setup_provider_model_permission_v1";
-
-function getSessionSetupOysterunPermissionPolicyKind(providerId) {
-  if (providerId === "codex") return "approval_policy";
-  if (providerId === "claude") return "permission_mode";
-  return "none";
-}
-
-function getSessionSetupRequestOysterunPermissionPolicy(body = {}, providerId) {
-  const kind = getSessionSetupOysterunPermissionPolicyKind(providerId);
-  if (kind === "approval_policy")
-    return normalizeString(body.approval_policy) || null;
-  if (kind === "permission_mode")
-    return normalizeString(body.permission_mode) || null;
-  return null;
-}
-
-function getSessionSetupResolvedOysterunPermissionPolicy(
-  runtime = {},
-  providerId
-) {
-  const kind = getSessionSetupOysterunPermissionPolicyKind(providerId);
-  if (kind === "approval_policy") return runtime.approvalPolicy || null;
-  if (kind === "permission_mode") return runtime.permissionMode || null;
-  return null;
-}
-
-function buildSessionSetupProviderModelPermissionFields({
-  body = {},
-  requestedProvider = null,
-  resolved,
-  session = null,
-}) {
-  const provider = session?.provider || resolved.runtime.provider;
-  const model = session?.model || resolved.runtime.model || null;
-  const permissionPolicyKind =
-    getSessionSetupOysterunPermissionPolicyKind(provider);
-  const requestPermissionPolicy =
-    getSessionSetupRequestOysterunPermissionPolicy(body, provider);
-  const responsePermissionPolicy =
-    getSessionSetupResolvedOysterunPermissionPolicy(resolved.runtime, provider);
-  const requestedModel = normalizeString(body.model) || null;
-  const requestedModelCanonical = requestedModel
-    ? normalizeProviderModel(provider, requestedModel)
-    : null;
-  const modelMatches =
-    Boolean(requestedModel) &&
-    (requestedModel === model ||
-      (Boolean(requestedModelCanonical) && requestedModelCanonical === model));
-  const permissionPolicyMatches =
-    permissionPolicyKind === "none"
-      ? requestPermissionPolicy === null && responsePermissionPolicy === null
-      : Boolean(requestPermissionPolicy) &&
-        Boolean(responsePermissionPolicy) &&
-        requestPermissionPolicy === responsePermissionPolicy;
-  return {
-    provider,
-    model,
-    permissionPolicyKind,
-    requestPermissionPolicy,
-    responsePermissionPolicy,
-    requestedProvider: requestedProvider || null,
-    requestedModel,
-    requestedModelCanonical,
-    request_response_provider_model_permission_match:
-      Boolean(requestedProvider) &&
-      requestedProvider === provider &&
-      modelMatches &&
-      permissionPolicyMatches,
-  };
-}
-
-function sessionSetupProviderModelPermissionMismatchResponse(fields) {
-  return {
-    error: "Session setup provider/model/Oysterun permission proof mismatch",
-    code: "session_setup_provider_model_permission_mismatch",
-    contract: OYSTERUN_SESSION_SETUP_PROVIDER_MODEL_PERMISSION_PROOF_CONTRACT,
-    request_provider: fields.requestedProvider,
-    response_provider: fields.provider,
-    request_model: fields.requestedModel,
-    request_model_canonical: fields.requestedModelCanonical,
-    response_model: fields.model,
-    request_oysterun_permission_policy_kind: fields.permissionPolicyKind,
-    request_oysterun_permission_policy: fields.requestPermissionPolicy,
-    response_oysterun_permission_policy: fields.responsePermissionPolicy,
-    request_response_provider_model_permission_match: false,
-  };
-}
-
-function sessionSetupProviderModelPermissionProofMismatchResponse(proof) {
-  return {
-    error: "Session setup provider/model/Oysterun permission proof mismatch",
-    code: "session_setup_provider_model_permission_mismatch",
-    contract: OYSTERUN_SESSION_SETUP_PROVIDER_MODEL_PERMISSION_PROOF_CONTRACT,
-    proof_surface: proof.proof_surface,
-    response_status: proof.response_status,
-    session_id: proof.session_id,
-    request_provider: proof.request_provider,
-    response_provider: proof.provider,
-    request_model: proof.request_model,
-    request_model_canonical: proof.request_model_canonical,
-    response_model: proof.model,
-    request_oysterun_permission_policy_kind:
-      proof.request_oysterun_permission_policy_kind,
-    request_oysterun_permission_policy:
-      proof.request_oysterun_permission_policy,
-    response_oysterun_permission_policy:
-      proof.response_oysterun_permission_policy ?? proof.oysterun_permission_policy,
-    request_response_provider_model_permission_match: false,
-  };
-}
-
-function buildSessionSetupProviderModelPermissionProof({
-  body = {},
-  requestedProvider = null,
-  resolved,
-  session,
-  proofSurface = "host_session_start_response",
-  responseStatus = "session_started",
-  sessionStartResponseContractCountable = true,
-}) {
-  const fields = buildSessionSetupProviderModelPermissionFields({
-    body,
-    requestedProvider,
-    resolved,
-    session,
-  });
-  return {
-    contract: OYSTERUN_SESSION_SETUP_PROVIDER_MODEL_PERMISSION_PROOF_CONTRACT,
-    proof_surface: proofSurface,
-    response_status: responseStatus,
-    session_id: session.id,
-    request_provider: fields.requestedProvider,
-    request_model: fields.requestedModel,
-    request_model_canonical: fields.requestedModelCanonical,
-    request_oysterun_permission_policy_kind: fields.permissionPolicyKind,
-    request_oysterun_permission_policy: fields.requestPermissionPolicy,
-    provider: fields.provider,
-    model: fields.model,
-    oysterun_permission_policy_kind: fields.permissionPolicyKind,
-    oysterun_permission_policy: fields.responsePermissionPolicy,
-    response_oysterun_permission_policy: fields.responsePermissionPolicy,
-    permission_source_of_truth: "oysterun_session_setup",
-    provider_native_permission_fields_derived_from_oysterun_policy: true,
-    provider_native_permission_fields: {
-      permission_mode: resolved.runtime.permissionMode || null,
-      approval_policy: resolved.runtime.approvalPolicy || null,
-      sandbox_mode: resolved.runtime.sandboxMode || null,
-    },
-    request_response_provider_model_permission_match:
-      fields.request_response_provider_model_permission_match,
-    session_start_response_contract_countable:
-      sessionStartResponseContractCountable === true,
-    resume_session_setup_runtime_gate_countable:
-      proofSurface === "host_sessions_resume_response" ? false : undefined,
-    request_must_be_visible_ui_click: true,
-    visible_click_runtime_proof_required: true,
-    visible_click_runtime_proof_present: false,
-    direct_session_start_api_substitute_runtime_proof_required: true,
-    direct_session_start_api_substitute_source_static_countable: false,
-    source_static_proof_satisfies_direct_api_substitute_predicate: false,
-    real_codex_non_substitution_required: fields.provider === "codex",
-    delivery_gate_accepted: false,
-    closeout_readiness_claimed: false,
-    phase2_handoff_claimed: false,
   };
 }
 
@@ -8423,13 +8104,24 @@ function applyLocalConfigUpdates(config, body = {}) {
     changed = true;
   }
   if (Object.prototype.hasOwnProperty.call(body, "telegram_bot_token")) {
-    ensureConfigBranch(config, "telegram").bot_token = body.telegram_bot_token;
+    const telegram = ensureConfigBranch(config, "telegram");
+    if (normalizeString(body.telegram_bot_token)) {
+      telegram.bot_token = body.telegram_bot_token;
+    } else {
+      delete telegram.bot_token;
+    }
     changed = true;
   }
   if (Object.prototype.hasOwnProperty.call(body, "telegram_allowed_users")) {
-    ensureConfigBranch(config, "telegram").allowed_users = [
-      ...body.telegram_allowed_users,
-    ];
+    const telegram = ensureConfigBranch(config, "telegram");
+    if (
+      Array.isArray(body.telegram_allowed_users) &&
+      body.telegram_allowed_users.length > 0
+    ) {
+      telegram.allowed_users = [...body.telegram_allowed_users];
+    } else {
+      delete telegram.allowed_users;
+    }
     changed = true;
   }
 
@@ -8578,6 +8270,12 @@ function serializeSessionProfileConfig(profile, overrides = {}) {
     !Array.isArray(overrides.notifications)
       ? overrides.notifications
       : profile.notifications || {};
+  const telegramConfig =
+    overrides.telegram &&
+    typeof overrides.telegram === "object" &&
+    !Array.isArray(overrides.telegram)
+      ? overrides.telegram
+      : profile.telegram || {};
   const fields =
     profile.fields &&
     typeof profile.fields === "object" &&
@@ -8597,7 +8295,10 @@ function serializeSessionProfileConfig(profile, overrides = {}) {
         ? profile.provider.trim()
         : null,
     notifications: serializeAgentNotificationConfig(notificationConfig),
-    telegram: serializeAgentTelegramConfig(profile.telegram || {}),
+    telegram:
+      overrides.includeTelegramRaw === true
+        ? serializeOwnerVisibleAgentTelegramConfig(telegramConfig)
+        : serializeAgentTelegramConfig(telegramConfig),
     fields: {
       model: serializeField(fields.model),
       reasoning_effort: serializeField(fields.reasoning_effort),
@@ -8630,14 +8331,39 @@ function buildSessionProfileConfigPayload(
   }
 }
 
-function buildLiveSessionProfileConfigPayload(session) {
+function buildLiveSessionProfileConfigPayload(session, options = {}) {
   if (!session) return null;
   return buildSessionProfileConfigPayload(
     session.cwd,
     session.provider || "claude",
     session.model || null,
-    { notifications: session.notificationConfig }
+    {
+      notifications: session.notificationConfig,
+      ...(options.includeTelegramRaw === true
+        ? {
+            telegram: session.telegramConfig,
+            includeTelegramRaw: true,
+          }
+        : {}),
+    }
   );
+}
+
+function buildLiveSessionProfileConfigPayloadForClaims(session, claims = null) {
+  return buildLiveSessionProfileConfigPayload(session, {
+    includeTelegramRaw: isDashboardOnly(claims),
+  });
+}
+
+function buildSessionProfileConfigPayloadForClaims(
+  folderPath,
+  providerId,
+  modelId = null,
+  claims = null
+) {
+  return buildSessionProfileConfigPayload(folderPath, providerId, modelId, {
+    includeTelegramRaw: isDashboardOnly(claims),
+  });
 }
 
 async function serializeProviderCatalogEntry(provider, config = readConfig()) {
@@ -9806,38 +9532,89 @@ function getDevFileContentType(realPath, buffer = null) {
   return "application/octet-stream";
 }
 
+function isPathInsideRoot(realPath, realRootPath) {
+  return realPath === realRootPath || realPath.startsWith(`${realRootPath}/`);
+}
+
+function getDevFilePreviewAssetLocation(realPath) {
+  const realFilePath = realpathSync(realPath);
+  try {
+    const realDefaultBrowseRoot = realpathSync(resolveDefaultBrowsePath());
+    if (isPathInsideRoot(realFilePath, realDefaultBrowseRoot)) {
+      return {
+        asset_root_path: realDefaultBrowseRoot,
+        asset_relative_path: relative(realDefaultBrowseRoot, realFilePath),
+      };
+    }
+  } catch {}
+
+  const staticSiteAssetRoot = findStaticSiteAssetRoot(realFilePath);
+  if (staticSiteAssetRoot) {
+    return {
+      asset_root_path: staticSiteAssetRoot,
+      asset_relative_path: relative(staticSiteAssetRoot, realFilePath),
+    };
+  }
+
+  return {
+    asset_root_path: dirname(realFilePath),
+    asset_relative_path: basename(realFilePath),
+  };
+}
+
+function findStaticSiteAssetRoot(realPath) {
+  let currentDir = dirname(realPath);
+  while (currentDir && currentDir !== dirname(currentDir)) {
+    if (
+      basename(currentDir) === "site" &&
+      basename(dirname(currentDir)) === "static"
+    ) {
+      const assetsPath = join(currentDir, "assets");
+      const assetsStats = statSync(assetsPath, { throwIfNoEntry: false });
+      if (assetsStats?.isDirectory()) {
+        return realpathSync(currentDir);
+      }
+    }
+    currentDir = dirname(currentDir);
+  }
+  return null;
+}
+
 function classifyDevFilePreview(realPath, buffer) {
   const extension = extname(realPath).toLowerCase();
   if (DEV_FILE_MARKDOWN_EXTENSIONS.has(extension)) {
+    const assetLocation = getDevFilePreviewAssetLocation(realPath);
     return {
       preview_kind: "markdown",
       content_type: getDevFileContentType(realPath, buffer),
       language: "markdown",
       text_available: true,
-      asset_root_path: dirname(realPath),
-      asset_relative_path: basename(realPath),
+      asset_root_path: assetLocation.asset_root_path,
+      asset_relative_path: assetLocation.asset_relative_path,
       unsupported_reason: null,
     };
   }
   if (DEV_FILE_HTML_EXTENSIONS.has(extension)) {
+    const assetLocation = getDevFilePreviewAssetLocation(realPath);
     return {
       preview_kind: "html",
       content_type: getDevFileContentType(realPath, buffer),
       language: "html",
       text_available: true,
-      asset_root_path: dirname(realPath),
-      asset_relative_path: basename(realPath),
+      asset_root_path: assetLocation.asset_root_path,
+      asset_relative_path: assetLocation.asset_relative_path,
       unsupported_reason: null,
     };
   }
   if (DEV_FILE_IMAGE_EXTENSIONS.has(extension)) {
+    const assetLocation = getDevFilePreviewAssetLocation(realPath);
     return {
       preview_kind: "image",
       content_type: getDevFileContentType(realPath, buffer),
       language: null,
       text_available: false,
-      asset_root_path: dirname(realPath),
-      asset_relative_path: basename(realPath),
+      asset_root_path: assetLocation.asset_root_path,
+      asset_relative_path: assetLocation.asset_relative_path,
       unsupported_reason: null,
     };
   }
@@ -9918,10 +9695,7 @@ function readDevFsAsset(rawRootKey, rawRelativePath) {
   }
 
   const realFilePath = realpathSync(requestedPath);
-  if (
-    realFilePath !== realRootPath &&
-    !realFilePath.startsWith(`${realRootPath}/`)
-  ) {
+  if (!isPathInsideRoot(realFilePath, realRootPath)) {
     throw new Error("Preview asset is outside the allowed root");
   }
 
@@ -10235,6 +10009,60 @@ function buildSessionWebsiteMetadata(session) {
   };
 }
 
+function resolveWebsitePasswordFolder(agentId, folderPath = null) {
+  if (typeof folderPath === "string" && folderPath.trim()) {
+    return folderPath;
+  }
+  try {
+    return resolveAgentFolderForSite(agentId);
+  } catch {
+    return null;
+  }
+}
+
+function withOwnerVisibleWebsitePassword(metadata, folderPath, claims = null) {
+  if (!metadata || typeof metadata !== "object") return metadata;
+  if (!isDashboardOnly(claims)) return metadata;
+  const resolvedFolder =
+    typeof folderPath === "string" && folderPath.trim() ? folderPath : null;
+  if (!resolvedFolder) {
+    return {
+      ...metadata,
+      raw_password_returned: false,
+    };
+  }
+  try {
+    const layers = readAgentConfigLayers(resolvedFolder);
+    const password =
+      typeof layers.web?.password === "string" ? layers.web.password : "";
+    return {
+      ...metadata,
+      password,
+      raw_password_returned: true,
+      password_configured: password ? true : metadata.password_configured === true,
+    };
+  } catch (err) {
+    console.warn(
+      `[website/metadata] Owner-visible password unavailable for ${resolvedFolder}: ${err.message}`
+    );
+    return {
+      ...metadata,
+      raw_password_returned: false,
+    };
+  }
+}
+
+function buildAgentWebsiteMetadataForClaims(agentId, folderPath = null, claims = null) {
+  const metadata = buildAgentWebsiteMetadata(agentId, folderPath);
+  const resolvedFolder = resolveWebsitePasswordFolder(agentId, folderPath);
+  return withOwnerVisibleWebsitePassword(metadata, resolvedFolder, claims);
+}
+
+function buildSessionWebsiteMetadataForClaims(session, claims = null) {
+  const metadata = buildSessionWebsiteMetadata(session);
+  return withOwnerVisibleWebsitePassword(metadata, session?.cwd || null, claims);
+}
+
 const P86_PRODUCT_CLI_ENDPOINT_CONTRACT = "p86_product_cli_host_endpoint_v1";
 const P94_AGENT_SITE_TEMPLATE_PATH = join(
   __dirname,
@@ -10250,6 +10078,46 @@ function readJsonObjectIfPresent(path) {
     throw new Error(`Expected JSON object at ${path}`);
   }
   return parsed;
+}
+
+function collectCopiedDemoAgentIds(
+  demoId = null,
+  schedulerDefinitions = []
+) {
+  const ids = new Set();
+  for (const schedule of schedulerDefinitions) {
+    const agentId = normalizeString(schedule?.agent_id);
+    if (agentId) ids.add(agentId);
+  }
+  const fallbackDemoId = normalizeString(demoId);
+  if (ids.size === 0 && fallbackDemoId) ids.add(fallbackDemoId);
+  return [...ids].sort();
+}
+
+function registerCopiedDemoAgentFolders({
+  copiedPath,
+  demoId = null,
+  schedulerDefinitions = [],
+} = {}) {
+  const normalizedCopiedPath = normalizeString(copiedPath);
+  if (!normalizedCopiedPath) throw new Error("copiedPath required");
+  const realFolder = realpathSync(normalizedCopiedPath);
+  const agents = collectCopiedDemoAgentIds(
+    demoId,
+    schedulerDefinitions
+  ).map((agentId) => {
+    setAgentFolder(agentId, realFolder);
+    return {
+      agent_id: agentId,
+      agent_folder: realFolder,
+    };
+  });
+  return {
+    status: "demo_agent_folder_registered",
+    agent_folder: realFolder,
+    registered_count: agents.length,
+    agents,
+  };
 }
 
 function resolveP86WebsiteAgentFolder(agentId, body = {}) {
@@ -10281,6 +10149,39 @@ function buildP86WebsiteStatusPayload(agentId, folder) {
     agent_folder: folder,
     website: buildAgentWebsiteMetadata(agentId, folder),
     raw_local_path_returned: false,
+  };
+}
+
+function resolveInitializedWebsiteForToggle(agentId, folder) {
+  const agentRoot = realpathSync(folder);
+  const webConfig = resolveAgentWebConfig(agentRoot);
+  const configuredRoot = resolve(agentRoot, webConfig.root);
+  if (
+    configuredRoot !== agentRoot &&
+    !configuredRoot.startsWith(`${agentRoot}/`)
+  ) {
+    throw new Error(
+      `Configured web.root is outside the agent folder: ${webConfig.root}`
+    );
+  }
+  const rootStats = statSync(configuredRoot, { throwIfNoEntry: false });
+  if (!rootStats || !rootStats.isDirectory()) {
+    throw new Error(
+      `Website is not initialized for ${agentId}. Run oysterun website init first.`
+    );
+  }
+  const indexPath = join(configuredRoot, "index.html");
+  const indexStats = statSync(indexPath, { throwIfNoEntry: false });
+  if (!indexStats || !indexStats.isFile()) {
+    throw new Error(
+      `Website entry page is missing for ${agentId}. Run oysterun website init first.`
+    );
+  }
+  return {
+    agentRoot,
+    rootPath: configuredRoot,
+    indexPath,
+    web: webConfig,
   };
 }
 
@@ -10379,6 +10280,76 @@ function buildP86TelegramStatusPayload() {
     setup_owner: "per_session",
     telegram_enabled_default: false,
     sessions,
+  };
+}
+
+function listBrowserRootPortableSchedulerFolders(rootPath = resolveDefaultBrowsePath()) {
+  const root = realpathSync(rootPath);
+  const rootStats = statSync(root, { throwIfNoEntry: false });
+  if (!rootStats || !rootStats.isDirectory()) {
+    throw new Error(`Default Browse Root is not a directory: ${rootPath}`);
+  }
+  const candidates = [root];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const candidate = join(root, entry.name);
+    try {
+      const realCandidate = realpathSync(candidate);
+      if (realCandidate === root || !realCandidate.startsWith(`${root}/`)) {
+        continue;
+      }
+      candidates.push(realCandidate);
+    } catch {
+      continue;
+    }
+  }
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    const schedulerPath = join(candidate, ".oysterun", "schedulers.json");
+    return statSync(schedulerPath, { throwIfNoEntry: false })?.isFile() === true;
+  });
+}
+
+function importBrowserRootPortableSchedulers(rootPath = resolveDefaultBrowsePath()) {
+  const root = realpathSync(rootPath);
+  const folders = listBrowserRootPortableSchedulerFolders(root);
+  const imported = [];
+  const failed = [];
+  let registeredCount = 0;
+  for (const folder of folders) {
+    try {
+      const result = schedulerService.registerCopiedDemoAgentSchedules({
+        agentFolder: folder,
+      });
+      registeredCount += Number(result.registered_count || 0);
+      imported.push({
+        agent_folder: folder,
+        registered_count: result.registered_count || 0,
+        schedule_ids: Array.isArray(result.schedules)
+          ? result.schedules.map((schedule) => schedule.id).filter(Boolean)
+          : [],
+      });
+    } catch (err) {
+      failed.push({
+        agent_folder: folder,
+        error: err.message || String(err),
+      });
+    }
+  }
+  return {
+    status: "scheduler_browser_root_imported",
+    browser_root: root,
+    scanned_folder_count: folders.length,
+    imported_folder_count: imported.length,
+    failed_folder_count: failed.length,
+    registered_count: registeredCount,
+    imported,
+    failed,
+    storage_owner: "agent_folder_oysterun_schedulers_json",
+    scanner_owner: "explicit_owner_refresh_button",
+    scheduler_runner_scans_browser_root: false,
   };
 }
 
@@ -11322,7 +11293,7 @@ const server = createServer(async (req, res) => {
       if (!sessionId || !matrixRoomId) {
         return respond(res, 400, {
           error: "session_id and matrix_room_id required",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       const session = requireSessionCapability(
@@ -11341,14 +11312,14 @@ const server = createServer(async (req, res) => {
       if (binding && binding.matrix_room_id !== matrixRoomId) {
         return respond(res, 403, {
           error: "large tool output room binding does not match session",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       const page = Number(url.searchParams.get("page") || "1");
       if (!Number.isSafeInteger(page) || page < 1) {
         return respond(res, 400, {
           error: "page must be a positive integer",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       try {
@@ -11381,7 +11352,7 @@ const server = createServer(async (req, res) => {
           host_local_large_tool_calls_jsonl: true,
           matrix_large_ref_written: false,
           matrix_large_tool_ref_written: false,
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
           matrix_chat_search_includes_jsonl: false,
           explicit_detail_navigation_required: true,
           debug_tool_detail_source_ui_enabled:
@@ -11392,7 +11363,7 @@ const server = createServer(async (req, res) => {
           status: "unavailable",
           error: err.message || String(err),
           continuation_state: "unavailable",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
     }
@@ -11467,8 +11438,6 @@ const server = createServer(async (req, res) => {
             ? 403
             : result.status === "anchor_not_found"
             ? 404
-            : result.status === "too_many_events_fail_closed"
-            ? 409
             : 200;
         return respond(res, status, {
           ...result,
@@ -11503,7 +11472,7 @@ const server = createServer(async (req, res) => {
         return respond(res, 400, {
           status: "missing_identity",
           error: "session_id, matrix_room_id, and matrix_event_id required",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       const session = requireSessionCapability(
@@ -11523,14 +11492,14 @@ const server = createServer(async (req, res) => {
         return respond(res, 404, {
           status: "unavailable",
           error: "tool event detail room binding not found",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       if (binding && binding.matrix_room_id !== matrixRoomId) {
         return respond(res, 403, {
           status: "forbidden",
           error: "tool event detail room binding does not match session",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       const page = Number(url.searchParams.get("page") || "1");
@@ -11538,54 +11507,80 @@ const server = createServer(async (req, res) => {
         return respond(res, 400, {
           status: "invalid_page",
           error: "page must be a positive integer",
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
       try {
-        let detail = toolEventDetailStore.resolveToolEventDetail({
+        const largeRun = largeToolCallStore.resolveLargeToolRun({
+          sessionId,
+          matrixRoomId,
+          retainedMatrixEventId: matrixEventId,
+        });
+        if (largeRun.status === "ambiguous") {
+          return respond(res, 409, {
+            status: "ambiguous",
+            error: "tool run identity is ambiguous",
+          });
+        }
+        const matrixRun = readRouteCMatrixToolRun({
+          binding,
+          eventId: matrixEventId,
+          retainedEventIds:
+            largeRun.status === "ok"
+              ? largeRun.retained_matrix_event_ids
+              : null,
+        });
+        if (matrixRun.status !== "ok") {
+          return respond(res, 404, {
+            status: "unavailable",
+            error: "tool event detail run not found",
+          });
+        }
+        const matrixRecords = matrixRun.events.map((event, index) => {
+          const detailRecord = toolEventDetailStore.readToolEventDetailRecord({
+            sessionId,
+            matrixRoomId,
+            matrixEventId: event.event_id,
+          });
+          return normalizeMatrixToolPhysicalRecord({
+            event,
+            physicalIndex: index + 1,
+            detailRecord,
+          });
+        });
+        const continuationRecords =
+          largeRun.status === "ok"
+            ? largeRun.continuation_records.map((record) =>
+                normalizeJsonlToolPhysicalRecord(record)
+              )
+            : [];
+        const detail = buildUnifiedToolLifecycleDetail({
           sessionId,
           matrixRoomId,
           matrixEventId,
+          physicalRecords: [...matrixRecords, ...continuationRecords],
           page,
-          pageSizeBytes: ROUTEC_TOOL_EVENT_DETAIL_PAGE_SIZE_BYTES,
-        });
-        if (detail.status === "unavailable" && binding) {
-          detail = readRouteCMatrixToolEventDetail({
-            binding,
-            eventId: matrixEventId,
-            page,
-          });
-        }
-        const status =
-          detail.status === "forbidden"
-            ? 403
-            : detail.status === "missing_identity"
-            ? 400
-            : detail.status === "unavailable"
-            ? 404
-            : detail.status === "ambiguous"
-            ? 409
-            : 200;
-        return respond(res, status, {
-          ...detail,
-          session_id: sessionId,
-          matrix_room_id: matrixRoomId,
-          matrix_event_id: matrixEventId,
-          committed_transcript_truth: "matrix_room_timeline",
-          detail_identity_kind: "session_room_event",
-          selected_detail_top_only: true,
-          selected_detail_limit_bytes:
-            detail.selected_detail_limit_bytes ||
+          pageSize: ROUTEC_UNIFIED_TOOL_DETAIL_PAGE_SIZE,
+          selectedDetailLimitBytes:
             ROUTEC_TOOL_EVENT_DETAIL_SELECTED_DETAIL_LIMIT_BYTES,
+        });
+        return respond(res, 200, {
+          ...detail,
+          committed_transcript_truth: "matrix_room_timeline",
+          detail_identity_kind: "session_room_event_tool_run",
+          selected_detail_top_only: true,
           debug_tool_detail_source_ui_enabled:
             readConfig().debug_routec_tool_detail_source_ui_enabled === true,
-          raw_path_exposed: false,
+          matrix_first_10_jsonl_continuation_preserved: true,
+          provider_private_transcript_used: false,
+          resolver_path_fields_exposed: false,
+          tool_payload_local_paths_preserved: true,
         });
       } catch (err) {
         return respond(res, 503, {
           status: "unavailable",
           error: err.message || String(err),
-          raw_path_exposed: false,
+          resolver_path_fields_exposed: false,
         });
       }
     }
@@ -12241,7 +12236,7 @@ const server = createServer(async (req, res) => {
           normalizedTelegram
         );
         assertTelegramTestSendReady(effectiveTelegramConfig);
-        targetChatId = resolveTelegramTestSendTarget(effectiveTelegramConfig);
+        targetChatId = resolveTelegramTestSendTarget(body);
       } catch (err) {
         return respond(
           res,
@@ -12269,7 +12264,7 @@ const server = createServer(async (req, res) => {
             status: "telegram_test_send_sent",
             agent_id: agentId,
             session_id: session?.id || null,
-            target_rule: "first_explicit_allowed_user",
+            target_rule: "explicit_test_send_chat_id",
             target_count: 1,
             target_redacted: true,
             config_mutated: false,
@@ -12289,7 +12284,7 @@ const server = createServer(async (req, res) => {
             error: "Telegram Test Send failed.",
             agent_id: agentId,
             session_id: session?.id || null,
-            target_rule: "first_explicit_allowed_user",
+            target_rule: "explicit_test_send_chat_id",
             target_redacted: true,
             config_mutated: false,
           })
@@ -12337,7 +12332,7 @@ const server = createServer(async (req, res) => {
           agent_id: agentId,
           agent_folder: folder,
           access: metadata.access || null,
-          password_configured: metadata.passwordConfigured === true,
+          password_configured: metadata.password_configured === true,
           raw_password_returned: false,
         });
       } catch (err) {
@@ -12405,6 +12400,73 @@ const server = createServer(async (req, res) => {
           recordTelemetryFeature("website_settings");
         }
         return respond(res, dryRun ? 200 : 201, result);
+      } catch (err) {
+        return respond(res, 400, {
+          error: err.message,
+          contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
+        });
+      }
+    }
+
+    if (
+      req.method === "POST" &&
+      (path === "/website/enable" || path === "/website/disable")
+    ) {
+      try {
+        const body = await readBody(req);
+        const agentId = normalizeString(body.agent_id || body.agentId);
+        if (!agentId) {
+          return respond(res, 400, { error: "agent_id required" });
+        }
+        const auth = requireDashboardOrRuntimeCapability(claims, res, {
+          scope: "website:update",
+          agentId,
+        });
+        if (!auth) return;
+        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
+        const folder = resolveP86WebsiteAgentFolder(agentId, body);
+        const enabling = path === "/website/enable";
+        let initialized = null;
+        if (enabling) {
+          initialized = resolveInitializedWebsiteForToggle(agentId, folder);
+        }
+        if (body.dry_run === true) {
+          return respond(res, 200, {
+            status: enabling ? "website_enable_dry_run" : "website_disable_dry_run",
+            contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
+            agent_id: agentId,
+            agent_folder: folder,
+            web_enabled: enabling,
+            ...(initialized
+              ? {
+                  site_root: relative(folder, initialized.rootPath) || ".",
+                  index_path: relative(folder, initialized.indexPath),
+                }
+              : {}),
+          });
+        }
+        const result = persistAgentConfigUpdates(folder, {
+          web_enabled: enabling,
+        });
+        persistP86WebsiteAgentFolder(agentId, body);
+        recordTelemetryCounter("website_access_changed_count");
+        recordTelemetryFeature("website_settings");
+        return respond(res, 200, {
+          status: enabling ? "website_enabled" : "website_disabled",
+          contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
+          agent_id: agentId,
+          agent_folder: folder,
+          web_enabled: enabling,
+          config_mutated: result.changed === true,
+          delete_existing_site_files: false,
+          ...(initialized
+            ? {
+                site_root: relative(folder, initialized.rootPath) || ".",
+                index_path: relative(folder, initialized.indexPath),
+              }
+            : {}),
+          website: buildAgentWebsiteMetadata(agentId, folder),
+        });
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
@@ -12799,6 +12861,20 @@ const server = createServer(async (req, res) => {
           demoId: body.demo_id,
         });
         if (payload?.copied_path) {
+          const schedulerValidation =
+            schedulerService.validateCopiedDemoAgentScheduleDefinitions({
+              agentFolder: payload.copied_path,
+            });
+          payload.scheduler_validation = {
+            status: schedulerValidation.status,
+            agent_folder: schedulerValidation.agent_folder,
+            scheduler_count: schedulerValidation.scheduler_count,
+          };
+          payload.agent_registration = registerCopiedDemoAgentFolders({
+            copiedPath: payload.copied_path,
+            demoId: payload.demo_id,
+            schedulerDefinitions: schedulerValidation.definitions,
+          });
           payload.scheduler_registration =
             schedulerService.registerCopiedDemoAgentSchedules({
               agentFolder: payload.copied_path,
@@ -13394,10 +13470,15 @@ const server = createServer(async (req, res) => {
           notifications: serializeAgentNotificationConfig(
             resolved.layers.notifications
           ),
-          telegram: serializeAgentTelegramConfig(
-            resolveAgentTelegramConfigFromLayers(resolved.layers)
+          telegram: serializeAgentTelegramConfigForClaims(
+            resolveAgentTelegramConfigFromLayers(resolved.layers),
+            claims
           ),
-          website: buildAgentWebsiteMetadata("preview", summary.folderPath),
+          website: buildAgentWebsiteMetadataForClaims(
+            "preview",
+            summary.folderPath,
+            claims
+          ),
           runtime_capabilities: serializeRuntimeCapabilities(
             resolveConfiguredRuntimeCapabilities(resolved.config)
           ),
@@ -13470,10 +13551,15 @@ const server = createServer(async (req, res) => {
           notifications: serializeAgentNotificationConfig(
             resolved.layers.notifications
           ),
-          telegram: serializeAgentTelegramConfig(
-            resolveAgentTelegramConfigFromLayers(resolved.layers)
+          telegram: serializeAgentTelegramConfigForClaims(
+            resolveAgentTelegramConfigFromLayers(resolved.layers),
+            claims
           ),
-          website: buildAgentWebsiteMetadata(agent_id, summary.folderPath),
+          website: buildAgentWebsiteMetadataForClaims(
+            agent_id,
+            summary.folderPath,
+            claims
+          ),
           runtime_capabilities: serializeRuntimeCapabilities(
             resolveConfiguredRuntimeCapabilities(resolved.config)
           ),
@@ -14028,6 +14114,30 @@ const server = createServer(async (req, res) => {
         browser_local_storage_owner: false,
         matrix_db_owner: false,
       });
+    }
+
+    if (req.method === "POST" && path === "/scheduler/schedules/import-browser-root") {
+      const auth = requireDashboardOrRuntimeCapability(claims, res, {
+        scope: "scheduler:update",
+      });
+      if (!auth) return;
+      try {
+        const result = importBrowserRootPortableSchedulers();
+        if (result.registered_count > 0) {
+          recordTelemetryCounter("scheduler_schedule_imported_count");
+          recordTelemetryFeature("scheduler");
+        }
+        return respond(res, 200, {
+          ...result,
+          schedules: schedulerService.listHostSchedulesForDashboard(),
+          serialization_scope: "authenticated_dashboard_host_scheduler_ui",
+        });
+      } catch (err) {
+        return respond(res, 400, {
+          error: err.message,
+          scheduler_command: "host_scheduler_import_browser_root",
+        });
+      }
     }
 
     if (req.method === "POST" && path === "/scheduler/schedules") {
@@ -14670,10 +14780,16 @@ const server = createServer(async (req, res) => {
         provider_trust_warning:
           session.providerTrustedFolder?.warning || null,
         native: buildNativePayload(resolved.runtime),
-        website: buildSessionWebsiteMetadata(session),
-        telegram: serializeAgentTelegramConfig(session.telegramConfig),
+        website: buildSessionWebsiteMetadataForClaims(session, claims),
+        telegram: serializeAgentTelegramConfigForClaims(
+          session.telegramConfig,
+          claims
+        ),
         telegram_runtime: buildSessionTelegramRuntimeStatusPayload(session),
-        profile_config: buildLiveSessionProfileConfigPayload(session),
+        profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+          session,
+          claims
+        ),
         alive: session.alive,
         ready: session._ready,
         chat_shell_ready: session.chatShellReady === true,
@@ -15972,10 +16088,16 @@ const server = createServer(async (req, res) => {
         reasoning_effort: restarted.reasoningEffort ?? null,
         native: restarted.native || buildNativePayload(null),
         cwd: restarted.cwd || null,
-        website: buildSessionWebsiteMetadata(restarted),
-        telegram: serializeAgentTelegramConfig(restarted.telegramConfig),
+        website: buildSessionWebsiteMetadataForClaims(restarted, claims),
+        telegram: serializeAgentTelegramConfigForClaims(
+          restarted.telegramConfig,
+          claims
+        ),
         telegram_runtime: buildSessionTelegramRuntimeStatusPayload(restarted),
-        profile_config: buildLiveSessionProfileConfigPayload(restarted),
+        profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+          restarted,
+          claims
+        ),
         allow_dangerously_skip_permissions:
           restarted.allowDangerouslySkipPermissions === true,
         alive: restarted.alive,
@@ -16010,6 +16132,37 @@ const server = createServer(async (req, res) => {
         res
       );
       if (!session) return;
+      const refreshConfig = normalizeString(
+        url.searchParams.get("refresh_config") ||
+          url.searchParams.get("refreshConfig")
+      );
+      const refreshTelegramConfig =
+        refreshConfig === "telegram" ||
+        refreshConfig === "all" ||
+        url.searchParams.get("refresh_telegram_config") === "true";
+      if (refreshTelegramConfig) {
+        if (!isDashboardOnly(claims)) {
+          return respond(res, 403, {
+            error: "Dashboard auth required for Telegram config refresh",
+            reason: "dashboard_auth_required",
+            raw_token_returned: false,
+          });
+        }
+        if (!session.cwd) {
+          return respond(res, 400, {
+            error: "Telegram config refresh requires a session folder",
+            reason: "session_folder_required",
+          });
+        }
+        const resolved = resolveAgentRuntimeConfig(session.cwd);
+        session.telegramConfig = buildResolvedSessionTelegramConfig(
+          resolved.layers
+        );
+        await refreshTelegramBridgeSession(
+          session,
+          "session_status_telegram_config_refresh"
+        );
+      }
 
       return respond(res, 200, {
         agent_id: session.agentId,
@@ -16027,10 +16180,16 @@ const server = createServer(async (req, res) => {
         provider_transport: session.transport || null,
         provider_info: serializeConfiguredProvider(session.provider || "claude"),
         cwd: session.cwd || null,
-        website: buildSessionWebsiteMetadata(session),
-        telegram: serializeAgentTelegramConfig(session.telegramConfig),
+        website: buildSessionWebsiteMetadataForClaims(session, claims),
+        telegram: serializeAgentTelegramConfigForClaims(
+          session.telegramConfig,
+          claims
+        ),
         telegram_runtime: buildSessionTelegramRuntimeStatusPayload(session),
-        profile_config: buildLiveSessionProfileConfigPayload(session),
+        profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+          session,
+          claims
+        ),
         provider_trusted_folder: session.providerTrustedFolder || null,
         provider_trust_warning:
           session.providerTrustedFolder?.warning || null,
@@ -16143,6 +16302,38 @@ const server = createServer(async (req, res) => {
         const nextAllowedPaths = hasAllowedPathsRequest
           ? normalizeSessionProfileAllowedPathsRequest(body)
           : null;
+        if (hasWebAccessRequest || hasWebsitePasswordRequest) {
+          const currentWebsiteMetadata = buildSessionWebsiteMetadata(session);
+          const effectiveWebAccess =
+            nextWebAccess ||
+            session.websiteAccessOverride ||
+            currentWebsiteMetadata.access ||
+            "owner_only";
+          if (
+            hasWebsitePasswordRequest &&
+            effectiveWebAccess === "password" &&
+            !nextWebsitePassword
+          ) {
+            throw new Error(
+              "Website Password is required when Website Access is Password. Switch Website Access away from Password before clearing it."
+            );
+          }
+          if (
+            hasWebAccessRequest &&
+            nextWebAccess === "password" &&
+            !nextWebsitePassword
+          ) {
+            const existingWebPassword =
+              session.cwd && existsSync(session.cwd)
+                ? resolveAgentWebConfig(session.cwd).password
+                : "";
+            if (!existingWebPassword) {
+              throw new Error(
+                "Website Password is required when Website Access is Password."
+              );
+            }
+          }
+        }
         if (hasAllowedPathsRequest && !session.cwd) {
           throw new Error(
             "session profile allowed_paths update requires a session folder"
@@ -16157,6 +16348,14 @@ const server = createServer(async (req, res) => {
               }
             )
           : null;
+        if (hasTelegramRequest) {
+          assertTelegramEnabledSetupReady(
+            buildEffectiveTelegramRuntimeConfig(
+              session.telegramConfig || {},
+              telegramConfigRequest
+            )
+          );
+        }
         if (nextWebEnabled === true) {
           if (!session.cwd) {
             throw new Error(
@@ -16272,7 +16471,7 @@ const server = createServer(async (req, res) => {
             );
           }
         }
-        const website = buildSessionWebsiteMetadata(session);
+        const website = buildSessionWebsiteMetadataForClaims(session, claims);
         const localTelegramConfigMutated =
           persistSharedConfig && hasLocalTelegramConfigUpdate(telegramConfigRequest);
         const localWebsitePasswordMutated =
@@ -16312,9 +16511,15 @@ const server = createServer(async (req, res) => {
             session,
           }),
           workspace_policy: serializeWorkspacePolicy(session.workspacePolicy),
-          telegram: serializeAgentTelegramConfig(session.telegramConfig),
+          telegram: serializeAgentTelegramConfigForClaims(
+            session.telegramConfig,
+            claims
+          ),
           telegram_runtime: buildSessionTelegramRuntimeStatusPayload(session),
-          profile_config: buildLiveSessionProfileConfigPayload(session),
+          profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+            session,
+            claims
+          ),
           runtime_capabilities: serializeRuntimeCapabilities(
             session.runtimeCapabilities,
             session.runtimeCapabilityGrant || null
@@ -16435,7 +16640,10 @@ const server = createServer(async (req, res) => {
           permission_mode: session.permissionMode ?? null,
           approval_policy: session.approvalPolicy ?? null,
           sandbox_mode: session.sandboxMode ?? null,
-          profile_config: buildLiveSessionProfileConfigPayload(session),
+          profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+            session,
+            claims
+          ),
           runtime_capabilities: serializeRuntimeCapabilities(
             session.runtimeCapabilities,
             session.runtimeCapabilityGrant || null
@@ -17041,6 +17249,10 @@ const server = createServer(async (req, res) => {
         resolved.layers
       );
       applySessionNotificationConfigRequest(session, body);
+      session.telegramConfig = buildResolvedSessionTelegramConfig(
+        resolved.layers
+      );
+      void refreshTelegramBridgeSession(session, "sessions_resume");
       const bookkeepingWarnings = [...(session.bookkeepingWarnings || [])];
       try {
         setAgentFolder(agent_id, resolvedFolder, session.id);
@@ -17169,10 +17381,16 @@ const server = createServer(async (req, res) => {
           sessionId: session.id,
           session,
         }),
-        website: buildSessionWebsiteMetadata(session),
-        telegram: serializeAgentTelegramConfig(session.telegramConfig),
+        website: buildSessionWebsiteMetadataForClaims(session, claims),
+        telegram: serializeAgentTelegramConfigForClaims(
+          session.telegramConfig,
+          claims
+        ),
         telegram_runtime: buildSessionTelegramRuntimeStatusPayload(session),
-        profile_config: buildLiveSessionProfileConfigPayload(session),
+        profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+          session,
+          claims
+        ),
         oysterun_provider_skill_install:
           session.oysterunProviderSkillInstall || null,
         provider_trusted_folder: session.providerTrustedFolder || null,
@@ -17526,6 +17744,10 @@ const server = createServer(async (req, res) => {
         resolved.layers
       );
       applySessionNotificationConfigRequest(session, body);
+      session.telegramConfig = buildResolvedSessionTelegramConfig(
+        resolved.layers
+      );
+      void refreshTelegramBridgeSession(session, "session_resume");
       const bookkeepingWarnings = [...(session.bookkeepingWarnings || [])];
       try {
         setAgentFolder(agent_id, resolvedFolder, session.id);
@@ -17614,10 +17836,16 @@ const server = createServer(async (req, res) => {
           sessionId: session.id,
           session,
         }),
-        website: buildSessionWebsiteMetadata(session),
-        telegram: serializeAgentTelegramConfig(session.telegramConfig),
+        website: buildSessionWebsiteMetadataForClaims(session, claims),
+        telegram: serializeAgentTelegramConfigForClaims(
+          session.telegramConfig,
+          claims
+        ),
         telegram_runtime: buildSessionTelegramRuntimeStatusPayload(session),
-        profile_config: buildLiveSessionProfileConfigPayload(session),
+        profile_config: buildLiveSessionProfileConfigPayloadForClaims(
+          session,
+          claims
+        ),
         oysterun_provider_skill_install:
           session.oysterunProviderSkillInstall || null,
         provider_trusted_folder: session.providerTrustedFolder || null,
@@ -17679,16 +17907,23 @@ const server = createServer(async (req, res) => {
                   session: liveSession,
                 })
               : null,
-            website: buildSessionWebsiteMetadata(liveSession),
-            telegram: serializeAgentTelegramConfig(liveSession.telegramConfig),
+            website: buildSessionWebsiteMetadataForClaims(liveSession, claims),
+            telegram: serializeAgentTelegramConfigForClaims(
+              liveSession.telegramConfig,
+              claims
+            ),
             telegram_runtime:
               buildSessionTelegramRuntimeStatusPayload(liveSession),
             profile_config: liveSession
-              ? buildLiveSessionProfileConfigPayload(liveSession)
-              : buildSessionProfileConfigPayload(
+              ? buildLiveSessionProfileConfigPayloadForClaims(
+                  liveSession,
+                  claims
+                )
+              : buildSessionProfileConfigPayloadForClaims(
                   session.cwd,
                   session.provider || "claude",
-                  session.model || null
+                  session.model || null,
+                  claims
                 ),
             lastMessagePreview: getLastMessagePreview(
               session.cwd,
@@ -17995,20 +18230,21 @@ wss.on("connection", (ws, req) => {
       provider_transport: session?.transport || null,
       cwd: session?.cwd || null,
       website: session
-        ? buildSessionWebsiteMetadata(session)
-        : buildAgentWebsiteMetadata(agentId, null),
+        ? buildSessionWebsiteMetadataForClaims(session, claims)
+        : buildAgentWebsiteMetadataForClaims(agentId, null, claims),
       telegram: session
-        ? serializeAgentTelegramConfig(session.telegramConfig)
-        : serializeAgentTelegramConfig({}),
+        ? serializeAgentTelegramConfigForClaims(session.telegramConfig, claims)
+        : serializeAgentTelegramConfigForClaims({}, claims),
       telegram_runtime: session
         ? buildSessionTelegramRuntimeStatusPayload(session)
         : null,
       profile_config: session
-        ? buildLiveSessionProfileConfigPayload(session)
-        : buildSessionProfileConfigPayload(
+        ? buildLiveSessionProfileConfigPayloadForClaims(session, claims)
+        : buildSessionProfileConfigPayloadForClaims(
             session?.cwd || null,
             session?.provider || "claude",
-            session?.model || null
+            session?.model || null,
+            claims
           ),
       workspace_policy: serializeWorkspacePolicy(
         session?.workspacePolicy ?? null
@@ -18440,6 +18676,18 @@ server.listen(PORT, () => {
     `[oysterun-host] WebSocket at ws://localhost:${PORT}/session/stream`
   );
   console.log(`[oysterun-host] Connection mode: ${CONNECTION_MODE}`);
+  try {
+    const bootMigration = triggerRouteCMatrixStorageBootMigration({
+      reason: "host_startup",
+    });
+    console.log(
+      `[oysterun-host] Matrix SQLite boot migration ${bootMigration.status}`
+    );
+  } catch (err) {
+    console.error(
+      `[oysterun-host] Matrix SQLite boot migration trigger failed: ${err.message}`
+    );
+  }
   if (CONNECTION_MODE === "cloud") {
     console.log(`[oysterun-host] Backend URL: ${BACKEND_URL}`);
     if (DEVICE_SIGNING_PUBLIC_KEY) {

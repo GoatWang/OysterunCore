@@ -51,6 +51,9 @@ export class SchedulerRunner {
       this.timer = null;
       try {
         await this.tick();
+      } catch {
+        // tick() records and logs the error. Background scheduler failures must
+        // not escape as process-level unhandled rejections.
       } finally {
         this.scheduleNextTick();
       }

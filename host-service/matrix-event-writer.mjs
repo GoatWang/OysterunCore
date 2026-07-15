@@ -9,6 +9,7 @@ export const OYSTERUN_SEMANTIC_CATEGORIES = Object.freeze([
   "message.assistant",
   "thinking.reasoning",
   "tool.call",
+  "tool.update",
   "tool.output",
   "tool.result",
   "tool.failure",

@@ -8,6 +8,7 @@ export const ROUTEC_TOOL_TRANSFER_PREVIEW_CHARS = 320;
 
 const TOOL_SEMANTIC_TYPES = new Set([
   "tool.call",
+  "tool.update",
   "tool.output",
   "tool.result",
   "tool.failure",
@@ -119,7 +120,7 @@ function collectToolDetailFields(content, semanticType) {
 
 function choosePrimaryField(fields, semanticType) {
   const preferred =
-    semanticType === "tool.call"
+    semanticType === "tool.call" || semanticType === "tool.update"
       ? "semantic.tool_input"
       : "semantic.tool_content";
   return (
@@ -231,6 +232,8 @@ function summaryBody({ semanticType, summary, toolName }) {
   const label =
     semanticType === "tool.call"
       ? "Tool call"
+      : semanticType === "tool.update"
+      ? "Tool update"
       : semanticType === "tool.output"
       ? "Tool output"
       : semanticType === "tool.failure"
@@ -340,8 +343,14 @@ export function projectToolEventForClientTransfer({
         transferred_byte_count: null,
         matrix_event_id_present: typeof cloned.event_id === "string",
       },
-      tool_input: semanticType === "tool.call" ? summary : null,
-      tool_content: semanticType === "tool.call" ? null : summary,
+      tool_input:
+        semanticType === "tool.call" || semanticType === "tool.update"
+          ? summary
+          : null,
+      tool_content:
+        semanticType === "tool.call" || semanticType === "tool.update"
+          ? null
+          : summary,
       stdout: null,
       stderr: null,
       stdout_truncated: null,

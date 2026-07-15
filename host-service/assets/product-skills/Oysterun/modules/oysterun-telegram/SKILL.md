@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Telegram
 
-Canonical product skill source lives at `skills/oysterun-telegram/`. The repo-local Codex mirror at `.codex/skills/oysterun-telegram/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-telegram/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-telegram/`. Generated mirrors live at `.codex/skills/Oysterun/modules/oysterun-telegram/`, `host-service/assets/product-skills/oysterun-telegram/`, and `host-service/assets/product-skills/Oysterun/modules/oysterun-telegram/`. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product Telegram status and per-session setup. It wraps the P86 product CLI contract:
 
@@ -22,7 +22,7 @@ The module helper is current-session aware. In a live Host session with
 capability auth; it must not ask the in-session agent to run dashboard login:
 
 ```bash
-node .codex/skills/oysterun-telegram/scripts/oysterun_telegram.mjs status
+node .codex/skills/Oysterun/modules/oysterun-telegram/scripts/oysterun_telegram.mjs status
 ```
 
 For per-session setup, use the product CLI directly. Inside a live Host session,
@@ -32,15 +32,57 @@ External operator shells may pass `--session-id` and dashboard auth:
 
 ```bash
 oysterun sessions telegram get
-oysterun sessions telegram enable
+oysterun sessions telegram enable --update-config
 oysterun sessions telegram disable
-oysterun sessions telegram update --telegram-enabled true
+oysterun sessions telegram update --telegram-enabled true --update-config
 oysterun sessions telegram get --session-ref <display_name>
 oysterun sessions telegram get --session-id <session_id>
-oysterun sessions telegram enable --session-id <session_id>
+oysterun sessions telegram enable --session-id <session_id> --update-config
 oysterun sessions telegram disable --session-id <session_id>
-oysterun sessions telegram update --session-id <session_id> --telegram-enabled true
+oysterun sessions telegram update --session-id <session_id> --telegram-enabled true --update-config
 ```
+
+## Setup / Enable Flow
+
+When the Owner asks to set up Telegram, do real setup through the CLI instead
+of only describing the skill path.
+
+1. Check status first:
+
+```bash
+oysterun sessions telegram get
+```
+
+2. If Telegram already has local config but is disabled, enable it and persist
+   the shared config:
+
+```bash
+oysterun sessions telegram enable --update-config
+```
+
+3. If setup values are missing, ask the Owner for:
+
+```text
+TELEGRAM_BOT_TOKEN
+TELEGRAM_ALLOWED_USERS
+```
+
+`TELEGRAM_ALLOWED_USERS=.` means allow all Telegram users.
+
+4. Persist setup values through Oysterun local/shared config:
+
+```bash
+oysterun sessions telegram update \
+  --telegram-enabled true \
+  --telegram-bot-token "$TELEGRAM_BOT_TOKEN" \
+  --telegram-allowed-users "$TELEGRAM_ALLOWED_USERS" \
+  --update-config
+```
+
+Do not claim that a bot token pasted by the Owner is automatically exposed or
+force a token rotation gate. The Host is Owner-controlled. Write the provided
+token through the Oysterun CLI so it lands in `.oysterun/local.json`, not in
+cloneable source files.
 
 ## Commands
 
@@ -69,6 +111,8 @@ dashboard CLI auth.
 ## Guardrails
 
 - Telegram setup is per-session and `telegram.enabled` defaults off.
+- Use `--update-config` when the Owner wants Telegram setup to persist in the
+  current agent folder.
 - Normal product behavior must not depend on a global Telegram product flag.
 - Live Host sessions use Host-injected product runtime env for
   current-session Telegram status/setup; do not ask the agent to perform

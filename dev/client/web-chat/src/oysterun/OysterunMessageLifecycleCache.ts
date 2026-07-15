@@ -38,6 +38,7 @@ const OYSTERUN_SEMANTIC_TERMINAL_TYPES = new Set(['message.assistant', 'control.
 const OYSTERUN_SEMANTIC_ACTIVE_TYPES = new Set([
   'thinking.reasoning',
   'tool.call',
+  'tool.update',
   'tool.output',
   'tool.result',
   'tool.failure',

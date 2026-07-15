@@ -34,6 +34,7 @@ const DANGEROUS_OPERATIONS = new Set([
   "scheduler disable",
   "mail delete",
   "website access set",
+  "website disable",
   "website password set",
 ]);
 const CHAT_SEARCH_DEFAULT_LIMIT = 20;
@@ -1337,6 +1338,9 @@ async function runSessionTelegram({ action, options, env, fetchFn }) {
   const body = { ...sessionTarget };
   if (action === "enable") body.telegram_enabled = true;
   if (action === "disable") body.telegram_enabled = false;
+  boolPayload(options, "updateConfig", "update_config", body);
+  boolPayload(options, "persistConfig", "persist_config", body);
+  boolPayload(options, "persistSharedConfig", "persist_shared_config", body);
   if (action === "update") {
     boolPayload(options, "telegramEnabled", "telegram_enabled", body);
     boolPayload(options, "telegramSendToolMessages", "telegram_send_tool_messages", body);
@@ -1794,6 +1798,28 @@ async function runWebsite({ action, rest, options, env, fetchFn }) {
         access: optionalOption(options, "access") || "owner_only",
         dry_run: options.dryRun === true,
       },
+      options,
+      env,
+      fetchFn,
+    })).data;
+  }
+  if (action === "enable" || action === "disable") {
+    const body = {
+      agent_id: requireAgentId(options, env),
+      agent_folder: optionalOption(options, "agentFolder", "folder"),
+      dry_run: options.dryRun === true,
+    };
+    const operation = `website ${action}`;
+    const dry = withDryRun(operation, options, {
+      method: "POST",
+      path: `/website/${action}`,
+      body,
+    });
+    if (dry) return dry;
+    return (await apiRequest({
+      method: "POST",
+      path: `/website/${action}`,
+      body,
       options,
       env,
       fetchFn,

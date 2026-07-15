@@ -28,6 +28,16 @@ function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+export function shouldResetRouteCToolRunAfterSemanticWrite({
+  semanticType,
+  writeResult,
+} = {}) {
+  return Boolean(
+    normalizeString(semanticType) &&
+      writeResult?.semantic_matrix_event_committed === true
+  );
+}
+
 function normalizePositiveInteger(value) {
   const numeric = Number(value);
   return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
@@ -64,16 +74,6 @@ function readJsonFile(path, label) {
   return JSON.parse(readFileSync(path, "utf8"), (key, value) => value);
 }
 
-function assertNoRawPathInPublicValue(value, label) {
-  const encoded = JSON.stringify(value);
-  if (
-    encoded.includes("/large_tool_calls/") ||
-    encoded.includes("\\large_tool_calls\\")
-  ) {
-    throw new Error(`${label} must not expose raw large_tool_calls paths`);
-  }
-}
-
 function buildLargeToolRef(identity) {
   return `ltc_${sha256(
     [
@@ -108,6 +108,17 @@ function toolPayloadForJsonl(event, semanticType) {
   if (semanticType === "tool.call") {
     return event?.tool_input ?? event?.input ?? null;
   }
+  if (semanticType === "tool.update") {
+    const input = event?.tool_input ?? event?.input ?? null;
+    const content =
+      event?.tool_content ??
+      event?.content ??
+      event?.output ??
+      event?.text ??
+      null;
+    if (input !== null && content !== null) return { input, content };
+    return input ?? content;
+  }
   return (
     event?.tool_content ??
     event?.content ??
@@ -137,6 +148,9 @@ function buildJsonlRow({ event, semanticType, identity, toolEventIndex }) {
     semantic_type: semanticType,
     source_host_session_id: identity.source_host_session_id,
     source_matrix_room_id: identity.source_matrix_room_id,
+    provider:
+      normalizeString(event?.provider) ||
+      normalizeString(delivery.provider_id),
     provider_turn_id:
       normalizeString(delivery.provider_turn_id) ||
       normalizeString(event?.provider_turn_id) ||
@@ -164,6 +178,11 @@ function buildJsonlRow({ event, semanticType, identity, toolEventIndex }) {
         ? event.tool_is_error
         : typeof event?.is_error === "boolean"
         ? event.is_error
+        : null,
+    tool_update_kind:
+      semanticType === "tool.update"
+        ? normalizeString(event?.tool_update_kind) ||
+          normalizeString(event?.update_kind)
         : null,
     payload: cloneJson(toolPayloadForJsonl(event, semanticType), "tool payload"),
     body:
@@ -221,9 +240,9 @@ function publicSummaryFromIndex(index) {
     tool_event_count_label: ROUTEC_LARGE_TOOL_EVENT_COUNT_LABEL,
     search_indexed: false,
     matrix_large_tool_ref: false,
-    raw_path_exposed: false,
+    resolver_path_fields_exposed: false,
+    tool_payload_local_paths_preserved: true,
   };
-  assertNoRawPathInPublicValue(summary, "large tool summary");
   return summary;
 }
 
@@ -430,6 +449,47 @@ export function createLargeToolCallStore({ configDir }) {
       );
   }
 
+  function readAllJsonlRows(index) {
+    const path = jsonlPath(index.source_host_session_id, index.large_tool_ref);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .split(/\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .sort((left, right) => left.tool_event_index - right.tool_event_index);
+  }
+
+  function resolveLargeToolRun(options) {
+    const sessionId = normalizeString(options?.sessionId);
+    const matrixRoomId = normalizeString(options?.matrixRoomId);
+    if (!sessionId || !matrixRoomId) {
+      throw new Error("session_id and matrix_room_id are required");
+    }
+    const resolved = resolveIndex({
+      sessionId,
+      matrixRoomId,
+      largeToolRef: normalizeString(options?.largeToolRef),
+      retainedMatrixEventId: normalizeString(options?.retainedMatrixEventId),
+      providerTurnId: normalizeString(options?.providerTurnId),
+      targetTurnId: normalizeString(options?.targetTurnId),
+      groupingKey: normalizeString(options?.groupingKey),
+    });
+    if (resolved.status !== "ok") {
+      return { status: resolved.status, matches: resolved.matches.length };
+    }
+    const index = resolved.matches[0];
+    return {
+      status: "ok",
+      summary: publicSummaryFromIndex(index),
+      retained_matrix_event_ids: [...index.retained_matrix_event_ids],
+      continuation_records: readAllJsonlRows(index),
+      provider_turn_id: index.provider_turn_id,
+      target_turn_id: index.target_turn_id,
+      grouping_key: index.grouping_key,
+      large_tool_ref: index.large_tool_ref,
+    };
+  }
+
   function resolveLargeToolOutput(options) {
     const sessionId = normalizeString(options?.sessionId);
     const matrixRoomId = normalizeString(options?.matrixRoomId);
@@ -453,7 +513,7 @@ export function createLargeToolCallStore({ configDir }) {
         continuation_state: resolved.status,
         page,
         matches: resolved.matches.length,
-        raw_path_exposed: false,
+        resolver_path_fields_exposed: false,
       };
     }
     const index = resolved.matches[0];
@@ -467,7 +527,6 @@ export function createLargeToolCallStore({ configDir }) {
       detail_page_1_matrix_retained: page === 1,
       explicit_detail_navigation_required: true,
     };
-    assertNoRawPathInPublicValue(response, "large tool output response");
     return response;
   }
 
@@ -475,6 +534,7 @@ export function createLargeToolCallStore({ configDir }) {
     root,
     appendToolEvent,
     markNoticeSent,
+    resolveLargeToolRun,
     resolveLargeToolOutput,
     createOrLoadIndex,
   };

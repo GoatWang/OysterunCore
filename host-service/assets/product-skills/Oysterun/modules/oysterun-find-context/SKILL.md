@@ -8,9 +8,7 @@ metadata:
 # Oysterun Find Context
 
 Canonical product skill source lives at `skills/oysterun-find-context/`. The
-repo-local Codex mirror at `.codex/skills/oysterun-find-context/` and the Host
-packaged asset at `host-service/assets/product-skills/oysterun-find-context/`
-are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs`
+repo-local Codex mirror at `.codex/skills/Oysterun/modules/oysterun-find-context/` and Host packaged assets at `host-service/assets/product-skills/oysterun-find-context/` and `host-service/assets/product-skills/Oysterun/modules/oysterun-find-context/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs`
 after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs`
 before review.
 
@@ -25,7 +23,7 @@ oysterun chat messages-around --event-id <matrix_event_id> [--session-ref <displ
 The helper delegates to the same CLI surface:
 
 ```bash
-node .codex/skills/oysterun-find-context/scripts/oysterun_find_context.mjs \
+node .codex/skills/Oysterun/modules/oysterun-find-context/scripts/oysterun_find_context.mjs \
   --session-id <session_id> \
   --agent-id <agent_id> \
   --event-id <matrix_event_id> \
@@ -36,7 +34,7 @@ node .codex/skills/oysterun-find-context/scripts/oysterun_find_context.mjs \
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-find-context/scripts/oysterun_find_context.mjs \
+node .claude/skills/Oysterun/modules/oysterun-find-context/scripts/oysterun_find_context.mjs \
   --event-id <matrix_event_id>
 ```
 

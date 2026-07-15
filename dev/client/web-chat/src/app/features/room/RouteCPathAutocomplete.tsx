@@ -1,14 +1,16 @@
 import React, {
+  CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { Room, RoomMember } from 'matrix-js-sdk';
 import { Editor, Transforms } from 'slate';
 import { ReactEditor } from 'slate-react';
-import { Box, config, Icon, Icons, MenuItem, Text } from 'folds';
+import { Box, color, config, Icon, Icons, MenuItem, Text } from 'folds';
 
 import {
   AutocompleteMenu,
@@ -66,6 +68,12 @@ type BrowseQueryTarget = {
 };
 
 const ROUTE_C_PATH_BROWSE_LIMIT = 40;
+const getRouteCPathOptionStyle = (active: boolean): CSSProperties => ({
+  height: 'unset',
+  backgroundColor: active ? color.SurfaceVariant.ContainerActive : undefined,
+  boxShadow: active ? `inset 0 0 0 ${config.borderWidth.B400} ${color.Primary.Main}` : undefined,
+  outline: 'none',
+});
 
 const withAllowedMembership = (member: RoomMember): boolean =>
   member.membership === Membership.Join ||
@@ -425,6 +433,7 @@ export function RouteCPathAutocomplete({
   const [currentFolderSelectable, setCurrentFolderSelectable] = useState(false);
   const [browseEntries, setBrowseEntries] = useState<OysterunBrowseEntry[]>([]);
   const [selectedPathIndex, setSelectedPathIndex] = useState(0);
+  const pathKeyboardFocusIndexRef = useRef<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
   const parsedQuery = useMemo(() => parsePathQuery(query.text), [query.text]);
@@ -560,7 +569,44 @@ export function RouteCPathAutocomplete({
   }, [pathSuggestions.length]);
 
   useEffect(() => {
+    if (pathKeyboardFocusIndexRef.current !== selectedPathIndex) return;
+    pathKeyboardFocusIndexRef.current = null;
+    const activeElement = document.querySelector<HTMLElement>(
+      `[data-oysterun-path-enabled-index="${selectedPathIndex}"]`
+    );
+    activeElement?.focus({ preventScroll: true });
+    activeElement?.scrollIntoView({ block: 'nearest' });
+  }, [pathSuggestions.length, selectedPathIndex]);
+
+  const movePathKeyboardSelection = useCallback(
+    (delta: number) => {
+      const suggestionCount = pathSuggestions.length;
+      if (suggestionCount === 0) return;
+      const currentIndex =
+        selectedPathIndex >= 0 && selectedPathIndex < suggestionCount ? selectedPathIndex : 0;
+      const nextIndex = (currentIndex + delta + suggestionCount) % suggestionCount;
+      pathKeyboardFocusIndexRef.current = nextIndex;
+      setSelectedPathIndex(nextIndex);
+    },
+    [pathSuggestions.length, selectedPathIndex]
+  );
+
+  useEffect(() => {
     const handleKeyboardSelection = (evt: KeyboardEvent) => {
+      if (pathSuggestions.length > 0 && evt.key === 'ArrowDown') {
+        evt.preventDefault();
+        evt.stopPropagation();
+        movePathKeyboardSelection(1);
+        return;
+      }
+
+      if (pathSuggestions.length > 0 && evt.key === 'ArrowUp') {
+        evt.preventDefault();
+        evt.stopPropagation();
+        movePathKeyboardSelection(-1);
+        return;
+      }
+
       if (pathSuggestions.length > 0 && (evt.key === 'Enter' || evt.key === 'Tab')) {
         evt.preventDefault();
         evt.stopPropagation();
@@ -584,6 +630,7 @@ export function RouteCPathAutocomplete({
   }, [
     handlePathSelection,
     hasSecondRealHumanMember,
+    movePathKeyboardSelection,
     pathSuggestions,
     requestMemberMode,
     selectedPathIndex,
@@ -663,72 +710,76 @@ export function RouteCPathAutocomplete({
         data-oysterun-clean-session-home-alias-expansion="host_absolute_home"
         data-oysterun-routec-ping-member-visible={String(hasSecondRealHumanMember)}
         data-oysterun-clean-session-ping-member-visible={String(hasSecondRealHumanMember)}
-        data-oysterun-routec-p185-stale-range-guard={
-          OYSTERUN_P185_STALE_AUTOCOMPLETE_RANGE_GUARD
-        }
+        data-oysterun-routec-p185-stale-range-guard={OYSTERUN_P185_STALE_AUTOCOMPLETE_RANGE_GUARD}
       >
-        {pathSuggestions.map((suggestion) => (
-          <MenuItem
-            key={suggestion.id}
-            as="button"
-            radii="300"
-            style={{ height: 'unset' }}
-            aria-selected={pathSuggestions[selectedPathIndex]?.id === suggestion.id}
-            data-testid="oysterun-routec-path-autocomplete-option"
-            data-oysterun-clean-session-testid="oysterun-clean-session-path-autocomplete-option"
-            data-oysterun-path-action={suggestion.action}
-            data-oysterun-path-active={String(
-              pathSuggestions[selectedPathIndex]?.id === suggestion.id
-            )}
-            data-oysterun-path-kind={suggestion.kind}
-            data-oysterun-path-source={suggestion.sourceLabel}
-            data-oysterun-path-value={suggestion.path}
-            onMouseEnter={() =>
-              setSelectedPathIndex(
-                Math.max(
-                  0,
-                  pathSuggestions.findIndex((candidate) => candidate.id === suggestion.id)
+        {pathSuggestions.map((suggestion, index) => {
+          const active = pathSuggestions[selectedPathIndex]?.id === suggestion.id;
+          return (
+            <MenuItem
+              key={suggestion.id}
+              as="button"
+              radii="300"
+              style={getRouteCPathOptionStyle(active)}
+              aria-selected={active}
+              data-testid="oysterun-routec-path-autocomplete-option"
+              data-oysterun-clean-session-testid="oysterun-clean-session-path-autocomplete-option"
+              data-oysterun-path-action={suggestion.action}
+              data-oysterun-path-active={String(active)}
+              data-oysterun-path-enabled-index={String(index)}
+              data-oysterun-path-kind={suggestion.kind}
+              data-oysterun-path-source={suggestion.sourceLabel}
+              data-oysterun-path-value={suggestion.path}
+              onMouseEnter={() =>
+                setSelectedPathIndex(
+                  Math.max(
+                    0,
+                    pathSuggestions.findIndex((candidate) => candidate.id === suggestion.id)
+                  )
                 )
-              )
-            }
-            onFocus={() =>
-              setSelectedPathIndex(
-                Math.max(
-                  0,
-                  pathSuggestions.findIndex((candidate) => candidate.id === suggestion.id)
-                )
-              )
-            }
-            onKeyDown={(evt: ReactKeyboardEvent<HTMLButtonElement>) => {
-              if (evt.key === 'Enter' || evt.key === 'Tab') {
-                evt.preventDefault();
-                handlePathSelection(suggestion);
               }
-            }}
-            onClick={() => handlePathSelection(suggestion)}
-            before={
-              <Icon src={suggestion.kind === 'directory' ? Icons.Explore : Icons.File} size="100" />
-            }
-          >
-            <Box
-              style={{ padding: `${config.space.S200} 0` }}
-              grow="Yes"
-              direction="Column"
-              gap="100"
+              onFocus={() =>
+                setSelectedPathIndex(
+                  Math.max(
+                    0,
+                    pathSuggestions.findIndex((candidate) => candidate.id === suggestion.id)
+                  )
+                )
+              }
+              onKeyDown={(evt: ReactKeyboardEvent<HTMLButtonElement>) => {
+                if (evt.key === 'Enter' || evt.key === 'Tab') {
+                  evt.preventDefault();
+                  evt.stopPropagation();
+                  handlePathSelection(suggestion);
+                }
+              }}
+              onClick={() => handlePathSelection(suggestion)}
+              before={
+                <Icon
+                  src={suggestion.kind === 'directory' ? Icons.Explore : Icons.File}
+                  size="100"
+                />
+              }
             >
-              <Text style={{ flexGrow: 1 }} size="B400" truncate>
-                {suggestion.action === 'select-current-folder'
-                  ? 'Select current folder'
-                  : suggestion.kind === 'directory'
-                  ? ensureDirectorySuffix(getPathBasename(suggestion.path) || suggestion.path)
-                  : getPathBasename(suggestion.path) || suggestion.path}
-              </Text>
-              <Text truncate priority="300" size="T200">
-                {`${suggestion.sourceLabel} - ${suggestion.path}`}
-              </Text>
-            </Box>
-          </MenuItem>
-        ))}
+              <Box
+                style={{ padding: `${config.space.S200} 0` }}
+                grow="Yes"
+                direction="Column"
+                gap="100"
+              >
+                <Text style={{ flexGrow: 1 }} size="B400" truncate>
+                  {suggestion.action === 'select-current-folder'
+                    ? 'Select current folder'
+                    : suggestion.kind === 'directory'
+                    ? ensureDirectorySuffix(getPathBasename(suggestion.path) || suggestion.path)
+                    : getPathBasename(suggestion.path) || suggestion.path}
+                </Text>
+                <Text truncate priority="300" size="T200">
+                  {`${suggestion.sourceLabel} - ${suggestion.path}`}
+                </Text>
+              </Box>
+            </MenuItem>
+          );
+        })}
         {hasSecondRealHumanMember && (
           <MenuItem
             as="button"

@@ -3161,22 +3161,28 @@ export class CodexAppServerSession extends EventEmitter {
 
     if (method === "item/commandExecution/outputDelta") {
       this.emit("event", {
-        type: "tool.output",
+        type: "tool.update",
         provider: this.provider,
         call_id: params.itemId || params.item_id || null,
+        tool_call_id: params.itemId || params.item_id || null,
+        update_kind: "output_delta",
         stream: null,
         text: typeof params.delta === "string" ? params.delta : "",
+        content: typeof params.delta === "string" ? params.delta : "",
       });
       return;
     }
 
     if (method === "item/fileChange/outputDelta") {
       this.emit("event", {
-        type: "tool.output",
+        type: "tool.update",
         provider: this.provider,
         call_id: params.itemId || params.item_id || null,
+        tool_call_id: params.itemId || params.item_id || null,
+        update_kind: "output_delta",
         stream: null,
         text: typeof params.delta === "string" ? params.delta : "",
+        content: typeof params.delta === "string" ? params.delta : "",
       });
       return;
     }
@@ -3330,6 +3336,7 @@ export class CodexAppServerSession extends EventEmitter {
         type: "tool.call",
         provider: this.provider,
         call_id: item.id || null,
+        tool_call_id: item.id || null,
         name: "exec_command",
         input: {
           command: item.command || "",
@@ -3344,6 +3351,7 @@ export class CodexAppServerSession extends EventEmitter {
         type: "tool.call",
         provider: this.provider,
         call_id: item.id || null,
+        tool_call_id: item.id || null,
         name: "apply_patch",
         input: {
           changes: item.changes || [],
@@ -3385,6 +3393,7 @@ export class CodexAppServerSession extends EventEmitter {
         type: "tool.result",
         provider: this.provider,
         call_id: item.id || null,
+        tool_call_id: item.id || null,
         name: "exec_command",
         content: {
           stdout: item.aggregatedOutput || "",
@@ -3405,6 +3414,7 @@ export class CodexAppServerSession extends EventEmitter {
         type: "tool.result",
         provider: this.provider,
         call_id: item.id || null,
+        tool_call_id: item.id || null,
         name: "apply_patch",
         content: {
           stdout: "",

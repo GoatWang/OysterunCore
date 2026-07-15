@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
+import { Worker } from "worker_threads";
 import {
   appendFileSync,
   existsSync,
@@ -21,8 +22,35 @@ import { readConfig } from "./config.mjs";
 import {
   buildToolEventDetailRecordFromMatrixEvent,
   projectToolEventForClientTransfer,
+  routeCToolSemanticTypeFromContent,
 } from "./tool-event-transfer-projection.mjs";
 import { ROUTEC_TOOL_EVENT_DETAIL_SELECTED_DETAIL_LIMIT_BYTES } from "./tool-event-detail-store.mjs";
+import {
+  MATRIX_SQLITE_SCHEMA_VERSION,
+  exportSQLiteStoreObject,
+  countRouteCMatrixSQLiteTimelineEvents,
+  getLastRouteCMatrixSQLiteMigrationProof,
+  getRouteCMatrixSQLiteStorageHealth,
+  getRouteCMatrixSQLiteStoragePath,
+  insertRouteCMatrixSQLiteTxnMapping,
+  openRouteCMatrixSQLiteStore,
+  readRouteCMatrixSQLiteContiguousSemanticEvents,
+  readRouteCMatrixSQLiteContextWindow,
+  readRouteCMatrixSQLiteEvent,
+  readRouteCMatrixSQLiteMessagesWindow,
+  readRouteCMatrixSQLiteNextStreamSeq,
+  readRouteCMatrixSQLiteRoom,
+  readRouteCMatrixSQLiteStateEvent,
+  readRouteCMatrixSQLiteSyncTimeline,
+  readRouteCMatrixSQLiteTimelineEvents,
+  readRouteCMatrixSQLiteTimelineStats,
+  readRouteCMatrixSQLiteTxnEventId,
+  replaceSQLiteStoreFromLegacyObject,
+  runRouteCMatrixSQLiteTransaction,
+  searchRouteCMatrixSQLiteEvents,
+  upsertRouteCMatrixSQLiteRoom,
+  writeRouteCMatrixSQLiteEvent,
+} from "./routec-matrix-sqlite-store.mjs";
 
 const CONFIG_DIR =
   process.env.OYSTERUN_CONFIG_DIR || join(homedir(), ".oysterun");
@@ -33,6 +61,13 @@ const OYSTERUN_BRANCH_COPY_NAMESPACE = "org.oysterun.branch_copy.v1";
 const ROUTEC_CHECKPOINT_TOKEN_PREFIX = "routec_s";
 const DEFAULT_SYNC_TIMELINE_LIMIT = 30;
 const DEFAULT_MESSAGES_LIMIT = 30;
+const ROUTEC_MATRIX_TOOL_RUN_SEMANTIC_TYPES = Object.freeze([
+  "tool.call",
+  "tool.update",
+  "tool.output",
+  "tool.result",
+  "tool.failure",
+]);
 const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_MATRIX_TIMELINE_LIMIT = 100;
@@ -61,6 +96,7 @@ const ROUTEC_BODY_KEYWORD_SEARCH_CATEGORY_SET = new Set(
 );
 const ROUTEC_BODY_KEYWORD_SEARCH_CATEGORY_COMPATIBILITY = new Map([
   ["tool.output", "tool.result"],
+  ["tool.update", "tool.result"],
   ["tool.failure", "tool.result"],
   ["session_lifecycle", "status"],
   ["runtime.error", "status"],
@@ -70,7 +106,7 @@ const ROUTEC_BODY_KEYWORD_SEARCH_CATEGORY_COMPATIBILITY = new Map([
   ["control.cancel.outcome", "control.outcome"],
 ]);
 const ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION =
-  "routec.p180_host_owner_message_neighbors.v1";
+  "routec.p324_host_owner_neighbor_bounded_scan.v1";
 const ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS = 20_000;
 
 function isRouteCChatLivenessDiagnosticsEnabled() {
@@ -111,6 +147,9 @@ let cachedStoreDeltaSize = null;
 let cachedStoreDeltaMtimeMs = null;
 let cachedStore = null;
 let lastRouteCMatrixStorageRecoveryProof = null;
+let routeCMatrixLegacyStoreReconstructionCount = 0;
+let routeCMatrixBootMigration = null;
+let routeCMatrixBootMigrationSeq = 0;
 const storeWriteBatchScope = new AsyncLocalStorage();
 let routeCMatrixSyncWakeCandidateCollector = null;
 let nextRouteCMatrixSyncWaiterId = 1;
@@ -624,7 +663,8 @@ function latestBoundRoomEvent(store, binding) {
 
 function routeCMatrixSyncSmallStaleLagPlan({
   binding,
-  store,
+  latestEvent,
+  nextStreamSeq,
   sinceSeq,
   timeoutMs,
   now,
@@ -633,13 +673,12 @@ function routeCMatrixSyncSmallStaleLagPlan({
   if (routeCMatrixSyncLastServedNextSeqByKey.get(key) !== sinceSeq) {
     return null;
   }
-  const latestEvent = latestBoundRoomEvent(store, binding);
   if (!latestEvent || latestEvent.routec_stream_seq < sinceSeq) return null;
   const eventAgeMs = Math.max(0, now - (latestEvent.origin_server_ts || now));
   const coalesceMs = routeCMatrixSyncActiveCoalesceMs();
   if (eventAgeMs >= coalesceMs) return null;
   return {
-    wakeSeq: store.next_stream_seq,
+    wakeSeq: nextStreamSeq,
     timeoutMs: Math.max(1, Math.min(timeoutMs, coalesceMs - eventAgeMs)),
   };
 }
@@ -653,8 +692,9 @@ function handleLongPollingSyncRequest({
   timeoutMs,
 }) {
   const now = Date.now();
-  const store = readStore();
-  assertCheckpointWithinStore(sinceSeq, store, "since");
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  assertCheckpointWithinSQLite(db, sinceSeq, "since");
+  const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
   if (sinceSeq === null) {
     return response(
       addRouteCMatrixSyncLongPollProof(
@@ -683,10 +723,16 @@ function handleLongPollingSyncRequest({
       )
     );
   }
-  if (sinceSeq < store.next_stream_seq) {
+  if (sinceSeq < nextStreamSeq) {
+    const latestEvent = readRouteCMatrixSQLiteTimelineEvents(db, {
+      roomId: binding.matrix_room_id,
+      order: "desc",
+      limit: 1,
+    })[0];
     const staleLagPlan = routeCMatrixSyncSmallStaleLagPlan({
       binding,
-      store,
+      latestEvent,
+      nextStreamSeq,
       sinceSeq,
       timeoutMs,
       now,
@@ -866,6 +912,7 @@ export function getRouteCMatrixStorageDeltaPath(
 
 export function getRouteCMatrixStorageProof({ ensure = false } = {}) {
   const storagePath = getRouteCMatrixStoragePath();
+  const sqliteStoragePath = getRouteCMatrixSQLiteStoragePath(storagePath);
   if (ensure) {
     ensureStore();
   }
@@ -873,12 +920,18 @@ export function getRouteCMatrixStorageProof({ ensure = false } = {}) {
     storage_adapter: "host_owned_routec_matrix_storage",
     storage_schema_version: STORAGE_SCHEMA_VERSION,
     storage_delta_schema_version: STORAGE_DELTA_SCHEMA_VERSION,
-    storage_path: storagePath,
-    storage_delta_path: getRouteCMatrixStorageDeltaPath(storagePath),
+    storage_mode: "sqlite",
+    sqlite_schema_version: MATRIX_SQLITE_SCHEMA_VERSION,
+    storage_path: sqliteStoragePath,
+    sqlite_storage_path: sqliteStoragePath,
+    legacy_json_storage_path: storagePath,
+    legacy_json_delta_path: getRouteCMatrixStorageDeltaPath(storagePath),
     storage_path_source: process.env.OYSTERUN_ROUTEC_MATRIX_STORAGE_PATH
       ? "OYSTERUN_ROUTEC_MATRIX_STORAGE_PATH"
       : "OYSTERUN_CONFIG_DIR_derived_stack_matrix_path",
     stack_owned_matrix_storage: true,
+    runtime_json_dual_write: false,
+    legacy_json_preserved_after_migration: true,
     raw_synapse_base_url_required: false,
     raw_synapse_token_required: false,
     synapse_proxy_attempted: false,
@@ -1298,6 +1351,11 @@ function readStore() {
   const storagePath = getRouteCMatrixStoragePath();
   const activeBatch = storeWriteBatchScope.getStore();
   if (activeBatch) {
+    if (!activeBatch.store) {
+      throw new Error(
+        "Route C Matrix SQLite write batch does not expose a full legacy store"
+      );
+    }
     if (activeBatch.storagePath !== storagePath) {
       throw new Error(
         "Route C Matrix storage batch cannot span multiple storage paths"
@@ -1305,51 +1363,219 @@ function readStore() {
     }
     return activeBatch.store;
   }
-  const storageSignature = fileSignature(storagePath);
-  const deltaSignature = fileSignature(
-    getRouteCMatrixStorageDeltaPath(storagePath)
-  );
-  const cacheEnabled = isRouteCMatrixStorageCacheEnabled();
-  if (
-    cacheEnabled &&
-    cachedStore &&
-    cachedStorePath === storagePath &&
-    cachedStoreSize === storageSignature.size &&
-    cachedStoreMtimeMs === storageSignature.mtimeMs &&
-    cachedStoreDeltaSize === deltaSignature.size &&
-    cachedStoreDeltaMtimeMs === deltaSignature.mtimeMs
-  ) {
-    return cachedStore;
+  routeCMatrixLegacyStoreReconstructionCount += 1;
+  if (process.env.OYSTERUN_ROUTEC_ASSERT_NO_FULL_STORE_RECONSTRUCTION === "1") {
+    throw new Error(
+      "Route C Matrix legacy full-store reconstruction is disabled in SQLite live mode"
+    );
   }
-  const parsed = storageSignature.exists
-    ? JSON.parse(readFileSync(storagePath, "utf8"))
-    : initialStore();
+  const db = openRouteCMatrixSQLiteStore({ jsonStoragePath: storagePath });
+  const parsed = exportSQLiteStoreObject(db);
   validateStore(parsed);
-  applyRouteCMatrixStorageDeltaLog(parsed, storagePath);
-  updateStoreCacheFromFiles(storagePath, parsed);
   return parsed;
 }
 
+export function getRouteCMatrixLegacyStoreReconstructionDiagnosticsForTest() {
+  return {
+    legacy_full_store_reconstruction_count:
+      routeCMatrixLegacyStoreReconstructionCount,
+    sqlite_live_no_full_store_reconstruction_guard_available: true,
+  };
+}
+
+export function resetRouteCMatrixLegacyStoreReconstructionDiagnosticsForTest() {
+  routeCMatrixLegacyStoreReconstructionCount = 0;
+}
+
+function summarizeRouteCMatrixBootMigration() {
+  if (!routeCMatrixBootMigration) return null;
+  return {
+    schema_version: "routec.matrix_sqlite_boot_migration.v1",
+    id: routeCMatrixBootMigration.id,
+    status: routeCMatrixBootMigration.status,
+    reason: routeCMatrixBootMigration.reason,
+    storage_path: routeCMatrixBootMigration.storagePath,
+    sqlite_storage_path: routeCMatrixBootMigration.sqlitePath,
+    started_at: routeCMatrixBootMigration.startedAt,
+    completed_at: routeCMatrixBootMigration.completedAt || null,
+    error: routeCMatrixBootMigration.error || null,
+    health: routeCMatrixBootMigration.health || null,
+    diagnostics: routeCMatrixBootMigration.diagnostics || null,
+  };
+}
+
+export function getRouteCMatrixStorageBootMigrationStatusForTest() {
+  return summarizeRouteCMatrixBootMigration();
+}
+
+export function triggerRouteCMatrixStorageBootMigration({
+  reason = "host_startup",
+} = {}) {
+  const storagePath = getRouteCMatrixStoragePath();
+  const health = getRouteCMatrixSQLiteStorageHealth({
+    jsonStoragePath: storagePath,
+  });
+  if (health.storage_ready !== false) {
+    routeCMatrixBootMigration = {
+      id: `routec_boot_migration_${++routeCMatrixBootMigrationSeq}`,
+      status: "ready",
+      reason,
+      storagePath,
+      sqlitePath: health.sqlite_storage_path,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      error: null,
+      health,
+      diagnostics: null,
+    };
+    return {
+      status: "already_ready",
+      routec_matrix_boot_migration: true,
+      storage_path: storagePath,
+      sqlite_storage_path: health.sqlite_storage_path,
+      health,
+    };
+  }
+  if (
+    health.migration_lock?.exists === true &&
+    health.migration_lock.stale !== true
+  ) {
+    return {
+      status: "blocked_active_lock",
+      routec_matrix_boot_migration: true,
+      storage_path: storagePath,
+      sqlite_storage_path: health.sqlite_storage_path,
+      health,
+    };
+  }
+  if (
+    routeCMatrixBootMigration?.status === "running" &&
+    routeCMatrixBootMigration.storagePath === storagePath
+  ) {
+    return {
+      status: "already_running",
+      routec_matrix_boot_migration: true,
+      storage_path: storagePath,
+      sqlite_storage_path: routeCMatrixBootMigration.sqlitePath,
+      health,
+    };
+  }
+
+  const migration = {
+    id: `routec_boot_migration_${++routeCMatrixBootMigrationSeq}`,
+    status: "running",
+    reason,
+    storagePath,
+    sqlitePath: health.sqlite_storage_path,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    error: null,
+    health: null,
+    diagnostics: null,
+  };
+  routeCMatrixBootMigration = migration;
+
+  const worker = new Worker(
+    new URL("./routec-matrix-sqlite-migration-worker.mjs", import.meta.url),
+    {
+      workerData: {
+        schema_version: "routec.matrix_sqlite_boot_migration_worker.v1",
+        id: migration.id,
+        reason,
+        jsonStoragePath: storagePath,
+      },
+    }
+  );
+  worker.once("message", (message) => {
+    if (routeCMatrixBootMigration?.id !== migration.id) return;
+    routeCMatrixBootMigration.status =
+      message?.status === "ok" ? "completed" : "failed";
+    routeCMatrixBootMigration.completedAt = new Date().toISOString();
+    routeCMatrixBootMigration.error =
+      message?.status === "ok" ? null : message?.error || "unknown";
+    routeCMatrixBootMigration.health = message?.health || null;
+    routeCMatrixBootMigration.diagnostics = message?.diagnostics || null;
+    clearStoreCache();
+  });
+  worker.once("error", (err) => {
+    if (routeCMatrixBootMigration?.id !== migration.id) return;
+    routeCMatrixBootMigration.status = "failed";
+    routeCMatrixBootMigration.completedAt = new Date().toISOString();
+    routeCMatrixBootMigration.error = err?.message || String(err);
+    clearStoreCache();
+  });
+  worker.once("exit", (code) => {
+    if (routeCMatrixBootMigration?.id !== migration.id) return;
+    if (routeCMatrixBootMigration.status === "running" && code !== 0) {
+      routeCMatrixBootMigration.status = "failed";
+      routeCMatrixBootMigration.completedAt = new Date().toISOString();
+      routeCMatrixBootMigration.error = `worker_exit_${code}`;
+      clearStoreCache();
+    }
+  });
+
+  return {
+    status: "started",
+    routec_matrix_boot_migration: true,
+    storage_path: storagePath,
+    sqlite_storage_path: health.sqlite_storage_path,
+    health,
+  };
+}
+
 export function getLastRouteCMatrixStorageRecoveryProof() {
-  return lastRouteCMatrixStorageRecoveryProof;
+  return (
+    getLastRouteCMatrixSQLiteMigrationProof() ||
+    lastRouteCMatrixStorageRecoveryProof
+  );
 }
 
 export function checkRouteCMatrixStorageHealth() {
   const storagePath = getRouteCMatrixStoragePath();
   const deltaPath = getRouteCMatrixStorageDeltaPath(storagePath);
   try {
-    const store = readStore();
+    const health = getRouteCMatrixSQLiteStorageHealth({
+      jsonStoragePath: storagePath,
+    });
+    const storageReady = health.storage_ready !== false;
+    const bootMigration = summarizeRouteCMatrixBootMigration();
+    const migrationInProgress =
+      !storageReady &&
+      bootMigration?.status === "running" &&
+      bootMigration.storage_path === storagePath;
     return {
-      status: "ok",
-      code: "matrix_storage_ok",
+      status: storageReady ? "ok" : "degraded",
+      code: storageReady
+        ? "matrix_storage_ok"
+        : "matrix_storage_migration_not_ready",
       ...getRouteCMatrixStorageProof(),
-      storage_exists: existsSync(storagePath),
+      storage_exists: health.sqlite_storage_exists,
       delta_exists: existsSync(deltaPath),
-      room_count: Object.keys(store.rooms || {}).length,
-      event_count: Object.keys(store.events_by_id || {}).length,
-      next_stream_seq: store.next_stream_seq,
-      updated_at: store.updated_at || null,
-      recovery: lastRouteCMatrixStorageRecoveryProof,
+      room_count: health.room_count,
+      event_count: health.timeline_event_count,
+      timeline_event_count: health.timeline_event_count,
+      state_event_count: health.state_event_count,
+      actor_count: health.actor_count,
+      txn_mapping_count: health.txn_mapping_count,
+      latest_stream_seq: health.latest_stream_seq,
+      search_row_count: health.search_row_count,
+      next_stream_seq: health.latest_stream_seq,
+      updated_at: null,
+      migration_status: migrationInProgress
+        ? "migration_in_progress_or_locked"
+        : health.migration_status,
+      migration_lock: health.migration_lock || null,
+      readiness_metadata_only: health.readiness_metadata_only === true,
+      migration_readiness_source: health.migration_readiness_source || null,
+      migration_proof_hashing_deferred:
+        health.migration_proof_hashing_deferred === true,
+      source_json: health.source_json || null,
+      source_delta: health.source_delta || null,
+      boot_migration: bootMigration,
+      migration_proof_path: health.migration_proof_path,
+      migration_proof_summary: health.migration_proof_summary,
+      storage_ready: storageReady,
+      recovery: getLastRouteCMatrixStorageRecoveryProof(),
     };
   } catch (err) {
     return {
@@ -1359,7 +1585,7 @@ export function checkRouteCMatrixStorageHealth() {
       storage_exists: existsSync(storagePath),
       delta_exists: existsSync(deltaPath),
       error: err?.message || String(err),
-      recovery: lastRouteCMatrixStorageRecoveryProof,
+      recovery: getLastRouteCMatrixStorageRecoveryProof(),
     };
   }
 }
@@ -1375,12 +1601,9 @@ function writeStore(store) {
   validateStore(store);
   store.updated_at = new Date().toISOString();
   const storagePath = getRouteCMatrixStoragePath();
-  mkdirSync(dirname(storagePath), { recursive: true });
-  const tempPath = `${storagePath}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tempPath, JSON.stringify(store, null, 2) + "\n");
-  renameSync(tempPath, storagePath);
-  removeRouteCMatrixStorageDeltaLog(storagePath);
-  updateStoreCacheFromFiles(storagePath, store);
+  const db = openRouteCMatrixSQLiteStore({ jsonStoragePath: storagePath });
+  replaceSQLiteStoreFromLegacyObject(db, store);
+  clearStoreCache();
 }
 
 function buildRouteCMatrixStorageDeltaRecord(batch) {
@@ -1470,7 +1693,7 @@ function ensureStore() {
     activeBatch.dirty = true;
     return;
   }
-  writeStore(readStore());
+  openRouteCMatrixAdapterSQLiteStore();
 }
 
 function mutateStore(mutator) {
@@ -1522,13 +1745,15 @@ export async function runRouteCMatrixStorageWriteBatch(fn) {
     };
   }
   const storagePath = getRouteCMatrixStoragePath();
-  const store = readStore();
+  const db = openRouteCMatrixSQLiteStore({ jsonStoragePath: storagePath });
+  const nextStreamSeqBefore = readRouteCMatrixSQLiteNextStreamSeq(db);
   const batch = {
     storagePath,
-    store,
+    db,
+    store: null,
     dirty: false,
     mutationCount: 0,
-    nextStreamSeqBefore: store.next_stream_seq,
+    nextStreamSeqBefore,
     afterDurableFlushCallbacks: [],
     deltaEligible: true,
     deltaIneligibleReason: null,
@@ -1538,23 +1763,26 @@ export async function runRouteCMatrixStorageWriteBatch(fn) {
       events: [],
     },
     syncWakeCandidates: [],
+    touchedBindings: [],
   };
   try {
     const result = await storeWriteBatchScope.run(batch, fn);
     let durableWriteProof = null;
     if (batch.dirty) {
-      if (batch.deltaEligible && batch.delta.events.length > 0) {
-        durableWriteProof = writeRouteCMatrixStorageDeltaRecord(batch);
-      } else {
-        writeStore(batch.store);
-        durableWriteProof = {
-          delta_persistence_used: false,
-          delta_ineligible_reason:
-            batch.deltaIneligibleReason || "no_supported_delta_events",
-          full_store_snapshot_write_used: true,
-          full_store_json_stringify_per_batch_eliminated: false,
-        };
-      }
+      clearStoreCache();
+      durableWriteProof = {
+        sqlite_transaction_used: true,
+        sqlite_storage_path: getRouteCMatrixSQLiteStoragePath(storagePath),
+        sqlite_schema_version: MATRIX_SQLITE_SCHEMA_VERSION,
+        migrated_counts: getRouteCMatrixSQLiteStorageHealth({
+          jsonStoragePath: storagePath,
+        }),
+        delta_persistence_used: false,
+        json_delta_write_used: false,
+        full_store_snapshot_write_used: false,
+        runtime_json_dual_write: false,
+        full_store_json_stringify_per_batch_eliminated: true,
+      };
     }
     for (const callback of batch.afterDurableFlushCallbacks) {
       await callback();
@@ -1568,11 +1796,18 @@ export async function runRouteCMatrixStorageWriteBatch(fn) {
       mutation_count: batch.mutationCount,
       durable_write_count: batch.dirty ? 1 : 0,
       next_stream_seq_before: batch.nextStreamSeqBefore,
-      next_stream_seq_after: batch.store.next_stream_seq,
+      next_stream_seq_after: readRouteCMatrixSQLiteNextStreamSeq(db),
       per_event_full_store_write_eliminated: true,
       delta_persistence_used:
-        durableWriteProof?.full_store_json_stringify_per_batch_eliminated ===
-        true,
+        durableWriteProof?.delta_persistence_used === true,
+      sqlite_transaction_used:
+        durableWriteProof?.sqlite_transaction_used === true,
+      json_delta_write_used:
+        durableWriteProof?.json_delta_write_used === true,
+      runtime_json_dual_write:
+        durableWriteProof?.runtime_json_dual_write === true,
+      sqlite_storage_path: durableWriteProof?.sqlite_storage_path || null,
+      sqlite_schema_version: durableWriteProof?.sqlite_schema_version || null,
       full_store_json_stringify_per_batch_eliminated:
         durableWriteProof?.full_store_json_stringify_per_batch_eliminated ===
         true,
@@ -1994,18 +2229,77 @@ function ensureRoomInStore(store, binding) {
   return room;
 }
 
-export function ensureRouteCMatrixRoomStorage({ binding }) {
-  return mutateStore((store) => {
-    const room = ensureRoomInStore(store, binding);
-    return {
-      ...getRouteCMatrixStorageProof(),
-      room_id: room.room_id,
-      host_session_id: room.host_session_id,
-      matrix_user_id: room.matrix_user_id,
-      routec_matrix_actor_registry: getRouteCMatrixActorRegistry(binding),
-      room_ready: true,
-    };
+function openRouteCMatrixAdapterSQLiteStore() {
+  return openRouteCMatrixSQLiteStore({
+    jsonStoragePath: getRouteCMatrixStoragePath(),
   });
+}
+
+function readRoomInSQLite(db, binding) {
+  requireBinding(binding);
+  const existing = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (existing) return validateBoundRoomRecord(existing, binding);
+  return buildRouteCMatrixRoomRecord(binding);
+}
+
+function ensureRoomInSQLite(db, binding) {
+  requireBinding(binding);
+  const existing = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (existing) return validateBoundRoomRecord(existing, binding);
+  const room = buildRouteCMatrixRoomRecord(binding);
+  upsertRouteCMatrixSQLiteRoom(db, room);
+  return room;
+}
+
+function assertCheckpointWithinSQLite(db, seq, fieldName) {
+  if (seq === null) return;
+  const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
+  if (seq > nextStreamSeq) {
+    throw invalidMatrixParam(
+      `Route C Matrix storage ${fieldName} checkpoint token is beyond the current stream checkpoint.`
+    );
+  }
+}
+
+function runRouteCMatrixSQLiteWrite({ binding = null, operation }) {
+  const activeBatch = storeWriteBatchScope.getStore();
+  if (activeBatch) {
+    const result = operation(activeBatch.db);
+    activeBatch.dirty = true;
+    activeBatch.mutationCount += 1;
+    if (binding) activeBatch.touchedBindings.push(binding);
+    return result;
+  }
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const wakeCandidates = [];
+  const previousWakeCandidateCollector = routeCMatrixSyncWakeCandidateCollector;
+  routeCMatrixSyncWakeCandidateCollector = wakeCandidates;
+  let result;
+  try {
+    result = runRouteCMatrixSQLiteTransaction(db, () => operation(db));
+  } finally {
+    routeCMatrixSyncWakeCandidateCollector = previousWakeCandidateCollector;
+  }
+  clearStoreCache();
+  wakeRouteCMatrixSyncWaiters(wakeCandidates);
+  return result;
+}
+
+function recordSQLiteBatchWakeCandidate({ binding, event }) {
+  recordRouteCMatrixSyncLongPollWakeCandidate({ binding, event });
+}
+
+export function ensureRouteCMatrixRoomStorage({ binding }) {
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = ensureRoomInSQLite(db, binding);
+  return {
+    ...getRouteCMatrixStorageProof(),
+    room_id: room.room_id,
+    host_session_id: room.host_session_id,
+    matrix_user_id: room.matrix_user_id,
+    routec_matrix_actor_registry: getRouteCMatrixActorRegistry(binding),
+    room_ready: true,
+  };
 }
 
 function requireBranchCopySourceRoom(store, binding) {
@@ -2030,23 +2324,19 @@ function requireBranchCopySourceRoom(store, binding) {
 export function getRouteCMatrixRoomTimelineReplaySourceProof({
   sourceBinding,
 }) {
-  const store = readStore();
-  const room = requireBranchCopySourceRoom(store, sourceBinding);
-  const events = room.event_ids.map((eventId) => {
-    const event = store.events_by_id[eventId];
-    if (!event) {
-      throw new Error(
-        `Route C branch/copy source Matrix room references missing event: ${eventId}`
-      );
-    }
-    return event;
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRouteCMatrixSQLiteRoom(db, { binding: sourceBinding });
+  if (!room) {
+    throw new Error("Route C branch/copy source Matrix room storage not found");
+  }
+  const stats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: sourceBinding.matrix_room_id,
   });
-  boundRoomEventsInStreamOrder(store, sourceBinding);
   return {
     status: "routec_branch_copy_matrix_source_ready",
     source_host_session_id: sourceBinding.host_session_id,
     source_matrix_room_id: sourceBinding.matrix_room_id,
-    source_event_count: events.length,
+    source_event_count: stats.count,
     committed_transcript_truth: "matrix_room_timeline",
     db_transcript_copy_product_truth: false,
     product_local_transcript_replay_shortcut_used: false,
@@ -2059,56 +2349,48 @@ export function readRouteCMatrixRoomTimelinePreview({
   binding,
   limit = DEFAULT_MESSAGES_LIMIT,
 }) {
-  const store = readStore();
-  const room = requireBranchCopySourceRoom(store, binding);
-  const normalizedLimit = normalizeTimelineLimit(limit, DEFAULT_MESSAGES_LIMIT);
-  const events = room.event_ids.map((eventId) => {
-    const event = store.events_by_id[eventId];
-    if (!event) {
-      throw new Error(
-        `Route C Matrix preview source room references missing event: ${eventId}`
-      );
-    }
-    return event;
-  });
-  let previousSeq = 0;
-  for (const event of events) {
-    const seq = eventStreamSeq(event);
-    if (seq <= previousSeq) {
-      throw new Error(
-        "Route C Matrix preview source room events are not in strictly increasing stream order"
-      );
-    }
-    previousSeq = seq;
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (!room) {
+    throw new Error("Route C Matrix preview source room storage not found");
   }
-  const preBudgetChunk = events.slice(-normalizedLimit);
+  const normalizedLimit = normalizeTimelineLimit(limit, DEFAULT_MESSAGES_LIMIT);
+  const stats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: binding.matrix_room_id,
+  });
+  const preBudgetChunk = readRouteCMatrixSQLiteTimelineEvents(db, {
+    roomId: binding.matrix_room_id,
+    order: "desc",
+    limit: normalizedLimit,
+  }).reverse();
   const preBudgetClientEvents = preBudgetChunk.map(eventForClientMatrixRead);
   const budgeted = selectNewestClientEventsWithinTransferBudget({
     rawEvents: preBudgetChunk,
     clientEvents: preBudgetClientEvents,
   });
   const chunk = budgeted.rawEvents;
+  const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
   const diagnosticsEnabled = isRouteCChatLivenessDiagnosticsEnabled();
   return {
     chunk: budgeted.clientEvents,
     routec_messages_checkpoint_proof: {
       checkpoint_token_format: "routec_s<N>",
       start: routeCCheckpointToken(
-        chunk.length > 0 ? eventStreamSeq(chunk[0]) : store.next_stream_seq
+        chunk.length > 0 ? eventStreamSeq(chunk[0]) : nextStreamSeq
       ),
-      end: routeCCheckpointToken(store.next_stream_seq),
-      current_next_batch: routeCCheckpointToken(store.next_stream_seq),
-      current_next_batch_seq: store.next_stream_seq,
+      end: routeCCheckpointToken(nextStreamSeq),
+      current_next_batch: routeCCheckpointToken(nextStreamSeq),
+      current_next_batch_seq: nextStreamSeq,
       limit: normalizedLimit,
       returned_event_count: chunk.length,
-      total_bound_room_event_count: events.length,
+      total_bound_room_event_count: stats.count,
       matrix_room_id_hash: sha256(binding.matrix_room_id),
       host_session_id: binding.host_session_id,
       committed_transcript_truth: "matrix_room_timeline",
-      durable_matrix_source: "host_owned_routec_matrix_json_timeline",
-      host_owned_matrix_json_timeline_read: true,
+      durable_matrix_source: "host_owned_routec_matrix_sqlite_timeline",
+      host_owned_matrix_sqlite_timeline_read: true,
       storage_adapter_call_graph_used: true,
-      storage_adapter_call_graph_role: "host_owned_matrix_json_timeline_read",
+      storage_adapter_call_graph_role: "host_owned_matrix_sqlite_timeline_read",
       preview_read_only: true,
       mutation_performed: false,
       host_db_transcript_product_truth: false,
@@ -2269,7 +2551,117 @@ function commitRoomEventInStore(
 }
 
 function commitRoomEvent(args) {
-  return mutateStore((store) => commitRoomEventInStore(store, args));
+  return runRouteCMatrixSQLiteWrite({
+    binding: args.binding,
+    operation: (db) => {
+      const {
+        binding,
+        roomId,
+        txnId,
+        eventType,
+        content,
+        senderMatrixUserId = null,
+        senderActorKey = null,
+        tokenRecord = null,
+        branchCopyLineage = null,
+      } = args;
+      requireBinding(binding);
+      if (roomId !== binding.matrix_room_id) {
+        throw new Error(
+          "Route C Matrix storage send room does not match bound room"
+        );
+      }
+      if (!txnId || !eventType) {
+        throw new Error("Route C Matrix storage send requires txnId and eventType");
+      }
+      ensureRoomInSQLite(db, binding);
+      const senderActor = resolveCommitSender({
+        binding,
+        senderMatrixUserId,
+        senderActorKey,
+        tokenRecord,
+      });
+      const existingEventId = readRouteCMatrixSQLiteTxnEventId(db, {
+        roomId,
+        eventType,
+        txnId,
+      });
+      if (existingEventId) {
+        const existingEvent = readRouteCMatrixSQLiteEvent(db, {
+          roomId,
+          eventId: existingEventId,
+        });
+        if (!existingEvent) {
+          throw new Error(
+            "Route C Matrix SQLite txn index points to missing event"
+          );
+        }
+        if (existingEvent.sender !== senderActor.matrix_user_id) {
+          throw invalidMatrixParam(
+            "Route C Matrix storage duplicate txn sender mismatch."
+          );
+        }
+        return {
+          event: existingEvent,
+          duplicate_txn: true,
+        };
+      }
+      const eventId = eventIdForCommit({ roomId, txnId, eventType, content });
+      const duplicateByDeterministicId = readRouteCMatrixSQLiteEvent(db, {
+        roomId,
+        eventId,
+      });
+      if (duplicateByDeterministicId) {
+        insertRouteCMatrixSQLiteTxnMapping(db, {
+          roomId,
+          eventType,
+          txnId,
+          eventId,
+        });
+        return {
+          event: duplicateByDeterministicId,
+          duplicate_txn: true,
+        };
+      }
+      const lineage = branchCopyLineage
+        ? cloneJsonObject(branchCopyLineage, "Route C branch/copy lineage")
+        : null;
+      const now = Date.now();
+      const nextSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
+      const event = {
+        type: eventType,
+        room_id: roomId,
+        sender: senderActor.matrix_user_id,
+        content: content || {},
+        event_id: eventId,
+        origin_server_ts: now,
+        unsigned: {
+          transaction_id: txnId,
+          routec_host_owned_matrix_storage: true,
+          host_session_id: binding.host_session_id,
+          routec_matrix_actor_key: senderActor.actor_key,
+          routec_matrix_actor_kind: senderActor.actor_kind,
+          routec_matrix_actor_display_name: senderActor.display_name,
+          routec_matrix_actor_sender_source: senderActor.sender_source,
+          committed_transcript_truth: "matrix_room_timeline",
+          ...(lineage ? { routec_branch_copy_lineage: lineage } : {}),
+        },
+        routec_stream_seq: nextSeq,
+      };
+      const txnKey = `${roomId}\u001f${eventType}\u001f${txnId}`;
+      writeRouteCMatrixSQLiteEvent(db, {
+        event,
+        txnKey,
+        isState: false,
+        nextStreamSeq: nextSeq + 1,
+      });
+      recordSQLiteBatchWakeCandidate({ binding, event });
+      return {
+        event,
+        duplicate_txn: false,
+      };
+    },
+  });
 }
 
 function stateEventIdForCommit({ roomId, eventType, stateKey, content }) {
@@ -2345,6 +2737,70 @@ function normalizePinnedEventsContent(store, room, binding, content) {
   return { pinned };
 }
 
+function normalizePinnedEventsContentSQLite(db, binding, content) {
+  if (!isObject(content)) {
+    throw invalidMatrixParam(
+      "Route C Matrix pinned events state content must be a JSON object."
+    );
+  }
+  const contentKeys = Object.keys(content);
+  if (contentKeys.length !== 1 || contentKeys[0] !== "pinned") {
+    throw invalidMatrixParam(
+      "Route C Matrix pinned events state content must contain only pinned."
+    );
+  }
+  if (!Array.isArray(content.pinned)) {
+    throw invalidMatrixParam(
+      "Route C Matrix pinned events content.pinned must be a string array."
+    );
+  }
+
+  const seen = new Set();
+  const pinned = content.pinned.map((eventId) => {
+    if (
+      typeof eventId !== "string" ||
+      !eventId.trim() ||
+      eventId.trim() !== eventId
+    ) {
+      throw invalidMatrixParam(
+        "Route C Matrix pinned event IDs must be non-empty strings."
+      );
+    }
+    if (seen.has(eventId)) {
+      throw invalidMatrixParam(
+        "Route C Matrix pinned event IDs must not contain duplicates."
+      );
+    }
+    seen.add(eventId);
+    const event = readRouteCMatrixSQLiteEvent(db, {
+      roomId: binding.matrix_room_id,
+      eventId,
+    });
+    if (!event) {
+      throw invalidMatrixParam(
+        "Route C Matrix pinned event must exist in the bound room timeline."
+      );
+    }
+    if (event.type !== MATRIX_ROOM_MESSAGE_EVENT_TYPE) {
+      throw invalidMatrixParam(
+        "Route C Matrix pinned event type is not allowed."
+      );
+    }
+    if (
+      event.unsigned?.redacted_because ||
+      event.unsigned?.routec_redacted === true ||
+      event.redacts
+    ) {
+      throw invalidMatrixParam(
+        "Route C Matrix redacted events cannot be pinned."
+      );
+    }
+    return eventId;
+  });
+
+  return { pinned };
+}
+
 function pinnedEventsStateProof({ binding, pinned, eventId }) {
   return {
     state_event_type: MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE,
@@ -2364,28 +2820,31 @@ function pinnedEventsStateProof({ binding, pinned, eventId }) {
 }
 
 function writePinnedEventsState({ binding, roomId, content }) {
-  return mutateStore((store) => {
-    const room = ensureRoomInStore(store, binding);
+  return runRouteCMatrixSQLiteWrite({
+    binding,
+    operation: (db) => {
+      ensureRoomInSQLite(db, binding);
     if (roomId !== binding.matrix_room_id) {
       throw invalidMatrixParam(
         "Route C Matrix pinned events state room does not match binding."
       );
     }
-    const normalizedContent = normalizePinnedEventsContent(
-      store,
-      room,
+    const normalizedContent = normalizePinnedEventsContentSQLite(
+      db,
       binding,
       content
     );
-    const stateEvents = ensureRoomStateEventsStore(room);
     const eventId = stateEventIdForCommit({
       roomId,
       eventType: MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE,
       stateKey: "",
       content: normalizedContent,
     });
-    const stateKey = matrixStateStoreKey(MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE, "");
-    const previousStateEvent = stateEvents[stateKey] || null;
+    const previousStateEvent = readRouteCMatrixSQLiteStateEvent(db, {
+      roomId,
+      type: MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE,
+      stateKey: "",
+    });
     const stateContentChanged =
       !previousStateEvent ||
       JSON.stringify(previousStateEvent.content || {}) !==
@@ -2431,11 +2890,14 @@ function writePinnedEventsState({ binding, roomId, content }) {
         direct_matrix_bypass_write: false,
         unsafe_event_type_pinning: false,
       },
-      routec_state_seq: store.next_stream_seq,
+      routec_state_seq: readRouteCMatrixSQLiteNextStreamSeq(db),
     };
-    store.next_stream_seq += 1;
-    stateEvents[stateKey] = event;
-    recordRouteCMatrixSyncLongPollWakeCandidate({ binding, event });
+    writeRouteCMatrixSQLiteEvent(db, {
+      event,
+      isState: true,
+      nextStreamSeq: event.routec_state_seq + 1,
+    });
+    recordSQLiteBatchWakeCandidate({ binding, event });
     return {
       event_id: eventId,
       committed_transcript_truth: "matrix_room_state",
@@ -2445,12 +2907,13 @@ function writePinnedEventsState({ binding, roomId, content }) {
         eventId,
       }),
     };
+    },
   });
 }
 
 function readPinnedEventsState({ binding, roomId }) {
-  const store = readStore();
-  const room = readRoomInStore(store, binding);
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  readRoomInSQLite(db, binding);
   if (roomId !== binding.matrix_room_id) {
     return {
       status: 403,
@@ -2460,9 +2923,11 @@ function readPinnedEventsState({ binding, roomId }) {
       ),
     };
   }
-  const stateEvents = ensureRoomStateEventsStore(room);
-  const event =
-    stateEvents[matrixStateStoreKey(MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE, "")];
+  const event = readRouteCMatrixSQLiteStateEvent(db, {
+    roomId,
+    type: MATRIX_ROOM_PINNED_EVENTS_STATE_TYPE,
+    stateKey: "",
+  });
   if (!event) {
     return {
       status: 404,
@@ -2600,13 +3065,28 @@ export function copyRouteCMatrixRoomTimeline({
   if (sourceBinding.matrix_room_id === targetBinding.matrix_room_id) {
     throw new Error("Route C branch/copy requires a new Matrix room id");
   }
-  return mutateStore((store) => {
-    const sourceRoom = requireBranchCopySourceRoom(store, sourceBinding);
-    const sourceEventIdsBefore = [...sourceRoom.event_ids];
-    const sourceEvents = boundRoomEventsInStreamOrder(store, sourceBinding);
-    const targetRoom = ensureRoomInStore(store, targetBinding);
-    const copiedEvents = [];
-    sourceEvents.forEach((sourceEvent, index) => {
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const sourceRoom = readRouteCMatrixSQLiteRoom(db, { binding: sourceBinding });
+  if (!sourceRoom) {
+    throw new Error("Route C branch/copy source Matrix room storage not found");
+  }
+  ensureRoomInSQLite(db, targetBinding);
+  const sourceStatsBefore = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: sourceBinding.matrix_room_id,
+  });
+  const copiedEvents = [];
+  let sourceIndex = 0;
+  let afterSeq = 0;
+  const pageSize = 200;
+  while (true) {
+    const sourceEvents = readRouteCMatrixSQLiteTimelineEvents(db, {
+      roomId: sourceBinding.matrix_room_id,
+      afterSeq,
+      order: "asc",
+      limit: pageSize,
+    });
+    if (sourceEvents.length === 0) break;
+    for (const sourceEvent of sourceEvents) {
       if (!sourceEvent?.event_id || !sourceEvent?.type) {
         throw new Error(
           "Route C branch/copy source Matrix event requires event_id and type"
@@ -2624,7 +3104,7 @@ export function copyRouteCMatrixRoomTimeline({
         sourceBinding,
         targetBinding,
         sourceEvent,
-        sourceIndex: index,
+        sourceIndex,
       });
       const content = rewriteBranchCopyContent({
         content: sourceEvent.content,
@@ -2638,10 +3118,10 @@ export function copyRouteCMatrixRoomTimeline({
           parent_session_id: parentSessionId,
           child_session_id: childSessionId,
           source_event_id: sourceEvent.event_id,
-          source_index: index,
+          source_index: sourceIndex,
         })
       ).slice(0, 32)}`;
-      const committed = commitRoomEventInStore(store, {
+      const committed = commitRoomEvent({
         binding: targetBinding,
         roomId: targetBinding.matrix_room_id,
         txnId,
@@ -2655,35 +3135,40 @@ export function copyRouteCMatrixRoomTimeline({
         source_event_id: sourceEvent.event_id,
         target_event_id: committed.event.event_id,
         source_event_type: sourceEvent.type,
-        source_event_index: index,
+        source_event_index: sourceIndex,
         source_actor_key: sourceActorKey,
         target_actor_key: targetActor.actor_key,
         duplicate_txn: committed.duplicate_txn,
       });
-    });
-    const sourceRoomUnchanged =
-      sourceRoom.event_ids.length === sourceEventIdsBefore.length &&
-      sourceRoom.event_ids.every(
-        (eventId, index) => eventId === sourceEventIdsBefore[index]
-      );
-    return {
-      status: "routec_branch_copy_matrix_timeline_replayed",
-      parent_session_id: parentSessionId,
-      child_session_id: childSessionId,
-      source_matrix_room_id: sourceBinding.matrix_room_id,
-      target_matrix_room_id: targetBinding.matrix_room_id,
-      source_event_count: sourceEvents.length,
-      copied_event_count: copiedEvents.length,
-      child_room_event_count: targetRoom.event_ids.length,
-      source_room_unchanged: sourceRoomUnchanged,
-      copied_events: copiedEvents,
-      committed_transcript_truth: "matrix_room_timeline",
-      db_transcript_copy_product_truth: false,
-      product_local_transcript_replay_shortcut_used: false,
-      direct_matrix_harness_write_used: false,
-      routec_host_owned_matrix_storage: true,
-    };
+      sourceIndex += 1;
+      afterSeq = eventStreamSeq(sourceEvent);
+    }
+  }
+  const sourceStatsAfter = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: sourceBinding.matrix_room_id,
   });
+  const targetStats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: targetBinding.matrix_room_id,
+  });
+  return {
+    status: "routec_branch_copy_matrix_timeline_replayed",
+    parent_session_id: parentSessionId,
+    child_session_id: childSessionId,
+    source_matrix_room_id: sourceBinding.matrix_room_id,
+    target_matrix_room_id: targetBinding.matrix_room_id,
+    source_event_count: sourceStatsBefore.count,
+    copied_event_count: copiedEvents.length,
+    child_room_event_count: targetStats.count,
+    source_room_unchanged:
+      sourceStatsBefore.count === sourceStatsAfter.count &&
+      sourceStatsBefore.latest_stream_seq === sourceStatsAfter.latest_stream_seq,
+    copied_events: copiedEvents,
+    committed_transcript_truth: "matrix_room_timeline",
+    db_transcript_copy_product_truth: false,
+    product_local_transcript_replay_shortcut_used: false,
+    direct_matrix_harness_write_used: false,
+    routec_host_owned_matrix_storage: true,
+  };
 }
 
 function eventForClient(event) {
@@ -2778,12 +3263,16 @@ export function readRouteCMatrixToolEventDetail({
       status: "missing_identity",
       items: [],
       page,
-      raw_path_exposed: false,
+      resolver_path_fields_exposed: false,
+      tool_payload_local_paths_preserved: true,
     };
   }
-  const store = readStore();
-  const event = store.events_by_id[normalizedEventId];
-  if (!event || event.room_id !== binding.matrix_room_id) {
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const event = readRouteCMatrixSQLiteEvent(db, {
+    roomId: binding.matrix_room_id,
+    eventId: normalizedEventId,
+  });
+  if (!event) {
     return {
       status: "unavailable",
       session_id: binding.host_session_id,
@@ -2791,7 +3280,8 @@ export function readRouteCMatrixToolEventDetail({
       matrix_event_id: normalizedEventId,
       items: [],
       page,
-      raw_path_exposed: false,
+      resolver_path_fields_exposed: false,
+      tool_payload_local_paths_preserved: true,
     };
   }
   const detail = buildToolEventDetailRecordFromMatrixEvent({
@@ -2806,7 +3296,8 @@ export function readRouteCMatrixToolEventDetail({
       matrix_event_id: normalizedEventId,
       items: [],
       page,
-      raw_path_exposed: false,
+      resolver_path_fields_exposed: false,
+      tool_payload_local_paths_preserved: true,
     };
   }
   return {
@@ -2870,7 +3361,69 @@ export function readRouteCMatrixToolEventDetail({
         content: selected.truncated ? selected.text : field.value,
       };
     }),
-    raw_path_exposed: false,
+    resolver_path_fields_exposed: false,
+    tool_payload_local_paths_preserved: true,
+  };
+}
+
+export function readRouteCMatrixToolRun({
+  binding,
+  eventId,
+  retainedEventIds = null,
+}) {
+  requireBinding(binding);
+  const normalizedEventId = normalizeNonEmptyString(eventId);
+  if (!normalizedEventId) {
+    return { status: "missing_identity", events: [] };
+  }
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const anchorEvent = readRouteCMatrixSQLiteEvent(db, {
+    roomId: binding.matrix_room_id,
+    eventId: normalizedEventId,
+  });
+  if (!anchorEvent) {
+    return { status: "unavailable", events: [] };
+  }
+
+  let events;
+  if (Array.isArray(retainedEventIds) && retainedEventIds.length > 0) {
+    const retainedIds = [...new Set(retainedEventIds)];
+    events = retainedIds.map((retainedEventId) => {
+      const event = readRouteCMatrixSQLiteEvent(db, {
+        roomId: binding.matrix_room_id,
+        eventId: retainedEventId,
+      });
+      if (!event) {
+        throw new Error(
+          `Route C retained tool run references missing Matrix event: ${retainedEventId}`
+        );
+      }
+      return event;
+    });
+    events.sort((left, right) => eventStreamSeq(left) - eventStreamSeq(right));
+    if (!events.some((event) => event.event_id === normalizedEventId)) {
+      throw new Error(
+        "Route C retained tool run does not include the anchor Matrix event"
+      );
+    }
+  } else {
+    if (!routeCToolSemanticTypeFromContent(anchorEvent.content)) {
+      return { status: "unavailable", events: [] };
+    }
+    events = readRouteCMatrixSQLiteContiguousSemanticEvents(db, {
+      roomId: binding.matrix_room_id,
+      eventId: normalizedEventId,
+      semanticTypes: ROUTEC_MATRIX_TOOL_RUN_SEMANTIC_TYPES,
+    });
+    if (!events) return { status: "unavailable", events: [] };
+  }
+
+  return {
+    status: "ok",
+    session_id: binding.host_session_id,
+    matrix_room_id: binding.matrix_room_id,
+    anchor_event_id: normalizedEventId,
+    events,
   };
 }
 
@@ -3023,25 +3576,30 @@ function buildSearchResult(match) {
 }
 
 function searchRoomEvents({ binding, body, requestedNextBatchToken }) {
-  const store = readStore();
+  const db = openRouteCMatrixAdapterSQLiteStore();
   const request = extractRoomEventsSearchRequest({
     body,
     requestedNextBatchToken,
   });
-  assertCheckpointWithinStore(request.nextBatchSeq, store, "next_batch");
-  const events = boundRoomEventsInStreamOrder(store, binding);
+  assertCheckpointWithinSQLite(db, request.nextBatchSeq, "next_batch");
   const roomFilterSet = request.roomFilter ? new Set(request.roomFilter) : null;
   const senderFilterSet = request.senderFilter
     ? new Set(request.senderFilter)
     : null;
-  const matches = events
-    .slice()
-    .reverse()
-    .filter(
-      (event) =>
-        request.nextBatchSeq === null ||
-        eventStreamSeq(event) < request.nextBatchSeq
-    )
+  const boundRoomIncluded = !roomFilterSet || roomFilterSet.has(binding.matrix_room_id);
+  const stats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: binding.matrix_room_id,
+  });
+  const sqliteSearch = boundRoomIncluded
+    ? searchRouteCMatrixSQLiteEvents(db, {
+        roomId: binding.matrix_room_id,
+        searchTermLower: request.searchTerm.toLowerCase(),
+        nextBatchSeq: request.nextBatchSeq,
+        senderFilter: request.senderFilter,
+        limit: request.limit + 1,
+      })
+    : { events: [], count: 0 };
+  const matches = sqliteSearch.events
     .map((event) =>
       searchEventMatches({
         event,
@@ -3054,7 +3612,7 @@ function searchRoomEvents({ binding, body, requestedNextBatchToken }) {
     .filter(Boolean);
   const selected = matches.slice(0, request.limit);
   const nextBatch =
-    matches.length > selected.length
+    selected.length > 0 && sqliteSearch.events.length > selected.length
       ? routeCCheckpointToken(eventStreamSeq(selected[selected.length - 1].event))
       : null;
   const matchedCategories = [
@@ -3067,8 +3625,8 @@ function searchRoomEvents({ binding, body, requestedNextBatchToken }) {
     order_by: request.orderBy,
     limit: request.limit,
     returned_event_count: selected.length,
-    total_match_count: matches.length,
-    total_bound_room_event_count: events.length,
+    total_match_count: sqliteSearch.count,
+    total_bound_room_event_count: stats.count,
     bound_matrix_room_id: binding.matrix_room_id,
     requested_room_filter: request.roomFilter,
     requested_room_filter_includes_bound_room: request.roomFilter
@@ -3091,7 +3649,7 @@ function searchRoomEvents({ binding, body, requestedNextBatchToken }) {
   return {
     search_categories: {
       room_events: {
-        count: matches.length,
+        count: sqliteSearch.count,
         highlights: [request.searchTerm],
         results: selected.map(buildSearchResult),
         state: {},
@@ -3156,6 +3714,69 @@ function routeCHostOwnerNeighborEvent(event) {
   };
 }
 
+function scanRouteCHostOwnerNeighborDirection({
+  events,
+  startIndex,
+  step,
+  maxScanEvents = ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+}) {
+  let scannedEventCount = 0;
+  let index = startIndex;
+  while (
+    index >= 0 &&
+    index < events.length &&
+    scannedEventCount < maxScanEvents
+  ) {
+    const event = events[index];
+    scannedEventCount += 1;
+    if (isRouteCHostOwnerTimelineMessageEvent(event)) {
+      return {
+        event,
+        scannedEventCount,
+        windowExhausted: false,
+      };
+    }
+    index += step;
+  }
+  const roomBoundaryReached =
+    index < 0 ||
+    (index >= events.length && events.length < maxScanEvents);
+  return {
+    event: null,
+    scannedEventCount,
+    windowExhausted: !roomBoundaryReached && scannedEventCount >= maxScanEvents,
+  };
+}
+
+function routeCHostOwnerNeighborProof({
+  totalEventCount,
+  previousScannedEventCount,
+  nextScannedEventCount,
+  previousWindowExhausted,
+  nextWindowExhausted,
+}) {
+  return {
+    schema_version: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION,
+    lookup_source: "routec_host_owned_matrix_storage_room_event_index",
+    lookup_strategy: "bounded_short_circuit_scan",
+    order_by: "routec_stream_seq",
+    actor_key: "human",
+    actor_kind: "human",
+    stable_actor_metadata_required: true,
+    display_name_used_for_ownership: false,
+    body_scan_used_for_ownership: false,
+    raw_event_payload_returned: false,
+    message_body_returned: false,
+    total_event_count: totalEventCount,
+    max_scan_events_per_direction:
+      ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+    previous_scanned_event_count: previousScannedEventCount,
+    next_scanned_event_count: nextScannedEventCount,
+    previous_window_exhausted: previousWindowExhausted,
+    next_window_exhausted: nextWindowExhausted,
+  };
+}
+
 export function readRouteCHostOwnerMessageNeighbors({
   binding,
   roomId,
@@ -3185,10 +3806,7 @@ export function readRouteCHostOwnerMessageNeighbors({
   const normalizedAnchorPosition = normalizeNonEmptyString(anchorPosition);
   const latestAnchorRequested =
     !normalizedAnchorEventId && normalizedAnchorPosition === "latest";
-  if (
-    normalizedAnchorPosition &&
-    normalizedAnchorPosition !== "latest"
-  ) {
+  if (normalizedAnchorPosition && normalizedAnchorPosition !== "latest") {
     return {
       status: "invalid_anchor",
       error: "anchor_position must be latest when supplied",
@@ -3205,64 +3823,31 @@ export function readRouteCHostOwnerMessageNeighbors({
     };
   }
 
-  const store = readStore();
-  requireBranchCopySourceRoom(store, binding);
-  const events = boundRoomEventsInStreamOrder(store, binding);
-  if (events.length > ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS) {
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (!room) {
     return {
-      status: "too_many_events_fail_closed",
-      error: "host owner neighbor lookup exceeded bounded room event limit",
-      event_count: events.length,
-      max_event_count: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+      status: "anchor_not_found",
+      error: "host owner neighbor room not found",
+      matrix_event_id: normalizedAnchorEventId,
       raw_event_payload_returned: false,
       message_body_returned: false,
     };
   }
-
-  const hostOwnerEvents = events.filter(isRouteCHostOwnerTimelineMessageEvent);
-  if (hostOwnerEvents.length === 0) {
-    return {
-      status: "ok",
-      session_id: binding.host_session_id,
-      matrix_room_id: binding.matrix_room_id,
-      anchor: latestAnchorRequested
-        ? {
-            anchor_position: "latest",
-            event_id: null,
-            routec_stream_seq: null,
-            host_owner_message: false,
-          }
-        : null,
-      previous: null,
-      next: null,
-      boundaries: {
-        no_host_owner_messages: true,
-        at_first_host_owner_message: true,
-        at_latest_host_owner_message: true,
-      },
-      proof: {
-        schema_version: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION,
-        lookup_source: "routec_host_owned_matrix_storage_room_event_index",
-        order_by: "routec_stream_seq",
-        actor_key: "human",
-        actor_kind: "human",
-        stable_actor_metadata_required: true,
-        display_name_used_for_ownership: false,
-        body_scan_used_for_ownership: false,
-        raw_event_payload_returned: false,
-        message_body_returned: false,
-      },
-    };
-  }
+  const stats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: binding.matrix_room_id,
+  });
 
   let anchorEvent = null;
   let anchorSeq = null;
+  let previousEvents = [];
+  let nextEvents = [];
   if (normalizedAnchorEventId) {
-    anchorEvent =
-      store.events_by_id[normalizedAnchorEventId] ||
-      events.find((event) => event.event_id === normalizedAnchorEventId) ||
-      null;
-    if (!anchorEvent || anchorEvent.room_id !== binding.matrix_room_id) {
+    anchorEvent = readRouteCMatrixSQLiteEvent(db, {
+      roomId: binding.matrix_room_id,
+      eventId: normalizedAnchorEventId,
+    });
+    if (!anchorEvent) {
       return {
         status: "anchor_not_found",
         error: "host owner neighbor anchor event not found in bound room",
@@ -3272,19 +3857,52 @@ export function readRouteCHostOwnerMessageNeighbors({
       };
     }
     anchorSeq = eventStreamSeq(anchorEvent);
+    previousEvents = readRouteCMatrixSQLiteTimelineEvents(db, {
+      roomId: binding.matrix_room_id,
+      beforeSeq: anchorSeq,
+      order: "desc",
+      limit: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+    });
+    nextEvents = readRouteCMatrixSQLiteTimelineEvents(db, {
+      roomId: binding.matrix_room_id,
+      afterSeq: anchorSeq,
+      order: "asc",
+      limit: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+    });
   } else {
-    anchorSeq =
-      events.length > 0 ? eventStreamSeq(events[events.length - 1]) + 1 : 1;
+    anchorSeq = stats.latest_stream_seq > 0 ? stats.latest_stream_seq + 1 : 1;
+    previousEvents = readRouteCMatrixSQLiteTimelineEvents(db, {
+      roomId: binding.matrix_room_id,
+      order: "desc",
+      limit: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_MAX_EVENTS,
+    });
+    nextEvents = [];
   }
 
-  const previous =
-    [...hostOwnerEvents]
-      .reverse()
-      .find((event) => eventStreamSeq(event) < anchorSeq) || null;
-  const next =
-    hostOwnerEvents.find((event) => eventStreamSeq(event) > anchorSeq) || null;
+  const previousScan = scanRouteCHostOwnerNeighborDirection({
+    events: previousEvents,
+    startIndex: 0,
+    step: 1,
+  });
+  const nextScan = scanRouteCHostOwnerNeighborDirection({
+    events: nextEvents,
+    startIndex: 0,
+    step: 1,
+  });
+  const previous = previousScan.event;
+  const next = nextScan.event;
   const anchorHostOwnerMessage =
     Boolean(anchorEvent) && isRouteCHostOwnerTimelineMessageEvent(anchorEvent);
+  const noHostOwnerMessages =
+    !anchorHostOwnerMessage &&
+    previous === null &&
+    next === null &&
+    !previousScan.windowExhausted &&
+    !nextScan.windowExhausted;
+  const atFirstHostOwnerMessage =
+    noHostOwnerMessages || (previous === null && !previousScan.windowExhausted);
+  const atLatestHostOwnerMessage =
+    noHostOwnerMessages || (next === null && !nextScan.windowExhausted);
 
   return {
     status: "ok",
@@ -3306,24 +3924,22 @@ export function readRouteCHostOwnerMessageNeighbors({
     previous: routeCHostOwnerNeighborEvent(previous),
     next: routeCHostOwnerNeighborEvent(next),
     boundaries: {
-      no_host_owner_messages: false,
-      at_first_host_owner_message: previous === null,
-      at_latest_host_owner_message: next === null,
+      no_host_owner_messages: noHostOwnerMessages,
+      at_first_host_owner_message: atFirstHostOwnerMessage,
+      at_latest_host_owner_message: atLatestHostOwnerMessage,
+      previous_window_exhausted: previousScan.windowExhausted,
+      next_window_exhausted: nextScan.windowExhausted,
+      previous_boundary_proven:
+        previous === null && !previousScan.windowExhausted,
+      next_boundary_proven: next === null && !nextScan.windowExhausted,
     },
-    proof: {
-      schema_version: ROUTEC_HOST_OWNER_MESSAGE_NEIGHBOR_NAV_SCHEMA_VERSION,
-      lookup_source: "routec_host_owned_matrix_storage_room_event_index",
-      order_by: "routec_stream_seq",
-      searched_event_count: events.length,
-      host_owner_message_count: hostOwnerEvents.length,
-      actor_key: "human",
-      actor_kind: "human",
-      stable_actor_metadata_required: true,
-      display_name_used_for_ownership: false,
-      body_scan_used_for_ownership: false,
-      raw_event_payload_returned: false,
-      message_body_returned: false,
-    },
+    proof: routeCHostOwnerNeighborProof({
+      totalEventCount: stats.count,
+      previousScannedEventCount: previousScan.scannedEventCount,
+      nextScannedEventCount: nextScan.scannedEventCount,
+      previousWindowExhausted: previousScan.windowExhausted,
+      nextWindowExhausted: nextScan.windowExhausted,
+    }),
   };
 }
 
@@ -3432,6 +4048,65 @@ function selectMessagesChunkWithTransferBudget({
     countWindowEventCount: countWindow.length,
     countLimited: candidates.length > countWindow.length,
     transferBudget: budgeted,
+  };
+}
+
+function applyMessagesTransferBudgetToWindow({
+  chunk,
+  candidateEventCount,
+  startSeq,
+  toSeq,
+  direction,
+  budgetBytes = P135_MATRIX_CLIENT_TRANSFER_BUDGET_BYTES,
+}) {
+  const clientEvents = chunk.map(eventForClientMatrixRead);
+  const selectedRaw = [];
+  const selectedClient = [];
+  const selectedByteCounts = [];
+  let projectedClientTransferBytes = 0;
+  let budgetLimited = false;
+  for (let index = 0; index < clientEvents.length; index += 1) {
+    const clientEvent = clientEvents[index];
+    const byteCount = safeJsonByteLength(clientEvent) ?? 0;
+    const wouldExceed =
+      selectedClient.length > 0 &&
+      projectedClientTransferBytes + byteCount > budgetBytes;
+    if (wouldExceed) {
+      budgetLimited = true;
+      break;
+    }
+    selectedRaw.push(chunk[index]);
+    selectedClient.push(clientEvent);
+    selectedByteCounts.push(byteCount);
+    projectedClientTransferBytes += byteCount;
+  }
+  const lastSelected = selectedRaw[selectedRaw.length - 1];
+  const endSeq =
+    selectedRaw.length > 0
+      ? direction === "b"
+        ? eventStreamSeq(lastSelected)
+        : eventStreamSeq(lastSelected) + 1
+      : emptyMessagesEndSeq({ direction, startSeq, toSeq });
+  return {
+    chunk: selectedRaw,
+    clientChunk: selectedClient,
+    endSeq,
+    candidateEventCount,
+    countWindowEventCount: chunk.length,
+    countLimited: candidateEventCount > chunk.length,
+    transferBudget: {
+      rawEvents: selectedRaw,
+      clientEvents: selectedClient,
+      budgetBytes,
+      budgetLimited,
+      singleEventExceedsBudget:
+        selectedByteCounts.length === 1 && selectedByteCounts[0] > budgetBytes,
+      projectedClientTransferBytes,
+      largestProjectedClientEventBytes:
+        selectedByteCounts.length > 0 ? Math.max(...selectedByteCounts) : 0,
+      omittedForTransferBudgetEventCount: chunk.length - selectedRaw.length,
+      preBudgetReturnedEventCount: chunk.length,
+    },
   };
 }
 
@@ -3651,20 +4326,84 @@ function buildTimelineForSync({ events, sinceSeq, limit }) {
   };
 }
 
+function buildTimelineForSyncFromSQLite({
+  events,
+  sinceSeq,
+  limit,
+  totalBoundRoomEventCount,
+  totalIncrementalEventCount,
+}) {
+  if (sinceSeq !== null) {
+    const oldestReturnedSeq = eventSeqOrNull(events[0]);
+    const newestReturnedSeq = eventSeqOrNull(events[events.length - 1]);
+    return {
+      events,
+      limited: totalIncrementalEventCount > events.length,
+      prevBatchSeq: oldestReturnedSeq ?? sinceSeq,
+      syncMode:
+        totalIncrementalEventCount > events.length
+          ? "bounded_stale_incremental_catchup"
+          : "incremental_since_checkpoint",
+      budgetMode:
+        totalIncrementalEventCount > events.length
+          ? "stale_incremental_timeline_limit"
+          : "incremental_within_timeline_limit",
+      totalIncrementalEventCount,
+      omittedEventCount: Math.max(0, totalIncrementalEventCount - events.length),
+      omittedStartSeq:
+        totalIncrementalEventCount > events.length ? sinceSeq : null,
+      omittedEndSeq:
+        totalIncrementalEventCount > events.length && oldestReturnedSeq !== null
+          ? oldestReturnedSeq
+          : null,
+      oldestReturnedSeq,
+      newestReturnedSeq,
+    };
+  }
+
+  const oldestReturnedSeq = eventSeqOrNull(events[0]);
+  const newestReturnedSeq = eventSeqOrNull(events[events.length - 1]);
+  return {
+    events,
+    limited: totalBoundRoomEventCount > events.length,
+    prevBatchSeq: oldestReturnedSeq ?? 1,
+    syncMode: "bounded_initial_tail",
+    budgetMode:
+      totalBoundRoomEventCount > events.length
+        ? "initial_timeline_limit"
+        : "initial_within_timeline_limit",
+    totalIncrementalEventCount: null,
+    omittedEventCount: Math.max(0, totalBoundRoomEventCount - events.length),
+    omittedStartSeq: totalBoundRoomEventCount > events.length ? 1 : null,
+    omittedEndSeq:
+      totalBoundRoomEventCount > events.length && oldestReturnedSeq !== null
+        ? oldestReturnedSeq
+        : null,
+    oldestReturnedSeq,
+    newestReturnedSeq,
+  };
+}
+
 function buildSyncBody({
   binding,
   sinceSeq,
   requestedSinceToken,
   timelineLimit,
 }) {
-  const store = readStore();
-  const room = readRoomInStore(store, binding);
-  assertCheckpointWithinStore(sinceSeq, store, "since");
-  const events = boundRoomEventsInStreamOrder(store, binding);
-  const initialTimeline = buildTimelineForSync({
-    events,
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRoomInSQLite(db, binding);
+  assertCheckpointWithinSQLite(db, sinceSeq, "since");
+  const sqliteTimeline = readRouteCMatrixSQLiteSyncTimeline(db, {
+    roomId: binding.matrix_room_id,
     sinceSeq,
     limit: timelineLimit,
+  });
+  const initialTimeline = buildTimelineForSyncFromSQLite({
+    events: sqliteTimeline.events,
+    sinceSeq,
+    limit: timelineLimit,
+    totalBoundRoomEventCount: sqliteTimeline.totalBoundRoomEventCount,
+    totalIncrementalEventCount: sqliteTimeline.totalIncrementalEventCount,
   });
   const initialClientTimelineEvents = initialTimeline.events.map(eventForClient);
   const {
@@ -3677,19 +4416,20 @@ function buildSyncBody({
   });
   const memberships = roomMembershipEvents(binding, room);
   const stateEvents = roomStateEvents(binding, room);
-  const nextBatch = routeCCheckpointToken(store.next_stream_seq);
+  const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
+  const nextBatch = routeCCheckpointToken(nextStreamSeq);
   const prevBatch = routeCCheckpointToken(timeline.prevBatchSeq);
   routeCMatrixSyncLastServedNextSeqByKey.set(
     routeCMatrixSyncWaiterKey(binding),
-    store.next_stream_seq
+    nextStreamSeq
   );
   const syncBudgetProof = clientTransferBudgetProof({
     timeline,
     clientEvents: clientTimelineEvents,
     sinceSeq,
     timelineLimit,
-    totalBoundRoomEventCount: events.length,
-    nextBatchSeq: store.next_stream_seq,
+    totalBoundRoomEventCount: sqliteTimeline.totalBoundRoomEventCount,
+    nextBatchSeq: nextStreamSeq,
     transferBudget,
   });
   return {
@@ -3745,13 +4485,13 @@ function buildSyncBody({
       requested_since: requestedSinceToken,
       since_seq: sinceSeq,
       next_batch: nextBatch,
-      next_batch_seq: store.next_stream_seq,
+      next_batch_seq: nextStreamSeq,
       prev_batch: prevBatch,
       prev_batch_seq: timeline.prevBatchSeq,
       sync_mode: timeline.syncMode,
       timeline_limit: timelineLimit,
       returned_event_count: timeline.events.length,
-      total_bound_room_event_count: events.length,
+      total_bound_room_event_count: sqliteTimeline.totalBoundRoomEventCount,
       sync_budget_mode: timeline.budgetMode,
       total_incremental_event_count: timeline.totalIncrementalEventCount,
       omitted_event_count: timeline.omittedEventCount,
@@ -3776,9 +4516,12 @@ function buildSyncBody({
 }
 
 function readEvent({ binding, eventId }) {
-  const store = readStore();
-  const event = store.events_by_id[eventId];
-  if (!event || event.room_id !== binding.matrix_room_id) {
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const event = readRouteCMatrixSQLiteEvent(db, {
+    roomId: binding.matrix_room_id,
+    eventId,
+  });
+  if (!event) {
     return null;
   }
   return eventForClient(event);
@@ -3794,26 +4537,35 @@ export function readRouteCMatrixRoomMessages({
   requestedToToken,
   requestAborted = false,
 }) {
-  const store = readStore();
-  requireBranchCopySourceRoom(store, binding);
-  assertCheckpointWithinStore(fromSeq, store, "from");
-  assertCheckpointWithinStore(toSeq, store, "to");
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (!room) {
+    throw new Error("Route C Matrix messages source room storage not found");
+  }
+  assertCheckpointWithinSQLite(db, fromSeq, "from");
+  assertCheckpointWithinSQLite(db, toSeq, "to");
   const normalizedLimit = normalizeTimelineLimit(limit, DEFAULT_MESSAGES_LIMIT);
-  const events = boundRoomEventsInStreamOrder(store, binding);
-  const startSeq = fromSeq ?? (direction === "f" ? 1 : store.next_stream_seq);
-  const selected = selectMessagesChunkWithTransferBudget({
-    events,
+  const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
+  const startSeq = fromSeq ?? (direction === "f" ? 1 : nextStreamSeq);
+  const window = readRouteCMatrixSQLiteMessagesWindow(db, {
+    roomId: binding.matrix_room_id,
+    direction,
+    startSeq,
+    toSeq,
+    limit: normalizedLimit,
+  });
+  const selected = applyMessagesTransferBudgetToWindow({
+    chunk: window.chunk,
+    candidateEventCount: window.candidateEventCount,
     startSeq,
     toSeq,
     direction,
-    limit: normalizedLimit,
   });
-  const latestBoundRoomStreamSeq = events.reduce(
-    (latest, event) => Math.max(latest, eventStreamSeq(event)),
-    0
-  );
-  const earliestBoundRoomStreamSeq =
-    events.length > 0 ? eventStreamSeq(events[0]) : 0;
+  const stats = readRouteCMatrixSQLiteTimelineStats(db, {
+    roomId: binding.matrix_room_id,
+  });
+  const latestBoundRoomStreamSeq = stats.latest_stream_seq;
+  const earliestBoundRoomStreamSeq = stats.earliest_stream_seq;
   const start = routeCCheckpointToken(startSeq);
   const end = routeCCheckpointToken(selected.endSeq);
   const diagnosticsEnabled = isRouteCChatLivenessDiagnosticsEnabled();
@@ -3831,17 +4583,17 @@ export function readRouteCMatrixRoomMessages({
       end,
       start_seq: startSeq,
       end_seq: selected.endSeq,
-      current_next_batch: routeCCheckpointToken(store.next_stream_seq),
-      current_next_batch_seq: store.next_stream_seq,
+      current_next_batch: routeCCheckpointToken(nextStreamSeq),
+      current_next_batch_seq: nextStreamSeq,
       limit: normalizedLimit,
       returned_event_count: selected.chunk.length,
-      total_bound_room_event_count: events.length,
+      total_bound_room_event_count: stats.count,
       earliest_bound_room_stream_seq: earliestBoundRoomStreamSeq,
       latest_bound_room_stream_seq: latestBoundRoomStreamSeq,
       bound_matrix_room_id: binding.matrix_room_id,
       deterministic_event_ids_preserved: true,
       host_session_room_binding_preserved: true,
-      host_owned_matrix_json_timeline_read: true,
+      host_owned_matrix_sqlite_timeline_read: true,
       host_db_transcript_product_truth: false,
       product_local_transcript_replay_shortcut_used: false,
       foundation_pass_claimed: false,
@@ -3895,20 +4647,24 @@ export function readRouteCMatrixRoomMessages({
 }
 
 function readRouteCMatrixRoomContext({ binding, eventId, limit }) {
-  const store = readStore();
-  requireBranchCopySourceRoom(store, binding);
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const room = readRouteCMatrixSQLiteRoom(db, { binding });
+  if (!room) {
+    throw new Error("Route C Matrix context source room storage not found");
+  }
   const normalizedLimit = normalizeContextLimit(limit);
-  const events = boundRoomEventsInStreamOrder(store, binding);
-  const targetIndex = events.findIndex((event) => event.event_id === eventId);
-  if (targetIndex === -1) return null;
-
   const beforeLimit = Math.floor(normalizedLimit / 2);
   const afterLimit = normalizedLimit - beforeLimit;
-  const targetEvent = events[targetIndex];
-  const beforeRaw = events
-    .slice(Math.max(0, targetIndex - beforeLimit), targetIndex)
-    .reverse();
-  const afterRaw = events.slice(targetIndex + 1, targetIndex + 1 + afterLimit);
+  const window = readRouteCMatrixSQLiteContextWindow(db, {
+    roomId: binding.matrix_room_id,
+    eventId,
+    beforeLimit,
+    afterLimit,
+  });
+  if (!window) return null;
+  const targetEvent = window.target;
+  const beforeRaw = window.before;
+  const afterRaw = window.after;
   const targetSeq = eventStreamSeq(targetEvent);
   const oldestBefore = beforeRaw[beforeRaw.length - 1];
   const newestAfter = afterRaw[afterRaw.length - 1];
@@ -3920,7 +4676,7 @@ function readRouteCMatrixRoomContext({ binding, eventId, limit }) {
   return {
     start,
     end,
-    state: roomStateEvents(binding, readRoomInStore(store, binding)),
+    state: roomStateEvents(binding, room),
     events_before: beforeRaw.map(eventForClientMatrixRead),
     events_after: afterRaw.map(eventForClientMatrixRead),
     event: eventForClientMatrixRead(targetEvent),
@@ -3940,11 +4696,11 @@ function readRouteCMatrixRoomContext({ binding, eventId, limit }) {
       target_included_exactly_once: true,
       before_order: "newest_to_oldest",
       after_order: "oldest_to_newest",
-      total_bound_room_event_count: events.length,
+      total_bound_room_event_count: window.totalBoundRoomEventCount,
       bound_matrix_room_id: binding.matrix_room_id,
       deterministic_event_ids_preserved: true,
       host_session_room_binding_preserved: true,
-      host_owned_matrix_json_timeline_read: true,
+      host_owned_matrix_sqlite_timeline_read: true,
       product_local_transcript_replay_shortcut_used: false,
       host_db_transcript_product_truth: false,
       local_storage_adapter_product_truth: false,

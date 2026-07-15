@@ -78,6 +78,7 @@ import {
   getOysterunHostSessionLoopPath,
   getOysterunHostSessionsPath,
   getOysterunHostSessionRouteSearch,
+  createOysterunHostBrowserHandoffLaunch,
   navigateOysterunHostSessionsPage,
   normalizeOysterunRouteCSiteBrowserTarget,
   restartOysterunHostSession,
@@ -184,8 +185,32 @@ const RoomMenu = forwardRef<HTMLDivElement, RoomMenuProps>(
       window.location.assign(routeCLoopPath);
       requestClose();
     };
-    const handleOpenRouteCWebsite = () => {
+    const handleOpenRouteCWebsite: MouseEventHandler<HTMLAnchorElement> = (event) => {
       if (!routeCWebsiteOpenPath) return;
+      if (!routeCWebsiteUsesInternalBrowser && routeCWebsiteTarget) {
+        const popup = window.open('about:blank', '_blank');
+        if (!popup) {
+          requestClose();
+          return;
+        }
+        event.preventDefault();
+        try {
+          popup.opener = null;
+        } catch {}
+        void createOysterunHostBrowserHandoffLaunch(routeCWebsiteTarget.entryPath)
+          .then((handoff) => {
+            try {
+              popup.location.replace(new URL(handoff.launchUrl, window.location.origin).toString());
+            } catch {}
+          })
+          .catch(() => {
+            try {
+              popup.location.replace(
+                new URL(routeCWebsiteOpenPath, window.location.origin).toString()
+              );
+            } catch {}
+          });
+      }
       requestClose();
     };
     const handleRestartRouteCSession = async () => {
@@ -721,6 +746,15 @@ export function RoomViewHeader({ callView }: { callView?: boolean }) {
 
   const handleOpenMenu: MouseEventHandler<HTMLButtonElement> = (evt) => {
     setMenuAnchor(evt.currentTarget.getBoundingClientRect());
+    if (!routeCChatShell) return;
+    getOysterunRouteCHostCurrentWebsiteTarget()
+      .then((target) => {
+        setRouteCWebsiteTarget(target);
+      })
+      .catch((err) => {
+        console.warn('[oysterun-routec] failed to refresh website header target', err);
+        setRouteCWebsiteTarget(undefined);
+      });
   };
 
   const handleOpenPinMenu: MouseEventHandler<HTMLButtonElement> = (evt) => {

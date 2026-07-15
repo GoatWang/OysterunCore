@@ -248,6 +248,7 @@ export function resolveRouteCMatrixActorForSemantic({
       candidates.push("assistant");
       break;
     case "tool.call":
+    case "tool.update":
     case "tool.output":
     case "tool.result":
     case "tool.failure":

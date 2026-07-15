@@ -3,17 +3,14 @@ import { Box, Button, Text, config } from 'folds';
 
 import {
   classifyOysterunSemanticRowReadout,
-  getOysterunLargeToolOutput,
   getOysterunToolEventDetail,
   recordOysterunProof,
   recordOysterunProviderControlProof,
   recordOysterunSemanticDiagnostic,
   respondOysterunProviderControl,
-  type OysterunLargeToolOutputItem,
-  type OysterunLargeToolOutputResponse,
   type OysterunProviderControlAction,
-  type OysterunToolEventDetailItem,
   type OysterunToolEventDetailResponse,
+  type OysterunToolLifecycleInvocation,
 } from './OysterunHostClient';
 
 export const OYSTERUN_SEMANTIC_NAMESPACE = 'org.oysterun.semantic.v1';
@@ -239,7 +236,13 @@ export type OysterunToolCompression = {
   retainedRunDetails?: OysterunToolCompressionDetail[];
 };
 
-const TOOL_SEMANTIC_TYPES = new Set(['tool.call', 'tool.output', 'tool.result', 'tool.failure']);
+const TOOL_SEMANTIC_TYPES = new Set([
+  'tool.call',
+  'tool.update',
+  'tool.output',
+  'tool.result',
+  'tool.failure',
+]);
 const TERMINAL_SEMANTIC_TYPES = new Set(['terminal.command.started', 'terminal.command.result']);
 const TOOL_PREVIEW_ROW_LIMIT = 5;
 const TOOL_CODE_LINE_HEIGHT = 1.45;
@@ -510,6 +513,7 @@ function clipToolPayloadRows(value: string): {
 
 function toolTitleForSemanticType(semanticType: string, toolIsError: boolean | null | undefined) {
   if (semanticType === 'tool.call') return 'Tool Call';
+  if (semanticType === 'tool.update') return 'Tool Update';
   if (semanticType === 'tool.failure' || toolIsError === true) return 'Tool Error';
   if (semanticType === 'tool.output') return 'Tool Output';
   return 'Tool Result';
@@ -584,60 +588,18 @@ function OysterunToolDetailView({
     retainedMatrixDetails,
   });
   const retainedIdentity = lazyDetailFetchIdentity.detail;
-  const [largeToolPage, setLargeToolPage] = useState(1);
-  const [largeToolOutput, setLargeToolOutput] = useState<OysterunLargeToolOutputResponse | null>(
-    null
-  );
-  const [largeToolError, setLargeToolError] = useState('');
   const [toolEventDetailPage, setToolEventDetailPage] = useState(1);
+  const [knownToolEventDetailPageCount, setKnownToolEventDetailPageCount] = useState(1);
   const [toolEventDetail, setToolEventDetail] = useState<OysterunToolEventDetailResponse | null>(
     null
   );
   const [toolEventDetailLoading, setToolEventDetailLoading] = useState(false);
   const [toolEventDetailError, setToolEventDetailError] = useState('');
-  const canLoadLargeToolOutput = Boolean(
-    retainedIdentity?.hostSessionId && retainedIdentity.matrixRoomId
-  );
   const canLoadToolEventDetail = Boolean(
-    retainedIdentity?.detailAvailable &&
-      retainedIdentity.hostSessionId &&
+    retainedIdentity?.hostSessionId &&
       retainedIdentity.matrixRoomId &&
       retainedIdentity.eventId
   );
-
-  useEffect(() => {
-    let canceled = false;
-    if (canLoadLargeToolOutput && retainedIdentity) {
-      setLargeToolError('');
-      getOysterunLargeToolOutput({
-        sessionId: retainedIdentity.hostSessionId ?? '',
-        matrixRoomId: retainedIdentity.matrixRoomId ?? '',
-        retainedEventId: retainedIdentity.eventId,
-        providerTurnId: compression?.providerTurnId ?? retainedIdentity.providerTurnId,
-        targetTurnId: retainedIdentity.targetTurnId,
-        groupingKey: compression?.groupingKey,
-        page: largeToolPage,
-      })
-        .then((response) => {
-          if (canceled) return;
-          setLargeToolOutput(response);
-        })
-        .catch((err: unknown) => {
-          if (canceled) return;
-          setLargeToolOutput(null);
-          setLargeToolError(err instanceof Error ? err.message : String(err));
-        });
-    }
-    return () => {
-      canceled = true;
-    };
-  }, [
-    canLoadLargeToolOutput,
-    retainedIdentity,
-    compression?.providerTurnId,
-    compression?.groupingKey,
-    largeToolPage,
-  ]);
 
   useEffect(() => {
     let canceled = false;
@@ -653,16 +615,17 @@ function OysterunToolDetailView({
         .then((response) => {
           if (canceled) return;
           setToolEventDetail(response);
+          setKnownToolEventDetailPageCount(response.page_count ?? 1);
           setToolEventDetailLoading(false);
         })
         .catch((err: unknown) => {
           if (canceled) return;
-          setToolEventDetail(null);
           setToolEventDetailError(err instanceof Error ? err.message : String(err));
           setToolEventDetailLoading(false);
         });
     } else {
       setToolEventDetail(null);
+      setKnownToolEventDetailPageCount(1);
       setToolEventDetailError('');
       setToolEventDetailLoading(false);
     }
@@ -671,88 +634,48 @@ function OysterunToolDetailView({
     };
   }, [canLoadToolEventDetail, retainedIdentity, toolEventDetailPage]);
 
-  const continuationItems: OysterunLargeToolOutputItem[] =
-    largeToolPage > 1 ? largeToolOutput?.items ?? [] : [];
-  const isP82ContinuationPage = largeToolPage > 1;
-  const pageCount = largeToolOutput?.page_count ?? 1;
-  const hasContinuation = largeToolOutput?.has_continuation === true;
-  const showContinuationControls = hasContinuation || largeToolPage > 1;
-  const toolEventDetailItems: OysterunToolEventDetailItem[] = toolEventDetail?.items ?? [];
-  const toolEventDetailPageCount = toolEventDetail?.page_count ?? 1;
+  const detailMatchesRequestedPage = toolEventDetail?.page === toolEventDetailPage;
+  const invocations: OysterunToolLifecycleInvocation[] =
+    detailMatchesRequestedPage && !toolEventDetailError ? toolEventDetail?.invocations ?? [] : [];
+  const toolEventDetailPageCount = knownToolEventDetailPageCount;
   const showToolEventDetailControls =
-    !isP82ContinuationPage &&
     canLoadToolEventDetail &&
     (toolEventDetailPageCount > 1 || toolEventDetailPage > 1);
-  const p131DetailRows: OysterunToolCompressionDetail[] =
-    canLoadToolEventDetail && toolEventDetailItems.length > 0
-      ? toolEventDetailItems.map((item) => ({
-          semanticType: item.semantic_type,
-          hostSessionId: retainedIdentity?.hostSessionId,
-          matrixRoomId: retainedIdentity?.matrixRoomId,
-          targetTurnId: toolEventDetail?.target_turn_id ?? retainedIdentity?.targetTurnId,
-          providerTurnId: toolEventDetail?.provider_turn_id ?? retainedIdentity?.providerTurnId,
-          providerTurnIdKind: retainedIdentity?.providerTurnIdKind,
-          toolName: item.tool_name ?? toolEventDetail?.tool_name ?? undefined,
-          toolCallId: item.tool_call_id ?? toolEventDetail?.tool_call_id ?? undefined,
-          toolIsError: item.tool_is_error ?? toolEventDetail?.tool_is_error ?? null,
-          payload: item.content,
-          fallbackBody: item.field,
-          eventId: toolEventDetail?.matrix_event_id ?? retainedIdentity?.eventId,
-          detailAvailable: true,
-          detailStorageKind: toolEventDetail?.detail_storage_kind ?? undefined,
-        }))
-      : [];
   const toolEventDetailFallbackReason =
-    isP82ContinuationPage
-      ? 'p82_jsonl_continuation_selected'
-      : p131DetailRows.length > 0
-      ? 'endpoint_rows_loaded'
+    invocations.length > 0
+      ? 'logical_invocations_loaded'
       : canLoadToolEventDetail && toolEventDetailLoading
       ? 'waiting_for_lazy_endpoint'
       : canLoadToolEventDetail && toolEventDetailError
       ? 'lazy_endpoint_error_without_retained_summary_fallback'
-      : canLoadToolEventDetail && toolEventDetail && toolEventDetailItems.length === 0
+      : canLoadToolEventDetail && toolEventDetail && invocations.length === 0
       ? 'lazy_endpoint_empty_without_retained_summary_fallback'
       : canLoadToolEventDetail
       ? 'lazy_endpoint_pending_without_retained_summary_fallback'
       : 'no_detail_available_fetch_identity';
   const toolEventDetailFallbackAllowed = !canLoadToolEventDetail;
-  const toolEventDetailDisplaySource = isP82ContinuationPage
-    ? 'p82_jsonl_continuation_endpoint'
-    : p131DetailRows.length > 0
-    ? 'p131_tool_event_detail_endpoint'
+  const toolEventDetailDisplaySource = invocations.length > 0
+    ? 'p011_unified_tool_lifecycle_detail_endpoint'
     : toolEventDetailFallbackAllowed
     ? 'retained_matrix_without_lazy_detail'
     : toolEventDetailLoading
     ? 'p131_tool_event_detail_loading'
     : toolEventDetailError
     ? 'p131_tool_event_detail_error'
-    : toolEventDetail && toolEventDetailItems.length === 0
+    : toolEventDetail && invocations.length === 0
     ? 'p131_tool_event_detail_empty'
     : 'p131_tool_event_detail_pending';
-  const p153FlatPageEntrySource = isP82ContinuationPage
-    ? 'p82_jsonl_continuation_endpoint_response_order'
-    : 'retained_matrix_flat_tool_page';
+  const p153FlatPageEntrySource =
+    invocations.length > 0
+      ? 'p011_logical_invocation_page'
+      : 'retained_matrix_flat_tool_page';
   const selectedDetailLimitBytes =
     toolEventDetail?.selected_detail_limit_bytes ?? OYSTERUN_ROUTE_C_SELECTED_DETAIL_TOP_LIMIT_BYTES;
   const selectedDetailTruncated = toolEventDetail?.selected_detail_truncated === true;
   const debugToolDetailSourceUiEnabled =
-    toolEventDetail?.debug_tool_detail_source_ui_enabled === true ||
-    largeToolOutput?.debug_tool_detail_source_ui_enabled === true;
-  const displayRows: OysterunToolCompressionDetail[] = isP82ContinuationPage
-    ? continuationItems.map((item) => ({
-        semanticType: item.semantic_type,
-        hostSessionId: retainedIdentity?.hostSessionId,
-        matrixRoomId: retainedIdentity?.matrixRoomId,
-        targetTurnId: item.target_turn_id ?? retainedIdentity?.targetTurnId,
-        providerTurnId: item.provider_turn_id ?? retainedIdentity?.providerTurnId,
-        providerTurnIdKind: item.provider_turn_id_kind ?? retainedIdentity?.providerTurnIdKind,
-        toolName: item.tool_name ?? undefined,
-        toolCallId: item.tool_call_id ?? undefined,
-        toolIsError: item.tool_is_error ?? null,
-        payload: item.payload ?? item.body,
-        fallbackBody: item.body ?? item.semantic_type,
-      } as OysterunToolCompressionDetail))
+    toolEventDetail?.debug_tool_detail_source_ui_enabled === true;
+  const displayRows: OysterunToolCompressionDetail[] = canLoadToolEventDetail
+    ? []
     : retainedMatrixPageDetails;
   return (
     <div
@@ -789,13 +712,17 @@ function OysterunToolDetailView({
       data-oysterun-tool-output-batch-size={compression?.batchSize}
       data-oysterun-tool-output-batch-start-index={compression?.batchStartIndex}
       data-oysterun-tool-output-batch-end-index={compression?.batchEndIndex}
-      data-oysterun-large-tool-continuation={String(hasContinuation)}
-      data-oysterun-large-tool-jsonl-loaded={String(largeToolPage > 1)}
-      data-oysterun-large-tool-current-page={String(largeToolPage)}
-      data-oysterun-large-tool-page-count={String(pageCount)}
-      data-oysterun-large-tool-count-label={largeToolOutput?.tool_event_count_label ?? '10'}
-      data-oysterun-large-tool-matrix-large-ref="false"
-      data-oysterun-large-tool-raw-path-exposed="false"
+      data-oysterun-p011-logical-detail-page={String(toolEventDetailPage)}
+      data-oysterun-p011-logical-detail-page-count={String(toolEventDetailPageCount)}
+      data-oysterun-p011-logical-invocation-count={String(
+        toolEventDetail?.logical_invocation_count ?? invocations.length
+      )}
+      data-oysterun-p011-physical-event-count={String(
+        toolEventDetail?.physical_event_count ?? retainedMatrixDetails.length
+      )}
+      data-oysterun-p011-local-tool-paths-preserved={String(
+        toolEventDetail?.tool_payload_local_paths_preserved === true
+      )}
       data-oysterun-p131-tool-detail-available={String(canLoadToolEventDetail)}
       data-oysterun-p131-tool-detail-loading={String(toolEventDetailLoading)}
       data-oysterun-p131-tool-detail-page={String(toolEventDetailPage)}
@@ -804,7 +731,7 @@ function OysterunToolDetailView({
       data-oysterun-p131-tool-detail-fetch-semantic-type={retainedIdentity?.semanticType}
       data-oysterun-p131-tool-detail-fetch-identity-source={lazyDetailFetchIdentity.source}
       data-oysterun-p131-tool-detail-fetch-storage-kind={retainedIdentity?.detailStorageKind}
-      data-oysterun-p131-tool-detail-fetched-row-count={String(p131DetailRows.length)}
+      data-oysterun-p131-tool-detail-fetched-row-count={String(invocations.length)}
       data-oysterun-p131-tool-detail-retained-fallback-row-count={String(retainedMatrixDetails.length)}
       data-oysterun-p131-tool-detail-fallback-allowed={String(toolEventDetailFallbackAllowed)}
       data-oysterun-p131-tool-detail-fallback-reason={toolEventDetailFallbackReason}
@@ -827,9 +754,11 @@ function OysterunToolDetailView({
               {detailTitle}
             </Text>
             <Text as="span" size="T200" priority="300">
-              {largeToolPage <= 1
-                ? `${displayRows.length} tool messages`
-                : `${continuationItems.length} continuation messages`}
+              {toolEventDetail
+                ? `${toolEventDetail.logical_invocation_count ?? invocations.length} tool invocations / ${
+                    toolEventDetail.physical_event_count ?? displayRows.length
+                  } events`
+                : `${displayRows.length} tool messages`}
             </Text>
           </Box>
           <Button type="button" size="300" variant="Secondary" radii="300" onClick={onClose}>
@@ -838,49 +767,6 @@ function OysterunToolDetailView({
             </Text>
           </Button>
         </Box>
-        {showContinuationControls && (
-          <Box alignItems="Center" gap="200" wrap="Wrap">
-            <Button
-              type="button"
-              size="300"
-              variant="Secondary"
-              radii="300"
-              disabled={largeToolPage <= 1}
-              onClick={() => setLargeToolPage((page) => Math.max(1, page - 1))}
-              data-oysterun-large-tool-page-prev="explicit-detail-navigation"
-            >
-              <Text as="span" size="T300">
-                Previous
-              </Text>
-            </Button>
-            <Text as="span" size="T200" priority="300">
-              {`Page ${largeToolPage} of ${pageCount}`}
-            </Text>
-            <Button
-              type="button"
-              size="300"
-              variant="Secondary"
-              radii="300"
-              disabled={!hasContinuation || largeToolPage >= pageCount}
-              onClick={() => setLargeToolPage((page) => page + 1)}
-              data-oysterun-large-tool-page-next="explicit-jsonl-navigation"
-            >
-              <Text as="span" size="T300">
-                Next
-              </Text>
-            </Button>
-            {largeToolOutput?.total_tool_event_count && (
-              <Text as="span" size="T200" priority="300">
-                {`${largeToolOutput.total_tool_event_count} total`}
-              </Text>
-            )}
-          </Box>
-        )}
-        {largeToolError && (
-          <Text as="span" size="T200" priority="300">
-            {largeToolError}
-          </Text>
-        )}
         {showToolEventDetailControls && (
           <Box alignItems="Center" gap="200" wrap="Wrap">
             <Button
@@ -893,11 +779,11 @@ function OysterunToolDetailView({
               data-oysterun-p131-tool-detail-page-prev="lazy-detail-navigation"
             >
               <Text as="span" size="T300">
-                Previous detail
+                Previous
               </Text>
             </Button>
             <Text as="span" size="T200" priority="300">
-              {`Detail page ${toolEventDetailPage} of ${toolEventDetailPageCount}`}
+              {`Page ${toolEventDetailPage} of ${toolEventDetailPageCount}`}
             </Text>
             <Button
               type="button"
@@ -909,7 +795,7 @@ function OysterunToolDetailView({
               data-oysterun-p131-tool-detail-page-next="lazy-detail-navigation"
             >
               <Text as="span" size="T300">
-                Next detail
+                Next
               </Text>
             </Button>
           </Box>
@@ -925,7 +811,68 @@ function OysterunToolDetailView({
           </Text>
         )}
         <Box direction="Column" gap="300">
-          {displayRows.map((detail, index) => {
+          {invocations.length > 0
+            ? invocations.map((invocation, index) => {
+                const sections = [
+                  { label: 'Call', value: invocation.call },
+                  {
+                    label: `Updates (${invocation.updates.length})`,
+                    value: invocation.updates.length > 0 ? invocation.updates : null,
+                  },
+                  { label: 'Output', value: invocation.output },
+                  { label: 'Result', value: invocation.result },
+                ].filter((section) => section.value !== null && section.value !== undefined);
+                return (
+                  <article
+                    key={`${invocation.provider_turn_id ?? 'turn'}-${invocation.tool_call_id}`}
+                    style={toolDetailEntryStyle}
+                    data-testid="oysterun-routec-tool-invocation-detail"
+                    data-oysterun-p011-logical-invocation-index={String(index)}
+                    data-oysterun-tool-call-id={invocation.tool_call_id}
+                    data-oysterun-tool-name={invocation.tool_name ?? undefined}
+                    data-oysterun-tool-invocation-state={invocation.state}
+                    data-oysterun-tool-physical-event-count={String(
+                      invocation.physical_event_count
+                    )}
+                    data-oysterun-tool-late-update-count={String(invocation.late_update_count)}
+                  >
+                    <Box direction="Column" gap="300">
+                      <Box alignItems="Center" gap="200" wrap="Wrap">
+                        <Text as="strong" size="T300">
+                          Tool Invocation
+                        </Text>
+                        {invocation.tool_name && (
+                          <Text as="code" size="T200">
+                            {invocation.tool_name}
+                          </Text>
+                        )}
+                        <Text as="span" size="T200" priority="300">
+                          {invocation.tool_call_id}
+                        </Text>
+                        <Text as="span" size="T200" priority="300">
+                          {invocation.state}
+                        </Text>
+                      </Box>
+                      {sections.map((section) => {
+                        const sectionCode = formatToolPayload(section.value);
+                        return (
+                          <section key={section.label}>
+                            <Text as="strong" size="T200">
+                              {section.label}
+                            </Text>
+                            {sectionCode && (
+                              <pre style={toolDetailCodeStyle}>
+                                <code>{sectionCode}</code>
+                              </pre>
+                            )}
+                          </section>
+                        );
+                      })}
+                    </Box>
+                  </article>
+                );
+              })
+            : displayRows.map((detail, index) => {
             const fullCode = formatToolPayload(getToolDetailRenderablePayload(detail));
             return (
               <article

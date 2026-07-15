@@ -520,6 +520,23 @@ export function installOysterunProviderSkillSet({
   };
 }
 
+function formatOysterunProviderSkillInstallOutcomeBody({ state, reason, error }) {
+  if (state !== "completed") {
+    const detail = error || reason || "unknown_error";
+    return `Oysterun skill install/update failed: ${detail}. Provider delivery suppressed.`;
+  }
+  if (reason === "installed_missing_oysterun_skill_set") {
+    return "Oysterun skills installed for this agent folder. Provider delivery suppressed.";
+  }
+  if (reason === "overwrote_owned_oysterun_skill_set") {
+    return "Oysterun skills updated for this agent folder. Provider delivery suppressed.";
+  }
+  if (reason === "existing_owned_oysterun_skill_set_requires_overwrite") {
+    return "Oysterun skills are already installed. Use /update_oysterun_skill to refresh them. Provider delivery suppressed.";
+  }
+  return "Oysterun skill install/update finished. Provider delivery suppressed.";
+}
+
 function copyProductSkillDirectory(sourceDir, targetDir) {
   copyDirectoryContents(sourceDir, targetDir);
 }
@@ -1039,6 +1056,8 @@ export class SessionManager extends EventEmitter {
         ? "thinking.reasoning"
         : event.type === "tool.call"
         ? "tool.call"
+        : event.type === "tool.update"
+        ? "tool.update"
         : event.type === "tool.output" || event.type === "stderr"
         ? "tool.output"
         : event.type === "tool.result"
@@ -1832,6 +1851,69 @@ export class SessionManager extends EventEmitter {
     return null;
   }
 
+  isProviderPromptInFlight(session) {
+    if (!session) return false;
+    if (typeof session.hasActivePromptInFlight === "function") {
+      try {
+        return session.hasActivePromptInFlight() === true;
+      } catch {
+        return false;
+      }
+    }
+    if (
+      session.activePromptState &&
+      session.activePromptState.promptSlotReleased !== true &&
+      session.activePromptState.completionEmitted !== true
+    ) {
+      return true;
+    }
+    return (
+      typeof session.activePromptCount === "number" &&
+      session.activePromptCount > 0
+    );
+  }
+
+  emitClaimedClaudeInFlightTimeoutDiagnostic(
+    session,
+    message,
+    {
+      reason = "claude_claimed_provider_turn_no_output",
+      phase = "claimed_provider_turn_timeout",
+    } = {}
+  ) {
+    if (!this.isClaimedClaudeRouteCOutboxMessage(session, message)) return false;
+    const generation = message.claimedClaudeNoOutputGeneration || 0;
+    if (
+      message.claimedClaudeInFlightTimeoutDiagnosticGeneration === generation
+    ) {
+      return true;
+    }
+    message.claimedClaudeInFlightTimeoutDiagnosticGeneration = generation;
+    const diagnostic = this.buildClaimedClaudeNoOutputDiagnostic(
+      session,
+      message,
+      reason
+    );
+    this.emit(
+      "runtimeEvent",
+      session.agentId,
+      this.decorateEvent(session, {
+        type: "session.notice",
+        provider: "claude",
+        subtype: "provider.turn_still_running",
+        payload: {
+          phase,
+          reason,
+          diagnostic,
+          outbox_message_id: message.id,
+          active_prompt_in_flight: true,
+        },
+        replay_policy: "latest_state_only",
+      })
+    );
+    return true;
+  }
+
   enforceClaimedClaudeNoOutputMessage(
     session,
     message,
@@ -1848,6 +1930,15 @@ export class SessionManager extends EventEmitter {
       })
     ) {
       return false;
+    }
+    if (
+      phase === "claimed_provider_turn_timeout" &&
+      this.isProviderPromptInFlight(session)
+    ) {
+      return this.emitClaimedClaudeInFlightTimeoutDiagnostic(session, message, {
+        reason: this.claimedClaudeNoOutputReason(session, message),
+        phase,
+      });
     }
     return this.emitClaimedClaudeNoOutputDiagnostic(session, message, {
       reason: this.claimedClaudeNoOutputReason(session, message),
@@ -2658,10 +2749,11 @@ export class SessionManager extends EventEmitter {
     const controlOutcomeId = `routec_local_oysterun_skill_install_outcome_${this.routeCStableHash(
       `${session.id}:${message.id}:${normalizedText}:${outcome}`
     ).slice(0, 32)}`;
-    const semanticBody =
-      outcome === "accepted"
-        ? `Oysterun skill install/update local command ${message.oysterunProviderSkillInstall.reason}. Provider delivery suppressed.`
-        : `Oysterun skill install/update local command failed (${message.oysterunProviderSkillInstall.reason}). Provider delivery suppressed.`;
+    const semanticBody = formatOysterunProviderSkillInstallOutcomeBody({
+      state,
+      reason: message.oysterunProviderSkillInstall.reason,
+      error,
+    });
     const localOutcomeDelivery = delivery
       ? {
           ...delivery,
@@ -2731,10 +2823,7 @@ export class SessionManager extends EventEmitter {
         provider: session.provider || "claude",
         subtype: "provider_skill.install",
         payload: message.oysterunProviderSkillInstall,
-        semantic_body:
-          state === "completed"
-            ? `Oysterun skill install ${message.oysterunProviderSkillInstall.reason}.`
-            : `Oysterun skill install failed: ${error}`,
+        semantic_body: semanticBody,
         replay_policy: "latest_state_only",
       })
     );
@@ -3310,6 +3399,13 @@ export class SessionManager extends EventEmitter {
         });
         return;
       }
+      const resumeDeliveryBeforeTerminalDrain =
+        (session._deliveryState === "interrupting" ||
+          session._deliveryState === "restarting") &&
+        session.resuming !== true;
+      if (resumeDeliveryBeforeTerminalDrain) {
+        session._deliveryState = "ready";
+      }
       if (this.isInterruptedClaimedClaudeProviderCompletionEvent(event)) {
         this.setActiveOutboxMessageState(
           session,
@@ -3328,13 +3424,9 @@ export class SessionManager extends EventEmitter {
       } else {
         this.setActiveOutboxMessageState(session, "completed");
       }
-      if (
-        (session._deliveryState === "interrupting" ||
-          session._deliveryState === "restarting") &&
-        session.resuming !== true
-      ) {
-        session._deliveryState = "ready";
+      if (resumeDeliveryBeforeTerminalDrain) {
         this.emitDeliveryStateNotice(session);
+        this.drainOutbox(session);
       }
     }
   }

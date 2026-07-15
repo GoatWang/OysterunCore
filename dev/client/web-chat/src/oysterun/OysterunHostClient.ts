@@ -109,6 +109,20 @@ export type OysterunRouteCAgentCommandsResponse = {
   note?: string;
 };
 
+export type OysterunRouteCProviderSkillStatusResponse = {
+  agent_id: string;
+  agent_folder?: string | null;
+  provider: string;
+  provider_supported?: boolean;
+  installed: boolean;
+  ownership_marker_valid: boolean;
+  can_install?: boolean;
+  disabled?: boolean;
+  reason?: string;
+  skill_set_target?: string | null;
+  target_root?: string | null;
+};
+
 export type OysterunSessionNotificationSettings = {
   session_id: string;
   matrix_room_id?: string | null;
@@ -232,11 +246,41 @@ export type OysterunToolEventDetailItem = {
   content?: unknown;
 };
 
+export type OysterunToolLifecycleUpdate = {
+  physical_event_index: number;
+  provider_runtime_event_index?: number | null;
+  semantic_type: 'tool.update' | 'tool.output' | string;
+  update_kind: string;
+  payload?: unknown;
+  late: boolean;
+};
+
+export type OysterunToolLifecycleInvocation = {
+  tool_call_id: string;
+  tool_name?: string | null;
+  provider?: string | null;
+  provider_turn_id?: string | null;
+  target_turn_id?: string | null;
+  first_event_sequence: number;
+  last_event_sequence: number;
+  physical_event_count: number;
+  state: 'active' | 'succeeded' | 'failed' | 'incomplete';
+  incomplete_reason?: string | null;
+  call?: unknown;
+  updates: OysterunToolLifecycleUpdate[];
+  output?: unknown;
+  result?: unknown;
+  late_update_count: number;
+  selected_detail_truncated: boolean;
+  selected_detail_limit_bytes: number;
+};
+
 export type OysterunToolEventDetailResponse = {
   status: 'ok' | 'unavailable' | 'ambiguous' | 'forbidden' | 'missing_identity';
   session_id: string;
   matrix_room_id: string;
   matrix_event_id: string;
+  schema_version?: 'routec.unified_tool_lifecycle_detail.v1' | string;
   semantic_type?: string | null;
   tool_name?: string | null;
   tool_call_id?: string | null;
@@ -248,16 +292,24 @@ export type OysterunToolEventDetailResponse = {
   original_byte_count?: number | null;
   original_line_count?: number | null;
   page: number;
+  page_size?: number;
   page_count?: number;
   page_size_bytes?: number;
   selected_detail_top_only?: boolean;
   selected_detail_limit_bytes?: number | null;
   selected_detail_truncated?: boolean;
   truncated_field_count?: number | null;
-  items: OysterunToolEventDetailItem[];
+  items?: OysterunToolEventDetailItem[];
+  physical_event_count?: number;
+  logical_invocation_count?: number;
+  invocations: OysterunToolLifecycleInvocation[];
+  storage_sources?: string[];
+  physical_event_order_preserved?: boolean;
+  aggregation_key?: string;
   detail_identity_kind?: 'session_room_event' | string;
   debug_tool_detail_source_ui_enabled?: boolean;
-  raw_path_exposed?: false;
+  resolver_path_fields_exposed?: false;
+  tool_payload_local_paths_preserved?: true;
 };
 
 export type OysterunToolEventDetailRequest = {
@@ -289,10 +341,17 @@ export type OysterunHostOwnerMessageNeighborsResponse = {
     no_host_owner_messages: boolean;
     at_first_host_owner_message: boolean;
     at_latest_host_owner_message: boolean;
+    previous_window_exhausted?: boolean;
+    next_window_exhausted?: boolean;
+    previous_boundary_proven?: boolean;
+    next_boundary_proven?: boolean;
   };
   proof: {
-    schema_version: 'routec.p180_host_owner_message_neighbors.v1';
+    schema_version:
+      | 'routec.p180_host_owner_message_neighbors.v1'
+      | 'routec.p324_host_owner_neighbor_bounded_scan.v1';
     lookup_source: 'routec_host_owned_matrix_storage_room_event_index';
+    lookup_strategy?: 'bounded_short_circuit_scan';
     order_by: 'routec_stream_seq';
     actor_key: 'human';
     actor_kind: 'human';
@@ -301,6 +360,12 @@ export type OysterunHostOwnerMessageNeighborsResponse = {
     body_scan_used_for_ownership: false;
     raw_event_payload_returned: false;
     message_body_returned: false;
+    total_event_count?: number;
+    max_scan_events_per_direction?: number;
+    previous_scanned_event_count?: number;
+    next_scanned_event_count?: number;
+    previous_window_exhausted?: boolean;
+    next_window_exhausted?: boolean;
   };
   committed_transcript_truth?: 'matrix_room_timeline';
   routec_host_owner_neighbor_endpoint?: true;
@@ -337,7 +402,8 @@ export type OysterunLargeToolOutputResponse = {
   matrix_large_ref_written?: false;
   matrix_large_tool_ref_written?: false;
   debug_tool_detail_source_ui_enabled?: boolean;
-  raw_path_exposed?: false;
+  resolver_path_fields_exposed?: false;
+  tool_payload_local_paths_preserved?: true;
   matrix_chat_search_includes_jsonl?: false;
 };
 
@@ -626,7 +692,11 @@ declare global {
     Capacitor?: {
       Plugins?: Record<string, unknown>;
       isPluginAvailable?: (name: string) => boolean;
-      nativePromise?: (pluginName: string, methodName: string, options: Record<string, unknown>) => Promise<unknown>;
+      nativePromise?: (
+        pluginName: string,
+        methodName: string,
+        options: Record<string, unknown>
+      ) => Promise<unknown>;
       isNativePlatform?: () => boolean;
       getPlatform?: () => string;
     };
@@ -646,8 +716,7 @@ const HOST_SESSION_TERMINAL_COMMAND_PATH = '/session/terminal-command';
 const HOST2_INTAKE_PROOF_PATH = '/routec/matrix/host2-intake';
 const HOST2_INTAKE_CANCEL_PATH = '/routec/matrix/host2-intake/cancel';
 const HOST_SEMANTIC_EVENTS_PATH = '/routec/matrix/semantic-events';
-const ROUTEC_CLIENT_AUTH_LOSS_DIAGNOSTIC_PATH =
-  '/routec/matrix/client-auth-loss-diagnostic';
+const ROUTEC_CLIENT_AUTH_LOSS_DIAGNOSTIC_PATH = '/routec/matrix/client-auth-loss-diagnostic';
 const OYSTERUN_CLEAN_SESSION_APP_PREFIX = '/app/sessions';
 const OYSTERUN_CLEAN_SESSION_CHAT_FOCUS_EVENT_QUERY_PARAM = 'focus_event_id';
 const OYSTERUN_ROUTE_C_ACTIVE_ROOM_TIMELINE_FOCUS_EVENT =
@@ -1423,6 +1492,41 @@ export function getOysterunHostBrowserPath(target: string): string | undefined {
   return `/app/browser?${params.toString()}`;
 }
 
+export type OysterunBrowserHandoffLaunch = {
+  launchUrl: string;
+  targetPath: string;
+};
+
+export async function createOysterunHostBrowserHandoffLaunch(
+  target: string
+): Promise<OysterunBrowserHandoffLaunch> {
+  const normalizedTarget = normalizeOysterunRouteCSiteBrowserTarget(target);
+  if (!normalizedTarget) {
+    throw new Error('Only /sites/<agent_id>/ targets can use browser handoff.');
+  }
+  const payload = await hostJson<unknown>('/api/browser/handoff', {
+    method: 'POST',
+    body: JSON.stringify({ target: normalizedTarget }),
+  });
+  const data = payload as Record<string, unknown>;
+  const rawLaunchUrl = typeof data.launch_url === 'string' ? data.launch_url.trim() : '';
+  if (!rawLaunchUrl) {
+    throw new Error('Browser handoff response missing launch_url.');
+  }
+  const launchUrl = new URL(rawLaunchUrl, window.location.origin);
+  if (
+    launchUrl.origin !== window.location.origin ||
+    !launchUrl.pathname.startsWith('/browser-handoff/')
+  ) {
+    throw new Error('Browser handoff response returned an invalid launch_url.');
+  }
+  const rawTargetPath = typeof data.target_path === 'string' ? data.target_path : normalizedTarget;
+  return {
+    launchUrl: `${launchUrl.pathname}${launchUrl.search}${launchUrl.hash}`,
+    targetPath: normalizeOysterunRouteCSiteBrowserTarget(rawTargetPath) ?? normalizedTarget,
+  };
+}
+
 export function getOysterunHostSessionBrowserPathOrTargetFallback(
   target: string
 ): string | undefined {
@@ -1578,6 +1682,30 @@ export async function listOysterunRouteCAgentCommands(): Promise<OysterunRouteCA
   return response;
 }
 
+export async function getOysterunRouteCProviderSkillStatus(
+  provider?: string | null
+): Promise<OysterunRouteCProviderSkillStatusResponse> {
+  const status = await getOysterunRouteCHostSessionStatus();
+  const agentId = status.agent_id.trim();
+  if (!agentId) {
+    throw new Error('Route C provider skill status requires a Host agent id.');
+  }
+  const params = new URLSearchParams();
+  params.set('agent_id', agentId);
+  const normalizedProvider = typeof provider === 'string' ? provider.trim() : '';
+  if (normalizedProvider) params.set('provider', normalizedProvider);
+  const response = await hostJson<OysterunRouteCProviderSkillStatusResponse>(
+    `/agent/provider-skill-status?${params.toString()}`,
+    {
+      method: 'GET',
+    }
+  );
+  if (response.agent_id !== agentId) {
+    throw new Error('Route C provider skill status returned mismatched agent_id.');
+  }
+  return response;
+}
+
 export function getOysterunBootstrappedSessionNotificationSettings():
   | OysterunSessionNotificationSettings
   | undefined {
@@ -1619,8 +1747,10 @@ export async function isOysterunCompleteMessageNotificationPolicyEnabled(candida
   matrixRoomId?: string;
   roomId?: string;
 }): Promise<boolean> {
-  const session_id = normalizeString(candidate.sessionId) || normalizeString(candidate.hostSessionId);
-  const matrix_room_id = normalizeString(candidate.matrixRoomId) || normalizeString(candidate.roomId);
+  const session_id =
+    normalizeString(candidate.sessionId) || normalizeString(candidate.hostSessionId);
+  const matrix_room_id =
+    normalizeString(candidate.matrixRoomId) || normalizeString(candidate.roomId);
   if (!session_id) return false;
   try {
     const notification_settings = await getOysterunSessionNotificationSettings({
@@ -1794,7 +1924,8 @@ function assertOysterunHostOwnerMessageNeighborsResponse(
       typeof anchor.host_owner_message === 'boolean');
   const validProof =
     isRecord(proof) &&
-    proof.schema_version === 'routec.p180_host_owner_message_neighbors.v1' &&
+    (proof.schema_version === 'routec.p180_host_owner_message_neighbors.v1' ||
+      proof.schema_version === 'routec.p324_host_owner_neighbor_bounded_scan.v1') &&
     proof.lookup_source === 'routec_host_owned_matrix_storage_room_event_index' &&
     proof.order_by === 'routec_stream_seq' &&
     proof.actor_key === 'human' &&
@@ -1803,7 +1934,15 @@ function assertOysterunHostOwnerMessageNeighborsResponse(
     proof.display_name_used_for_ownership === false &&
     proof.body_scan_used_for_ownership === false &&
     proof.raw_event_payload_returned === false &&
-    proof.message_body_returned === false;
+    proof.message_body_returned === false &&
+    (proof.schema_version !== 'routec.p324_host_owner_neighbor_bounded_scan.v1' ||
+      (proof.lookup_strategy === 'bounded_short_circuit_scan' &&
+        Number.isSafeInteger(proof.total_event_count) &&
+        Number.isSafeInteger(proof.max_scan_events_per_direction) &&
+        Number.isSafeInteger(proof.previous_scanned_event_count) &&
+        Number.isSafeInteger(proof.next_scanned_event_count) &&
+        typeof proof.previous_window_exhausted === 'boolean' &&
+        typeof proof.next_window_exhausted === 'boolean'));
   if (
     value.status !== 'ok' ||
     typeof value.session_id !== 'string' ||
@@ -1815,6 +1954,10 @@ function assertOysterunHostOwnerMessageNeighborsResponse(
     typeof boundaries.no_host_owner_messages !== 'boolean' ||
     typeof boundaries.at_first_host_owner_message !== 'boolean' ||
     typeof boundaries.at_latest_host_owner_message !== 'boolean' ||
+    (typeof boundaries.previous_window_exhausted !== 'undefined' &&
+      typeof boundaries.previous_window_exhausted !== 'boolean') ||
+    (typeof boundaries.next_window_exhausted !== 'undefined' &&
+      typeof boundaries.next_window_exhausted !== 'boolean') ||
     !validProof ||
     value.raw_event_payload_returned !== false ||
     value.message_body_returned !== false
@@ -1919,8 +2062,7 @@ type OysterunAppAttestPlugin = {
   clearIdentity?: (options: { key: string }) => Promise<unknown>;
 };
 
-const OYSTERUN_CLOUD_INSTALLATION_IDENTITY_KEY_PREFIX =
-  'oysterun-cloud-installation-identity-v1';
+const OYSTERUN_CLOUD_INSTALLATION_IDENTITY_KEY_PREFIX = 'oysterun-cloud-installation-identity-v1';
 const OYSTERUN_CLOUD_DEV_TEAM_ID = 'TEAMID1234';
 const OYSTERUN_CLOUD_FALLBACK_BUNDLE_ID = 'com.example.oysteruncore.dev';
 
@@ -1965,7 +2107,9 @@ async function resolveOysterunCloudBundleId({
 }
 
 function normalizeOysterunCloudStage(cloudApiStage?: string | null): string {
-  const stage = String(cloudApiStage || '').trim().toLowerCase();
+  const stage = String(cloudApiStage || '')
+    .trim()
+    .toLowerCase();
   return stage === 'beta' || stage === 'dev' ? stage : 'prod';
 }
 
@@ -1973,7 +2117,9 @@ function getOysterunCloudInstallationIdentityKey(
   cloudApiUrl: string,
   cloudApiStage?: string | null
 ): string {
-  return `${OYSTERUN_CLOUD_INSTALLATION_IDENTITY_KEY_PREFIX}:${normalizeOysterunCloudStage(cloudApiStage)}:${cloudApiUrl}`;
+  return `${OYSTERUN_CLOUD_INSTALLATION_IDENTITY_KEY_PREFIX}:${normalizeOysterunCloudStage(
+    cloudApiStage
+  )}:${cloudApiUrl}`;
 }
 
 function loadOysterunCloudInstallationIdentity(
@@ -2044,7 +2190,9 @@ function parseOysterunCloudInstallationIdentity(
 function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
   const capacitor = window.Capacitor;
   if (!capacitor) return null;
-  const plugin = capacitor.Plugins?.OysterunAppAttest as Partial<OysterunAppAttestPlugin> | undefined;
+  const plugin = capacitor.Plugins?.OysterunAppAttest as
+    | Partial<OysterunAppAttestPlugin>
+    | undefined;
   if (
     plugin &&
     typeof plugin.attest === 'function' &&
@@ -2060,7 +2208,11 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
   ) {
     return {
       attest: (options) =>
-        capacitor.nativePromise?.('OysterunAppAttest', 'attest', options) as Promise<OysterunAppAttestProof>,
+        capacitor.nativePromise?.(
+          'OysterunAppAttest',
+          'attest',
+          options
+        ) as Promise<OysterunAppAttestProof>,
       loadIdentity: (options) =>
         capacitor.nativePromise?.('OysterunAppAttest', 'loadIdentity', options) as Promise<{
           identity?: string | null;
@@ -2068,7 +2220,11 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
       saveIdentity: (options) =>
         capacitor.nativePromise?.('OysterunAppAttest', 'saveIdentity', options) as Promise<unknown>,
       clearIdentity: (options) =>
-        capacitor.nativePromise?.('OysterunAppAttest', 'clearIdentity', options) as Promise<unknown>,
+        capacitor.nativePromise?.(
+          'OysterunAppAttest',
+          'clearIdentity',
+          options
+        ) as Promise<unknown>,
     };
   }
   return null;
@@ -2130,13 +2286,10 @@ async function cloudJson<T>(
 }
 
 async function createOysterunCloudNotificationBootstrap(): Promise<OysterunCloudNotificationBootstrapResponse> {
-  return hostJson<OysterunCloudNotificationBootstrapResponse>(
-    '/cloud/notification-bootstrap',
-    {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }
-  );
+  return hostJson<OysterunCloudNotificationBootstrapResponse>('/cloud/notification-bootstrap', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 async function ensureOysterunCloudInstallationIdentity({
@@ -2203,9 +2356,7 @@ async function ensureOysterunCloudInstallationIdentity({
 // P207 ownership: the app obtains a Host-issued Cloud bootstrap token, ensures
 // its own Cloud app installation credential, pairs to the Host, then registers
 // the APNs token directly with Cloud. Host device_token is not used for this.
-export async function registerOysterunPushToken(
-  body: OysterunPushRegisterBody
-): Promise<unknown> {
+export async function registerOysterunPushToken(body: OysterunPushRegisterBody): Promise<unknown> {
   const bootstrap = await createOysterunCloudNotificationBootstrap();
   const bundleId = await resolveOysterunCloudBundleId({ body });
   const apnsEnvironment = getOysterunIOSAPNsEnvironmentForBundleId(bundleId);
@@ -2214,16 +2365,21 @@ export async function registerOysterunPushToken(
     cloudApiStage: bootstrap.cloud_api_stage,
     bundleId,
   });
-  await cloudJson(bootstrap.cloud_api_url, bootstrap.cloud_api_stage, '/api/host-installations/pair', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${identity.installation_credential}`,
-    },
-    body: JSON.stringify({
-      host_id: bootstrap.host_id,
-      notification_registration_token: bootstrap.notification_registration_token,
-    }),
-  });
+  await cloudJson(
+    bootstrap.cloud_api_url,
+    bootstrap.cloud_api_stage,
+    '/api/host-installations/pair',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${identity.installation_credential}`,
+      },
+      body: JSON.stringify({
+        host_id: bootstrap.host_id,
+        notification_registration_token: bootstrap.notification_registration_token,
+      }),
+    }
+  );
   return cloudJson(bootstrap.cloud_api_url, bootstrap.cloud_api_stage, '/api/push/register', {
     method: 'POST',
     headers: {
@@ -2884,15 +3040,12 @@ export async function getOysterunHostSessionSnapshot({
   const params = new URLSearchParams({
     session_id: sessionId ?? requiredOysterunHostSessionId(),
   });
-  return hostJson<OysterunHostSessionSnapshotResponse>(
-    `${HOST_SESSION_SNAPSHOT_PATH}?${params}`,
-    {
-      method: 'GET',
-      headers: {
-        'X-Oysterun-RouteC': 'canonical-provider-lifecycle',
-      },
-    }
-  );
+  return hostJson<OysterunHostSessionSnapshotResponse>(`${HOST_SESSION_SNAPSHOT_PATH}?${params}`, {
+    method: 'GET',
+    headers: {
+      'X-Oysterun-RouteC': 'canonical-provider-lifecycle',
+    },
+  });
 }
 
 export type OysterunSessionInterruptResponse = {
@@ -3034,14 +3187,12 @@ export async function interruptOysterunHostSession({
       interrupt_outcome: response.interrupt_outcome ?? response.interrupt_result?.status ?? null,
       interrupt_idempotent: response.interrupt_idempotent === true,
       provider_interrupt_attempted: response.provider_interrupt_attempted === true,
-      interrupt_result_schema_version:
-        response.interrupt_result?.schema_version ?? null,
+      interrupt_result_schema_version: response.interrupt_result?.schema_version ?? null,
       raw_provider_response_exposed:
         response.interrupt_result?.raw_provider_response_exposed ?? false,
-      diagnostic_proof_gated:
-        response.routec_p186_interrupt_diagnostic_proof
-          ? response.routec_p186_interrupt_diagnostic_proof.enabled_by_request === true
-          : false,
+      diagnostic_proof_gated: response.routec_p186_interrupt_diagnostic_proof
+        ? response.routec_p186_interrupt_diagnostic_proof.enabled_by_request === true
+        : false,
       expected_matrix_backed_semantic_truth: 'control.request/control.outcome',
       normal_matrix_message_send_blocked: true,
       direct_matrix_browser_write_used: false,
@@ -3118,10 +3269,14 @@ export async function runOysterunHostTerminalCommand({
       typeof response.terminal_command_started_matrix_event_id !== 'string' ||
       response.terminal_command_started_matrix_event_id.length === 0
     ) {
-      throw new Error('Route C terminal command did not prove Matrix terminal.command.started durability.');
+      throw new Error(
+        'Route C terminal command did not prove Matrix terminal.command.started durability.'
+      );
     }
     if (response.terminal_command_result_matrix_event_required !== true) {
-      throw new Error('Route C terminal command did not require terminal.command.result durability.');
+      throw new Error(
+        'Route C terminal command did not require terminal.command.result durability.'
+      );
     }
     if (
       response.expected_matrix_backed_semantic_truth !==
@@ -3142,7 +3297,9 @@ export async function runOysterunHostTerminalCommand({
       throw new Error('Route C terminal command response used transcript DB fallback.');
     }
     if (response.host_db_transcript_product_truth !== false) {
-      throw new Error('Route C terminal command response treated Host DB transcript as product truth.');
+      throw new Error(
+        'Route C terminal command response treated Host DB transcript as product truth.'
+      );
     }
     recordOysterunProof('terminalCommands', {
       state: 'after_host_session_terminal_command_request',
@@ -3156,14 +3313,12 @@ export async function runOysterunHostTerminalCommand({
       terminal_exec_id: response.terminal_exec_id,
       cwd: response.cwd,
       terminal_command_started_semantic_type: response.terminal_command_started_semantic_type,
-      terminal_command_started_matrix_event_id:
-        response.terminal_command_started_matrix_event_id,
+      terminal_command_started_matrix_event_id: response.terminal_command_started_matrix_event_id,
       terminal_command_started_semantic_matrix_event_committed:
         response.terminal_command_started_semantic_matrix_event_committed,
       terminal_command_result_matrix_event_required:
         response.terminal_command_result_matrix_event_required,
-      expected_matrix_backed_semantic_truth:
-        response.expected_matrix_backed_semantic_truth,
+      expected_matrix_backed_semantic_truth: response.expected_matrix_backed_semantic_truth,
       normal_matrix_message_send_blocked: true,
       direct_matrix_browser_write_used: false,
       browser_shell_execution: false,

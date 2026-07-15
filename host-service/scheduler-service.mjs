@@ -1117,18 +1117,14 @@ export class SchedulerService {
 
   registerCopiedDemoAgentSchedules({ agentFolder } = {}) {
     this.initialize();
-    const realFolder = this.portableDefinitionStore.rememberKnownFolder(
-      null,
-      normalizeRequiredString(agentFolder, "agentFolder")
+    const realFolder = this.portableDefinitionStore.assertHostKnownAgentFolder(
+      normalizeRequiredString(agentFolder, "agentFolder"),
+      { includeMemory: false, requireKnown: true }
     );
     const definitions =
       this.portableDefinitionStore.readDefinitionsForFolder(realFolder);
     const registered = [];
     for (const definition of definitions) {
-      this.portableDefinitionStore.rememberKnownFolder(
-        definition.agent_id,
-        realFolder
-      );
       const portableHash =
         this.portableDefinitionStore.buildPortableHash(definition);
       this.store.markPortableScheduleOwnerToggle({
@@ -1150,6 +1146,19 @@ export class SchedulerService {
       schedules: registered,
       storage_owner: PORTABLE_SCHEDULER_STORAGE_OWNER,
       runtime_state_owner: PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER,
+    };
+  }
+
+  validateCopiedDemoAgentScheduleDefinitions({ agentFolder } = {}) {
+    this.initialize();
+    const definitions = this.portableDefinitionStore.readDefinitionsForFolder(
+      normalizeRequiredString(agentFolder, "agentFolder")
+    );
+    return {
+      status: "demo_agent_schedulers_validated",
+      agent_folder: normalizeRequiredString(agentFolder, "agentFolder"),
+      scheduler_count: definitions.length,
+      definitions,
     };
   }
 
@@ -2604,6 +2613,12 @@ export class SchedulerService {
       },
       serialization_scope: "authenticated_dashboard_host_scheduler_ui",
       generic_schedule_serialization_remains_redacted: true,
+      portable_scheduler_validation_failed:
+        metadata.portable_scheduler_validation_failed === true,
+      portable_scheduler_validation_error:
+        metadata.portable_scheduler_validation_error || null,
+      portable_scheduler_validation_error_code:
+        metadata.portable_scheduler_validation_error_code || null,
       browser_local_storage_owner: false,
       matrix_db_owner: false,
       p12_5_scheduler_tab: true,

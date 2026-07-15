@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Notifications
 
-Canonical product skill source lives at `skills/oysterun-notifications/`. The repo-local Codex mirror at `.codex/skills/oysterun-notifications/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-notifications/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-notifications/`. The repo-local Codex mirror at `.codex/skills/Oysterun/modules/oysterun-notifications/` and Host packaged assets at `host-service/assets/product-skills/oysterun-notifications/` and `host-service/assets/product-skills/Oysterun/modules/oysterun-notifications/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product notification operations. It wraps the P86 product CLI contract:
 
@@ -18,13 +18,13 @@ oysterun notifications <action> [options]
 The helper delegates to the same CLI surface:
 
 ```bash
-node .codex/skills/oysterun-notifications/scripts/oysterun_notifications.mjs status
+node .codex/skills/Oysterun/modules/oysterun-notifications/scripts/oysterun_notifications.mjs status
 ```
 
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-notifications/scripts/oysterun_notifications.mjs send --dry-run --text "Preview"
+node .claude/skills/Oysterun/modules/oysterun-notifications/scripts/oysterun_notifications.mjs send --dry-run --text "Preview"
 ```
 
 ## Commands

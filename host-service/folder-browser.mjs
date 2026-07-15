@@ -4,6 +4,7 @@ import { cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "fs/p
 import { dirname, isAbsolute, join } from "path";
 import { fileURLToPath } from "url";
 import { resolveDefaultBrowsePathAsync, resolveDirectoryPathAsync } from "./config.mjs";
+import { completeSchedulerSessionSetupPayloadForRuntime } from "./scheduler-setup-snapshot-contract.mjs";
 import { FULL_DISK_ACCESS_SETTINGS_URI as MACOS_FULL_DISK_ACCESS_SETTINGS_URI } from "./macos-permissions.mjs";
 
 const DEFAULT_LIMIT = 100;
@@ -182,6 +183,18 @@ async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
     if (isObjectRecord(schedule.metadata?.target_binding?.setup_snapshot)) {
       schedule.metadata.target_binding.setup_snapshot.agent_folder = copiedPath;
       schedule.metadata.target_binding.setup_snapshot.cwd = copiedPath;
+    }
+    const completedSetup = completeSchedulerSessionSetupPayloadForRuntime({
+      agentFolder: copiedPath,
+      sessionPayload: schedule.setup_snapshot,
+      label: `demo agent scheduler ${id}`,
+      requireExplicitRuntimeProof: true,
+    }).sessionPayload;
+    schedule.setup_snapshot = completedSetup;
+    if (isObjectRecord(schedule.metadata?.target_binding)) {
+      schedule.metadata.target_binding.kind = "setup_snapshot";
+      schedule.metadata.target_binding.agent_id = schedule.agent_id;
+      schedule.metadata.target_binding.setup_snapshot = completedSetup;
     }
     return schedule;
   });

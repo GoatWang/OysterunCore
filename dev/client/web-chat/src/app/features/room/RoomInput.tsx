@@ -190,6 +190,8 @@ const OYSTERUN_ROUTE_C_DISABLED_AUTOCOMPLETE_PREFIXES = new Set<AutocompletePref
 ]);
 const OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_COMMAND = 'install_oysterun_skill';
 const OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX = `/${OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_COMMAND}`;
+const OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_COMMAND = 'update_oysterun_skill';
+const OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX = `/${OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_COMMAND}`;
 const OYSTERUN_P185_COMPOSER_IME_GUARD = 'p185-composer-ime-guard';
 const OYSTERUN_P185_COMPOSER_LOCAL_ERROR_BOUNDARY = 'p185-composer-local-error-boundary';
 const OYSTERUN_P185_COMPOSER_COMPOSITION_SETTLE_MS = 520;
@@ -207,10 +209,7 @@ type RouteCComposerLocalErrorBoundaryState = {
 function isRouteCComposerInvalidSelectionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const details = `${error.name}\n${error.message}\n${error.stack ?? ''}`;
-  return (
-    details.includes('The object is in an invalid state') &&
-    details.includes('collapseToEnd')
-  );
+  return details.includes('The object is in an invalid state') && details.includes('collapseToEnd');
 }
 
 class RouteCComposerLocalErrorBoundary extends Component<
@@ -510,7 +509,8 @@ function buildRouteCMultiMediaProductMessageContent({
       one_explicit_send_commits_one_matrix_media_event_per_file: false,
       upload_occurs_only_during_explicit_send: true,
       split_text_event_created: false,
-      provider_prompt_shape: '[Attached files]\\n<saved_path>...\\n\\nUser message:\\n<caption/text>',
+      provider_prompt_shape:
+        '[Attached files]\\n<saved_path>...\\n\\nUser message:\\n<caption/text>',
       provider_prompt_user_message: body,
       attachments,
       attachment_count: attachments.length,
@@ -558,6 +558,21 @@ function getOysterunRouteCLocalSkillInstallComposerText(
       : '';
     return `${OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX}${normalizeOysterunLocalSkillInstallCommandTail(
       tail
+    )}`.trim();
+  }
+  if (normalizedCommandName === OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_COMMAND) {
+    const tail = trimmed.toLocaleLowerCase().startsWith(OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX)
+      ? trimmed.slice(OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX.length)
+      : '';
+    return `${OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX} --update${normalizeOysterunLocalSkillInstallCommandTail(
+      tail
+    )}`.trim();
+  }
+  if (trimmed.toLocaleLowerCase().startsWith(OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX)) {
+    const nextChar = trimmed.charAt(OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX.length);
+    if (nextChar && !/\s/.test(nextChar)) return undefined;
+    return `${OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX} --update${normalizeOysterunLocalSkillInstallCommandTail(
+      trimmed.slice(OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX.length)
     )}`.trim();
   }
   if (!trimmed.toLocaleLowerCase().startsWith(OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX)) {
@@ -863,9 +878,11 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
         interruptOysterunHostSession({
           matrixRoomId: roomId,
           command: plainText,
-        }).catch((err: unknown) => {
-          console.error('[oysterun-routec] !! interrupt request failed', err);
-        }).finally(() => setRouteCInterruptInFlight(false));
+        })
+          .catch((err: unknown) => {
+            console.error('[oysterun-routec] !! interrupt request failed', err);
+          })
+          .finally(() => setRouteCInterruptInFlight(false));
         return;
       }
 
@@ -1181,9 +1198,11 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
         interruptOysterunHostSession({
           matrixRoomId: roomId,
           command: '!!',
-        }).catch((err: unknown) => {
-          console.error('[oysterun-routec] stop-square interrupt request failed', err);
-        }).finally(() => setRouteCInterruptInFlight(false));
+        })
+          .catch((err: unknown) => {
+            console.error('[oysterun-routec] stop-square interrupt request failed', err);
+          })
+          .finally(() => setRouteCInterruptInFlight(false));
         return;
       }
       void submit();
@@ -1290,18 +1309,15 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
       ReactEditor.focus(editor);
     }, [editor]);
 
-    const handleRouteCComposerRecover = useCallback(
-      (error: unknown, info: ErrorInfo) => {
-        setAutocompleteQuery(undefined);
-        setRouteCAtMode('path');
-        setRouteCComposerRecoveryKey((current) => current + 1);
-        console.warn('[oysterun-routec] recovered composer invalid selection', {
-          error,
-          componentStack: info.componentStack,
-        });
-      },
-      []
-    );
+    const handleRouteCComposerRecover = useCallback((error: unknown, info: ErrorInfo) => {
+      setAutocompleteQuery(undefined);
+      setRouteCAtMode('path');
+      setRouteCComposerRecoveryKey((current) => current + 1);
+      console.warn('[oysterun-routec] recovered composer invalid selection', {
+        error,
+        componentStack: info.componentStack,
+      });
+    }, []);
 
     const handleRouteCMemberMode = useCallback(() => {
       setRouteCAtMode('member');
@@ -1356,490 +1372,502 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
             }
           >
             {selectedFiles.length > 0 && (
-          <UploadBoard
-            header={
-              <UploadBoardHeader
-                open={uploadBoard}
-                onToggle={() => setUploadBoard(!uploadBoard)}
-                uploadFamilyObserverAtom={uploadFamilyObserverAtom}
-                imperativeHandlerRef={uploadBoardHandlers}
-                onCancel={handleCancelUpload}
-                uploadAvailable={mediaUploadEnabled}
-                uploadUnavailableMessage={mediaUploadDisabledMessage}
-                uploadUnavailableReason={mediaUploadAvailability.reason}
-                stagedPreview
-                stagedPreviewMessage={routeCStagedMediaSendReadyMessage}
-              />
-            }
-          >
-            {uploadBoard && (
-              <Scroll size="300" hideTrack visibility="Hover">
-                <UploadBoardContent>
-                  {Array.from(selectedFiles)
-                    .reverse()
-                    .map((fileItem, index) => (
-                      <UploadCardRenderer
-                        // eslint-disable-next-line react/no-array-index-key
-                        key={index}
-                        isEncrypted={!!fileItem.encInfo}
-                        fileItem={fileItem}
-                        setMetadata={handleFileMetadata}
-                        onRemove={handleRemoveUpload}
-                      />
-                    ))}
-                </UploadBoardContent>
-              </Scroll>
+              <UploadBoard
+                header={
+                  <UploadBoardHeader
+                    open={uploadBoard}
+                    onToggle={() => setUploadBoard(!uploadBoard)}
+                    uploadFamilyObserverAtom={uploadFamilyObserverAtom}
+                    imperativeHandlerRef={uploadBoardHandlers}
+                    onCancel={handleCancelUpload}
+                    uploadAvailable={mediaUploadEnabled}
+                    uploadUnavailableMessage={mediaUploadDisabledMessage}
+                    uploadUnavailableReason={mediaUploadAvailability.reason}
+                    stagedPreview
+                    stagedPreviewMessage={routeCStagedMediaSendReadyMessage}
+                  />
+                }
+              >
+                {uploadBoard && (
+                  <Scroll size="300" hideTrack visibility="Hover">
+                    <UploadBoardContent>
+                      {Array.from(selectedFiles)
+                        .reverse()
+                        .map((fileItem, index) => (
+                          <UploadCardRenderer
+                            // eslint-disable-next-line react/no-array-index-key
+                            key={index}
+                            isEncrypted={!!fileItem.encInfo}
+                            fileItem={fileItem}
+                            setMetadata={handleFileMetadata}
+                            onRemove={handleRemoveUpload}
+                          />
+                        ))}
+                    </UploadBoardContent>
+                  </Scroll>
+                )}
+              </UploadBoard>
             )}
-          </UploadBoard>
-        )}
-        <Overlay
-          open={dropZoneVisible}
-          backdrop={<OverlayBackdrop />}
-          style={{ pointerEvents: 'none' }}
-        >
-          <OverlayCenter>
-            <Dialog variant="Primary">
+            <Overlay
+              open={dropZoneVisible}
+              backdrop={<OverlayBackdrop />}
+              style={{ pointerEvents: 'none' }}
+            >
+              <OverlayCenter>
+                <Dialog variant="Primary">
+                  <Box
+                    direction="Column"
+                    justifyContent="Center"
+                    alignItems="Center"
+                    gap="500"
+                    style={{ padding: toRem(60) }}
+                  >
+                    <Icon size="600" src={Icons.File} />
+                    <Text size="H4" align="Center">
+                      {mediaUploadEnabled
+                        ? `Drop Files in "${room?.name || 'Room'}"`
+                        : 'File uploads unavailable'}
+                    </Text>
+                    <Text align="Center">
+                      {mediaUploadEnabled
+                        ? 'Drag and drop files here or click for selection dialog'
+                        : mediaUploadDisabledMessage}
+                    </Text>
+                  </Box>
+                </Dialog>
+              </OverlayCenter>
+            </Overlay>
+            {autocompleteQuery?.prefix === AutocompletePrefix.RoomMention && (
+              <RoomMentionAutocomplete
+                roomId={roomId}
+                editor={editor}
+                query={autocompleteQuery}
+                requestClose={handleCloseAutocomplete}
+              />
+            )}
+            {autocompleteQuery?.prefix === AutocompletePrefix.UserMention &&
+              routeCChatShell &&
+              routeCAtMode === 'path' && (
+                <RouteCPathAutocomplete
+                  room={room}
+                  editor={editor}
+                  query={autocompleteQuery}
+                  requestClose={handleCloseAutocomplete}
+                  requestMemberMode={handleRouteCMemberMode}
+                  requestRefresh={refreshAutocompleteQuery}
+                />
+              )}
+            {autocompleteQuery?.prefix === AutocompletePrefix.UserMention &&
+              (!routeCChatShell || routeCAtMode === 'member') && (
+                <UserMentionAutocomplete
+                  room={room}
+                  editor={editor}
+                  query={autocompleteQuery}
+                  requestClose={handleCloseAutocomplete}
+                />
+              )}
+            {showGenericComposerDecorations &&
+              autocompleteQuery?.prefix === AutocompletePrefix.Emoticon && (
+                <EmoticonAutocomplete
+                  imagePackRooms={imagePackRooms}
+                  editor={editor}
+                  query={autocompleteQuery}
+                  requestClose={handleCloseAutocomplete}
+                />
+              )}
+            {autocompleteQuery?.prefix === AutocompletePrefix.Command && (
+              <CommandAutocomplete
+                room={room}
+                editor={editor}
+                query={autocompleteQuery}
+                requestClose={handleCloseAutocomplete}
+                routeCActiveTokenMode={routeCChatShell}
+              />
+            )}
+            {routeCChatShell && routeCLoopCliStatus && (
               <Box
                 direction="Column"
-                justifyContent="Center"
-                alignItems="Center"
-                gap="500"
-                style={{ padding: toRem(60) }}
+                gap="100"
+                style={{ padding: `${config.space.S100} ${config.space.S300} 0` }}
+                data-testid="oysterun-routec-loop-cli-status"
+                data-oysterun-clean-session-testid="oysterun-clean-session-loop-cli-status"
+                data-oysterun-routec-loop-cli-state={routeCLoopCliStatus.state}
+                data-oysterun-clean-session-loop-cli-state={routeCLoopCliStatus.state}
+                data-oysterun-routec-loop-cli-duplicate-prevented={
+                  routeCLoopCliStatus.duplicatePrevented === undefined
+                    ? undefined
+                    : String(routeCLoopCliStatus.duplicatePrevented)
+                }
+                data-oysterun-clean-session-loop-cli-duplicate-prevented={
+                  routeCLoopCliStatus.duplicatePrevented === undefined
+                    ? undefined
+                    : String(routeCLoopCliStatus.duplicatePrevented)
+                }
               >
-                <Icon size="600" src={Icons.File} />
-                <Text size="H4" align="Center">
-                  {mediaUploadEnabled
-                    ? `Drop Files in "${room?.name || 'Room'}"`
-                    : 'File uploads unavailable'}
-                </Text>
-                <Text align="Center">
-                  {mediaUploadEnabled
-                    ? 'Drag and drop files here or click for selection dialog'
-                    : mediaUploadDisabledMessage}
+                <Text
+                  size="T200"
+                  priority={routeCLoopCliStatus.state === 'error' ? '400' : '300'}
+                  role={routeCLoopCliStatus.state === 'error' ? 'alert' : 'status'}
+                  aria-live="polite"
+                >
+                  {routeCLoopCliStatus.message}
                 </Text>
               </Box>
-            </Dialog>
-          </OverlayCenter>
-        </Overlay>
-        {autocompleteQuery?.prefix === AutocompletePrefix.RoomMention && (
-          <RoomMentionAutocomplete
-            roomId={roomId}
-            editor={editor}
-            query={autocompleteQuery}
-            requestClose={handleCloseAutocomplete}
-          />
-        )}
-        {autocompleteQuery?.prefix === AutocompletePrefix.UserMention &&
-          routeCChatShell &&
-          routeCAtMode === 'path' && (
-            <RouteCPathAutocomplete
-              room={room}
+            )}
+            <CustomEditor
+              editableName="RoomInput"
+              enterKeyHint={phoneComposerMode ? 'enter' : undefined}
               editor={editor}
-              query={autocompleteQuery}
-              requestClose={handleCloseAutocomplete}
-              requestMemberMode={handleRouteCMemberMode}
-              requestRefresh={refreshAutocompleteQuery}
-            />
-          )}
-        {autocompleteQuery?.prefix === AutocompletePrefix.UserMention &&
-          (!routeCChatShell || routeCAtMode === 'member') && (
-            <UserMentionAutocomplete
-              room={room}
-              editor={editor}
-              query={autocompleteQuery}
-              requestClose={handleCloseAutocomplete}
-            />
-          )}
-        {showGenericComposerDecorations &&
-          autocompleteQuery?.prefix === AutocompletePrefix.Emoticon && (
-            <EmoticonAutocomplete
-              imagePackRooms={imagePackRooms}
-              editor={editor}
-              query={autocompleteQuery}
-              requestClose={handleCloseAutocomplete}
-            />
-          )}
-        {autocompleteQuery?.prefix === AutocompletePrefix.Command && (
-          <CommandAutocomplete
-            room={room}
-            editor={editor}
-            query={autocompleteQuery}
-            requestClose={handleCloseAutocomplete}
-            routeCActiveTokenMode={routeCChatShell}
-          />
-        )}
-        {routeCChatShell && routeCLoopCliStatus && (
-          <Box
-            direction="Column"
-            gap="100"
-            style={{ padding: `${config.space.S100} ${config.space.S300} 0` }}
-            data-testid="oysterun-routec-loop-cli-status"
-            data-oysterun-clean-session-testid="oysterun-clean-session-loop-cli-status"
-            data-oysterun-routec-loop-cli-state={routeCLoopCliStatus.state}
-            data-oysterun-clean-session-loop-cli-state={routeCLoopCliStatus.state}
-            data-oysterun-routec-loop-cli-duplicate-prevented={
-              routeCLoopCliStatus.duplicatePrevented === undefined
-                ? undefined
-                : String(routeCLoopCliStatus.duplicatePrevented)
-            }
-            data-oysterun-clean-session-loop-cli-duplicate-prevented={
-              routeCLoopCliStatus.duplicatePrevented === undefined
-                ? undefined
-                : String(routeCLoopCliStatus.duplicatePrevented)
-            }
-          >
-            <Text
-              size="T200"
-              priority={routeCLoopCliStatus.state === 'error' ? '400' : '300'}
-              role={routeCLoopCliStatus.state === 'error' ? 'alert' : 'status'}
-              aria-live="polite"
-            >
-              {routeCLoopCliStatus.message}
-            </Text>
-          </Box>
-        )}
-        <CustomEditor
-          editableName="RoomInput"
-          enterKeyHint={phoneComposerMode ? 'enter' : undefined}
-          editor={editor}
-          placeholder="Send a message..."
-          onKeyDown={handleKeyDown}
-          onKeyUp={handleKeyUp}
-          onChange={handleEditorChange}
-          onPaste={handlePaste}
-          top={
-            <>
-              {mediaUploadNotice && (
-                <Box
-                  direction="Column"
-                  gap="100"
-                  style={{ padding: `${config.space.S200} ${config.space.S300} 0` }}
-                  data-oysterun-media-upload-guard="disabled_upload_notice_no_upload"
-                  data-oysterun-media-upload-disabled-reason={mediaUploadAvailability.reason}
-                  data-oysterun-routec-media-send-guard={
-                    selectedFiles.length > 1
-                      ? 'multi_file_media_staged_for_explicit_send'
-                      : undefined
-                  }
-                  data-oysterun-clean-session-media-send-guard={
-                    selectedFiles.length > 1
-                      ? 'multi_file_media_staged_for_explicit_send'
-                      : undefined
-                  }
-                  data-oysterun-routec-media-send-commit={
-                    mediaUploadNotice === 'Uploading staged media for Send...' ||
-                    mediaUploadNotice.startsWith('Uploading ')
-                      ? 'explicit_send_uploading_staged_files'
-                      : undefined
-                  }
-                  data-oysterun-clean-session-media-send-commit={
-                    mediaUploadNotice === 'Uploading staged media for Send...' ||
-                    mediaUploadNotice.startsWith('Uploading ')
-                      ? 'explicit_send_uploading_staged_files'
-                      : undefined
-                  }
-                >
-                  <Text size="T200" priority="300" role="status" aria-live="polite">
-                    {mediaUploadNotice}
-                  </Text>
-                </Box>
-              )}
-              {replyDraft && (
-                <div>
-                  <Box
-                    alignItems="Center"
-                    gap="300"
-                    style={{ padding: `${config.space.S200} ${config.space.S300} 0` }}
-                  >
-                    <IconButton
-                      onClick={() => setReplyDraft(undefined)}
-                      variant="SurfaceVariant"
-                      size="300"
-                      radii="300"
-                    >
-                      <Icon src={Icons.Cross} size="50" />
-                    </IconButton>
-                    <Box direction="Row" gap="200" alignItems="Center">
-                      {replyDraft.relation?.rel_type === RelationType.Thread && <ThreadIndicator />}
-                      <ReplyLayout
-                        userColor={replyUsernameColor}
-                        username={
-                          <Text size="T300" truncate>
-                            <b>
-                              {getMemberDisplayName(room, replyDraft.userId) ??
-                                getMxIdLocalPart(replyDraft.userId) ??
-                                replyDraft.userId}
-                            </b>
-                          </Text>
-                        }
-                      >
-                        <Text size="T300" truncate>
-                          {trimReplyFromBody(replyDraft.body)}
-                        </Text>
-                      </ReplyLayout>
-                    </Box>
-                  </Box>
-                </div>
-              )}
-            </>
-          }
-          before={
-            <>
-              <input
-                ref={routeCFileInputRef}
-                type="file"
-                multiple
-                aria-hidden="true"
-                tabIndex={-1}
-                data-oysterun-routec-media-file-input="dom_attached_for_ios_wkwebview"
-                data-oysterun-clean-session-media-file-input="dom_attached_for_ios_wkwebview"
-                onChange={handleRouteCFileInputChange}
-                style={{
-                  position: 'fixed',
-                  width: 1,
-                  height: 1,
-                  opacity: 0,
-                  pointerEvents: 'none',
-                  left: 0,
-                  top: 0,
-                }}
-              />
-              <IconButton
-                onClick={() => {
-                  if (!mediaUploadEnabled) {
-                    setMediaUploadNotice(mediaUploadDisabledMessage);
-                    return;
-                  }
-                  routeCFileInputRef.current?.click();
-                }}
-                variant="SurfaceVariant"
-                size="300"
-                radii="300"
-                aria-label={mediaUploadEnabled ? 'Attach files' : 'File uploads unavailable'}
-                aria-disabled={!mediaUploadEnabled}
-                title={mediaUploadEnabled ? 'Attach files' : mediaUploadDisabledMessage}
-                data-oysterun-media-upload-guard={
-                  mediaUploadEnabled ? 'upload_available' : 'disabled_upload_affordance_no_upload'
-                }
-                data-oysterun-media-upload-disabled-reason={
-                  mediaUploadEnabled ? undefined : mediaUploadAvailability.reason
-                }
-              >
-                <Icon src={Icons.PlusCircle} />
-              </IconButton>
-            </>
-          }
-          after={
-            <>
-              {showGenericComposerDecorations && (
+              placeholder="Send a message..."
+              onKeyDown={handleKeyDown}
+              onKeyUp={handleKeyUp}
+              onChange={handleEditorChange}
+              onPaste={handlePaste}
+              top={
                 <>
-                  <IconButton
-                    variant="SurfaceVariant"
-                    size="300"
-                    radii="300"
-                    onClick={() => setToolbar(!toolbar)}
-                  >
-                    <Icon src={toolbar ? Icons.AlphabetUnderline : Icons.Alphabet} />
-                  </IconButton>
-                  <UseStateProvider initial={undefined}>
-                    {(emojiBoardTab: EmojiBoardTab | undefined, setEmojiBoardTab) => (
-                      <PopOut
-                        offset={16}
-                        alignOffset={-44}
-                        position="Top"
-                        align="End"
-                        anchor={
-                          emojiBoardTab === undefined
-                            ? undefined
-                            : emojiBtnRef.current?.getBoundingClientRect() ?? undefined
-                        }
-                        content={
-                          <EmojiBoard
-                            tab={emojiBoardTab}
-                            onTabChange={setEmojiBoardTab}
-                            imagePackRooms={imagePackRooms}
-                            returnFocusOnDeactivate={false}
-                            onEmojiSelect={handleEmoticonSelect}
-                            onCustomEmojiSelect={handleEmoticonSelect}
-                            onStickerSelect={handleStickerSelect}
-                            requestClose={() => {
-                              setEmojiBoardTab((t) => {
-                                if (t) {
-                                  if (!mobileOrTablet()) ReactEditor.focus(editor);
-                                  return undefined;
-                                }
-                                return t;
-                              });
-                            }}
-                          />
-                        }
+                  {mediaUploadNotice && (
+                    <Box
+                      direction="Column"
+                      gap="100"
+                      style={{ padding: `${config.space.S200} ${config.space.S300} 0` }}
+                      data-oysterun-media-upload-guard="disabled_upload_notice_no_upload"
+                      data-oysterun-media-upload-disabled-reason={mediaUploadAvailability.reason}
+                      data-oysterun-routec-media-send-guard={
+                        selectedFiles.length > 1
+                          ? 'multi_file_media_staged_for_explicit_send'
+                          : undefined
+                      }
+                      data-oysterun-clean-session-media-send-guard={
+                        selectedFiles.length > 1
+                          ? 'multi_file_media_staged_for_explicit_send'
+                          : undefined
+                      }
+                      data-oysterun-routec-media-send-commit={
+                        mediaUploadNotice === 'Uploading staged media for Send...' ||
+                        mediaUploadNotice.startsWith('Uploading ')
+                          ? 'explicit_send_uploading_staged_files'
+                          : undefined
+                      }
+                      data-oysterun-clean-session-media-send-commit={
+                        mediaUploadNotice === 'Uploading staged media for Send...' ||
+                        mediaUploadNotice.startsWith('Uploading ')
+                          ? 'explicit_send_uploading_staged_files'
+                          : undefined
+                      }
+                    >
+                      <Text size="T200" priority="300" role="status" aria-live="polite">
+                        {mediaUploadNotice}
+                      </Text>
+                    </Box>
+                  )}
+                  {replyDraft && (
+                    <div>
+                      <Box
+                        alignItems="Center"
+                        gap="300"
+                        style={{ padding: `${config.space.S200} ${config.space.S300} 0` }}
                       >
-                        {!hideStickerBtn && (
-                          <IconButton
-                            aria-pressed={emojiBoardTab === EmojiBoardTab.Sticker}
-                            onClick={() => setEmojiBoardTab(EmojiBoardTab.Sticker)}
-                            variant="SurfaceVariant"
-                            size="300"
-                            radii="300"
-                          >
-                            <Icon
-                              src={Icons.Sticker}
-                              filled={emojiBoardTab === EmojiBoardTab.Sticker}
-                            />
-                          </IconButton>
-                        )}
                         <IconButton
-                          ref={emojiBtnRef}
-                          aria-pressed={
-                            hideStickerBtn ? !!emojiBoardTab : emojiBoardTab === EmojiBoardTab.Emoji
-                          }
-                          onClick={() => setEmojiBoardTab(EmojiBoardTab.Emoji)}
+                          onClick={() => setReplyDraft(undefined)}
                           variant="SurfaceVariant"
                           size="300"
                           radii="300"
                         >
-                          <Icon
-                            src={Icons.Smile}
-                            filled={
-                              hideStickerBtn
-                                ? !!emojiBoardTab
-                                : emojiBoardTab === EmojiBoardTab.Emoji
-                            }
-                          />
+                          <Icon src={Icons.Cross} size="50" />
                         </IconButton>
-                      </PopOut>
-                    )}
-                  </UseStateProvider>
+                        <Box direction="Row" gap="200" alignItems="Center">
+                          {replyDraft.relation?.rel_type === RelationType.Thread && (
+                            <ThreadIndicator />
+                          )}
+                          <ReplyLayout
+                            userColor={replyUsernameColor}
+                            username={
+                              <Text size="T300" truncate>
+                                <b>
+                                  {getMemberDisplayName(room, replyDraft.userId) ??
+                                    getMxIdLocalPart(replyDraft.userId) ??
+                                    replyDraft.userId}
+                                </b>
+                              </Text>
+                            }
+                          >
+                            <Text size="T300" truncate>
+                              {trimReplyFromBody(replyDraft.body)}
+                            </Text>
+                          </ReplyLayout>
+                        </Box>
+                      </Box>
+                    </div>
+                  )}
                 </>
-              )}
-              <IconButton
-                onClick={handleRouteCPrimaryAction}
-                disabled={routeCPrimaryButtonDisabled}
-                variant="SurfaceVariant"
-                size="300"
-                radii="300"
-                aria-label={routeCPrimaryButtonLabel}
-                title={routeCPrimaryButtonLabel}
-                data-testid={
-                  routeCPrimaryAction === 'interrupt'
-                    ? 'oysterun-routec-stop-response-button'
-                    : 'oysterun-routec-send-button'
-                }
-                data-oysterun-clean-session-testid={
-                  routeCPrimaryAction === 'interrupt'
-                    ? 'oysterun-clean-session-stop-response-button'
-                    : 'oysterun-clean-session-send-button'
-                }
-                data-oysterun-room-id={roomId}
-                data-oysterun-routec-primary-action={routeCChatShell ? routeCPrimaryAction : undefined}
-                data-oysterun-clean-session-primary-action={
-                  routeCChatShell ? routeCPrimaryAction : undefined
-                }
-                data-oysterun-routec-primary-action-source={
-                  routeCPrimaryAction === 'interrupt'
-                    ? 'responding_empty_composer_interrupt'
-                    : undefined
-                }
-                data-oysterun-clean-session-primary-action-source={
-                  routeCPrimaryAction === 'interrupt'
-                    ? 'responding_empty_composer_interrupt'
-                    : undefined
-                }
-                data-oysterun-routec-agent-responding={
-                  routeCChatShell ? String(routeCRespondingState.agentResponding) : undefined
-                }
-                data-oysterun-clean-session-agent-responding={
-                  routeCChatShell ? String(routeCRespondingState.agentResponding) : undefined
-                }
-                data-oysterun-routec-composer-text-empty={
-                  routeCChatShell ? String(routeCComposerPlainText.length === 0) : undefined
-                }
-                data-oysterun-clean-session-composer-text-empty={
-                  routeCChatShell ? String(routeCComposerPlainText.length === 0) : undefined
-                }
-                data-oysterun-routec-stop-response-endpoint={
-                  routeCPrimaryAction === 'interrupt' ? '/session/interrupt' : undefined
-                }
-                data-oysterun-clean-session-stop-response-endpoint={
-                  routeCPrimaryAction === 'interrupt' ? '/session/interrupt' : undefined
-                }
-                data-oysterun-routec-interrupt-in-flight={
-                  routeCChatShell ? String(routeCInterruptInFlight) : undefined
-                }
-                data-oysterun-clean-session-interrupt-in-flight={
-                  routeCChatShell ? String(routeCInterruptInFlight) : undefined
-                }
-                data-oysterun-routec-interrupt-one-shot-disabled={
-                  routeCChatShell ? String(routeCInterruptButtonDisabled) : undefined
-                }
-                data-oysterun-clean-session-interrupt-one-shot-disabled={
-                  routeCChatShell ? String(routeCInterruptButtonDisabled) : undefined
-                }
-                data-oysterun-routec-send-pending={
-                  routeCChatShell ? String(routeCSendPending) : undefined
-                }
-                data-oysterun-clean-session-send-pending={
-                  routeCChatShell ? String(routeCSendPending) : undefined
-                }
-                data-oysterun-routec-send-pending-key={
-                  routeCChatShell ? routeCSendPendingKey ?? '' : undefined
-                }
-                data-oysterun-clean-session-send-pending-key={
-                  routeCChatShell ? routeCSendPendingKey ?? '' : undefined
-                }
-                data-oysterun-routec-send-one-shot-disabled={
-                  routeCChatShell ? String(routeCSendButtonDisabled) : undefined
-                }
-                data-oysterun-clean-session-send-one-shot-disabled={
-                  routeCChatShell ? String(routeCSendButtonDisabled) : undefined
-                }
-                data-oysterun-routec-provider-lifecycle-source={
-                  routeCChatShell ? routeCRespondingState.providerLifecycleSource : undefined
-                }
-                data-oysterun-clean-session-provider-lifecycle-source={
-                  routeCChatShell ? routeCRespondingState.providerLifecycleSource : undefined
-                }
-                data-oysterun-routec-provider-lifecycle-state={
-                  routeCChatShell ? routeCRespondingState.providerLifecycleState : undefined
-                }
-                data-oysterun-clean-session-provider-lifecycle-state={
-                  routeCChatShell ? routeCRespondingState.providerLifecycleState : undefined
-                }
-                data-oysterun-routec-related-polling-allowed={
-                  routeCChatShell ? String(routeCRespondingState.relatedPollingAllowed) : undefined
-                }
-                data-oysterun-clean-session-related-polling-allowed={
-                  routeCChatShell ? String(routeCRespondingState.relatedPollingAllowed) : undefined
-                }
-              >
-                {routeCPrimaryAction === 'interrupt' ? (
-                  <span
+              }
+              before={
+                <>
+                  <input
+                    ref={routeCFileInputRef}
+                    type="file"
+                    multiple
                     aria-hidden="true"
-                    data-oysterun-routec-stop-square-icon="true"
-                    data-oysterun-clean-session-stop-square-icon="true"
+                    tabIndex={-1}
+                    data-oysterun-routec-media-file-input="dom_attached_for_ios_wkwebview"
+                    data-oysterun-clean-session-media-file-input="dom_attached_for_ios_wkwebview"
+                    onChange={handleRouteCFileInputChange}
                     style={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: 2,
-                      backgroundColor: 'currentColor',
-                      display: 'inline-block',
+                      position: 'fixed',
+                      width: 1,
+                      height: 1,
+                      opacity: 0,
+                      pointerEvents: 'none',
+                      left: 0,
+                      top: 0,
                     }}
                   />
-                ) : (
-                  <Icon src={Icons.Send} />
-                )}
-              </IconButton>
-            </>
-          }
-          bottom={
-            showGenericComposerDecorations &&
-            toolbar && (
-              <div>
-                <Line variant="SurfaceVariant" size="300" />
-                <Toolbar />
-              </div>
-            )
-          }
+                  <IconButton
+                    onClick={() => {
+                      if (!mediaUploadEnabled) {
+                        setMediaUploadNotice(mediaUploadDisabledMessage);
+                        return;
+                      }
+                      routeCFileInputRef.current?.click();
+                    }}
+                    variant="SurfaceVariant"
+                    size="300"
+                    radii="300"
+                    aria-label={mediaUploadEnabled ? 'Attach files' : 'File uploads unavailable'}
+                    aria-disabled={!mediaUploadEnabled}
+                    title={mediaUploadEnabled ? 'Attach files' : mediaUploadDisabledMessage}
+                    data-oysterun-media-upload-guard={
+                      mediaUploadEnabled
+                        ? 'upload_available'
+                        : 'disabled_upload_affordance_no_upload'
+                    }
+                    data-oysterun-media-upload-disabled-reason={
+                      mediaUploadEnabled ? undefined : mediaUploadAvailability.reason
+                    }
+                  >
+                    <Icon src={Icons.PlusCircle} />
+                  </IconButton>
+                </>
+              }
+              after={
+                <>
+                  {showGenericComposerDecorations && (
+                    <>
+                      <IconButton
+                        variant="SurfaceVariant"
+                        size="300"
+                        radii="300"
+                        onClick={() => setToolbar(!toolbar)}
+                      >
+                        <Icon src={toolbar ? Icons.AlphabetUnderline : Icons.Alphabet} />
+                      </IconButton>
+                      <UseStateProvider initial={undefined}>
+                        {(emojiBoardTab: EmojiBoardTab | undefined, setEmojiBoardTab) => (
+                          <PopOut
+                            offset={16}
+                            alignOffset={-44}
+                            position="Top"
+                            align="End"
+                            anchor={
+                              emojiBoardTab === undefined
+                                ? undefined
+                                : emojiBtnRef.current?.getBoundingClientRect() ?? undefined
+                            }
+                            content={
+                              <EmojiBoard
+                                tab={emojiBoardTab}
+                                onTabChange={setEmojiBoardTab}
+                                imagePackRooms={imagePackRooms}
+                                returnFocusOnDeactivate={false}
+                                onEmojiSelect={handleEmoticonSelect}
+                                onCustomEmojiSelect={handleEmoticonSelect}
+                                onStickerSelect={handleStickerSelect}
+                                requestClose={() => {
+                                  setEmojiBoardTab((t) => {
+                                    if (t) {
+                                      if (!mobileOrTablet()) ReactEditor.focus(editor);
+                                      return undefined;
+                                    }
+                                    return t;
+                                  });
+                                }}
+                              />
+                            }
+                          >
+                            {!hideStickerBtn && (
+                              <IconButton
+                                aria-pressed={emojiBoardTab === EmojiBoardTab.Sticker}
+                                onClick={() => setEmojiBoardTab(EmojiBoardTab.Sticker)}
+                                variant="SurfaceVariant"
+                                size="300"
+                                radii="300"
+                              >
+                                <Icon
+                                  src={Icons.Sticker}
+                                  filled={emojiBoardTab === EmojiBoardTab.Sticker}
+                                />
+                              </IconButton>
+                            )}
+                            <IconButton
+                              ref={emojiBtnRef}
+                              aria-pressed={
+                                hideStickerBtn
+                                  ? !!emojiBoardTab
+                                  : emojiBoardTab === EmojiBoardTab.Emoji
+                              }
+                              onClick={() => setEmojiBoardTab(EmojiBoardTab.Emoji)}
+                              variant="SurfaceVariant"
+                              size="300"
+                              radii="300"
+                            >
+                              <Icon
+                                src={Icons.Smile}
+                                filled={
+                                  hideStickerBtn
+                                    ? !!emojiBoardTab
+                                    : emojiBoardTab === EmojiBoardTab.Emoji
+                                }
+                              />
+                            </IconButton>
+                          </PopOut>
+                        )}
+                      </UseStateProvider>
+                    </>
+                  )}
+                  <IconButton
+                    onClick={handleRouteCPrimaryAction}
+                    disabled={routeCPrimaryButtonDisabled}
+                    variant="SurfaceVariant"
+                    size="300"
+                    radii="300"
+                    aria-label={routeCPrimaryButtonLabel}
+                    title={routeCPrimaryButtonLabel}
+                    data-testid={
+                      routeCPrimaryAction === 'interrupt'
+                        ? 'oysterun-routec-stop-response-button'
+                        : 'oysterun-routec-send-button'
+                    }
+                    data-oysterun-clean-session-testid={
+                      routeCPrimaryAction === 'interrupt'
+                        ? 'oysterun-clean-session-stop-response-button'
+                        : 'oysterun-clean-session-send-button'
+                    }
+                    data-oysterun-room-id={roomId}
+                    data-oysterun-routec-primary-action={
+                      routeCChatShell ? routeCPrimaryAction : undefined
+                    }
+                    data-oysterun-clean-session-primary-action={
+                      routeCChatShell ? routeCPrimaryAction : undefined
+                    }
+                    data-oysterun-routec-primary-action-source={
+                      routeCPrimaryAction === 'interrupt'
+                        ? 'responding_empty_composer_interrupt'
+                        : undefined
+                    }
+                    data-oysterun-clean-session-primary-action-source={
+                      routeCPrimaryAction === 'interrupt'
+                        ? 'responding_empty_composer_interrupt'
+                        : undefined
+                    }
+                    data-oysterun-routec-agent-responding={
+                      routeCChatShell ? String(routeCRespondingState.agentResponding) : undefined
+                    }
+                    data-oysterun-clean-session-agent-responding={
+                      routeCChatShell ? String(routeCRespondingState.agentResponding) : undefined
+                    }
+                    data-oysterun-routec-composer-text-empty={
+                      routeCChatShell ? String(routeCComposerPlainText.length === 0) : undefined
+                    }
+                    data-oysterun-clean-session-composer-text-empty={
+                      routeCChatShell ? String(routeCComposerPlainText.length === 0) : undefined
+                    }
+                    data-oysterun-routec-stop-response-endpoint={
+                      routeCPrimaryAction === 'interrupt' ? '/session/interrupt' : undefined
+                    }
+                    data-oysterun-clean-session-stop-response-endpoint={
+                      routeCPrimaryAction === 'interrupt' ? '/session/interrupt' : undefined
+                    }
+                    data-oysterun-routec-interrupt-in-flight={
+                      routeCChatShell ? String(routeCInterruptInFlight) : undefined
+                    }
+                    data-oysterun-clean-session-interrupt-in-flight={
+                      routeCChatShell ? String(routeCInterruptInFlight) : undefined
+                    }
+                    data-oysterun-routec-interrupt-one-shot-disabled={
+                      routeCChatShell ? String(routeCInterruptButtonDisabled) : undefined
+                    }
+                    data-oysterun-clean-session-interrupt-one-shot-disabled={
+                      routeCChatShell ? String(routeCInterruptButtonDisabled) : undefined
+                    }
+                    data-oysterun-routec-send-pending={
+                      routeCChatShell ? String(routeCSendPending) : undefined
+                    }
+                    data-oysterun-clean-session-send-pending={
+                      routeCChatShell ? String(routeCSendPending) : undefined
+                    }
+                    data-oysterun-routec-send-pending-key={
+                      routeCChatShell ? routeCSendPendingKey ?? '' : undefined
+                    }
+                    data-oysterun-clean-session-send-pending-key={
+                      routeCChatShell ? routeCSendPendingKey ?? '' : undefined
+                    }
+                    data-oysterun-routec-send-one-shot-disabled={
+                      routeCChatShell ? String(routeCSendButtonDisabled) : undefined
+                    }
+                    data-oysterun-clean-session-send-one-shot-disabled={
+                      routeCChatShell ? String(routeCSendButtonDisabled) : undefined
+                    }
+                    data-oysterun-routec-provider-lifecycle-source={
+                      routeCChatShell ? routeCRespondingState.providerLifecycleSource : undefined
+                    }
+                    data-oysterun-clean-session-provider-lifecycle-source={
+                      routeCChatShell ? routeCRespondingState.providerLifecycleSource : undefined
+                    }
+                    data-oysterun-routec-provider-lifecycle-state={
+                      routeCChatShell ? routeCRespondingState.providerLifecycleState : undefined
+                    }
+                    data-oysterun-clean-session-provider-lifecycle-state={
+                      routeCChatShell ? routeCRespondingState.providerLifecycleState : undefined
+                    }
+                    data-oysterun-routec-related-polling-allowed={
+                      routeCChatShell
+                        ? String(routeCRespondingState.relatedPollingAllowed)
+                        : undefined
+                    }
+                    data-oysterun-clean-session-related-polling-allowed={
+                      routeCChatShell
+                        ? String(routeCRespondingState.relatedPollingAllowed)
+                        : undefined
+                    }
+                  >
+                    {routeCPrimaryAction === 'interrupt' ? (
+                      <span
+                        aria-hidden="true"
+                        data-oysterun-routec-stop-square-icon="true"
+                        data-oysterun-clean-session-stop-square-icon="true"
+                        style={{
+                          width: 12,
+                          height: 12,
+                          borderRadius: 2,
+                          backgroundColor: 'currentColor',
+                          display: 'inline-block',
+                        }}
+                      />
+                    ) : (
+                      <Icon src={Icons.Send} />
+                    )}
+                  </IconButton>
+                </>
+              }
+              bottom={
+                showGenericComposerDecorations &&
+                toolbar && (
+                  <div>
+                    <Line variant="SurfaceVariant" size="300" />
+                    <Toolbar />
+                  </div>
+                )
+              }
             />
           </div>
         </RouteCComposerLocalErrorBoundary>

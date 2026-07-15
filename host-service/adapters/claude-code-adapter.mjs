@@ -1,6 +1,12 @@
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
-import { realpathSync, statSync } from "fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+} from "fs";
 import { basename, dirname, join, normalize, resolve } from "path";
 import { fileURLToPath } from "url";
 
@@ -15,6 +21,31 @@ const HOST_SERVICE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const JSONRPC_VERSION = "2.0";
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 15000;
+const ACP_TERMINAL_TOOL_STATUSES = new Set([
+  "complete",
+  "completed",
+  "done",
+  "success",
+  "succeeded",
+  "fail",
+  "failed",
+  "failure",
+  "error",
+  "cancel",
+  "canceled",
+  "cancelled",
+  "declined",
+]);
+const ACP_ERROR_TOOL_STATUSES = new Set([
+  "fail",
+  "failed",
+  "failure",
+  "error",
+  "cancel",
+  "canceled",
+  "cancelled",
+  "declined",
+]);
 
 function stableJson(value) {
   return JSON.stringify(value);
@@ -65,6 +96,35 @@ function firstString(...values) {
     }
   }
   return "";
+}
+
+function acpClaudeToolName(update) {
+  return firstString(
+    update?._meta?.claudeCode?.toolName,
+    update?.toolName,
+    update?.tool_name,
+    update?.name,
+    update?.title,
+    update?.kind,
+    "tool"
+  );
+}
+
+function acpToolInput(update) {
+  return update?.rawInput ?? update?.input ?? null;
+}
+
+function acpToolContent(update) {
+  return update?.rawOutput ?? update?.output ?? update?.content ?? update?.text ?? null;
+}
+
+function acpProviderMessageId(update) {
+  return firstString(update?.messageId, update?.message_id);
+}
+
+function acpProviderMessageMetadata(update) {
+  const providerMessageId = acpProviderMessageId(update);
+  return providerMessageId ? { provider_message_id: providerMessageId } : {};
 }
 
 function buildPromptBlocks(text) {
@@ -260,6 +320,270 @@ function normalizeStopStatus(stopReason) {
   return "completed";
 }
 
+function isClaudeAcpPromptOutputEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  const eventType = typeof event.type === "string" ? event.type.trim() : "";
+  if (
+    eventType === "message.assistant" ||
+    eventType === "message.thinking" ||
+    eventType === "tool.call" ||
+    eventType === "tool.result" ||
+    eventType === "tool.failure" ||
+    eventType === "control.request" ||
+    eventType === "control.outcome" ||
+    eventType === "runtime.error" ||
+    eventType === "session.exit"
+  ) {
+    return true;
+  }
+  return eventType.startsWith("tool.");
+}
+
+function isClaudeAcpPromptFinalOutputEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  const eventType = typeof event.type === "string" ? event.type.trim() : "";
+  if (eventType === "message.assistant") {
+    return event.delta !== true;
+  }
+  return (
+    eventType === "control.request" ||
+    eventType === "control.outcome" ||
+    eventType === "runtime.error" ||
+    eventType === "session.exit"
+  );
+}
+
+function isClaudeAcpPromptAssistantOutputEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  return typeof event.type === "string" && event.type.trim() === "message.assistant";
+}
+
+function isClaudeAcpAssistantSegmentBoundary(event) {
+  if (!event || typeof event !== "object") return false;
+  const eventType = typeof event.type === "string" ? event.type.trim() : "";
+  return (
+    eventType.startsWith("tool.") ||
+    eventType === "control.request" ||
+    eventType === "control.outcome" ||
+    eventType === "runtime.error" ||
+    eventType === "session.exit"
+  );
+}
+
+export class ClaudeAcpAssistantMessageAssembler {
+  constructor() {
+    this.activeSegment = null;
+    this.segmentCountByMessageId = new Map();
+  }
+
+  consume(event) {
+    if (!event || typeof event !== "object") return [];
+    if (event.type === "message.thinking") return [];
+    if (event.type === "message.assistant" && event.delta === true) {
+      const text = textFromValue(event.text ?? event.content ?? event.body);
+      if (!text) return [event];
+      const providerMessageId = firstString(event.provider_message_id);
+      const output = [];
+      if (
+        this.activeSegment &&
+        providerMessageId !== this.activeSegment.providerMessageId
+      ) {
+        const confirmed = this.flush();
+        if (confirmed) output.push(confirmed);
+      }
+      if (!this.activeSegment) {
+        this.activeSegment = {
+          providerMessageId,
+          chunks: [],
+        };
+      }
+      this.activeSegment.chunks.push(text);
+      output.push(event);
+      return output;
+    }
+
+    const output = [];
+    if (event.type === "message.assistant" && event.delta !== true) {
+      const providerMessageId = firstString(event.provider_message_id);
+      if (
+        this.activeSegment &&
+        providerMessageId &&
+        this.activeSegment.providerMessageId &&
+        providerMessageId !== this.activeSegment.providerMessageId
+      ) {
+        const confirmed = this.flush();
+        if (confirmed) output.push(confirmed);
+      } else {
+        this.activeSegment = null;
+      }
+      output.push(event);
+      return output;
+    }
+    if (isClaudeAcpAssistantSegmentBoundary(event)) {
+      const confirmed = this.flush();
+      if (confirmed) output.push(confirmed);
+    }
+    output.push(event);
+    return output;
+  }
+
+  flush() {
+    const segment = this.activeSegment;
+    this.activeSegment = null;
+    if (!segment) return null;
+    const text = segment.chunks.join("");
+    if (!text) return null;
+    const messageIdKey = segment.providerMessageId || "missing-provider-message-id";
+    const segmentIndex = (this.segmentCountByMessageId.get(messageIdKey) || 0) + 1;
+    this.segmentCountByMessageId.set(messageIdKey, segmentIndex);
+    return {
+      type: "message.assistant",
+      text,
+      ...(segment.providerMessageId
+        ? { provider_message_id: segment.providerMessageId }
+        : {}),
+      acp_stream_aggregate: true,
+      acp_stream_chunk_count: segment.chunks.length,
+      acp_message_segment_index: segmentIndex,
+      source_label: "claude_acp_confirmed_assistant_segment",
+    };
+  }
+}
+
+function isClaudeAcpSuccessfulPromptStatus(status) {
+  const normalized = String(status ?? "").trim().toLowerCase();
+  return normalized === "completed" || normalized === "complete" || normalized === "success";
+}
+
+function claudeAcpTracePath() {
+  if (process.env.OYSTERUN_CLAUDE_ACP_TRACE === "0") return "";
+  if (typeof process.env.OYSTERUN_CLAUDE_ACP_TRACE_PATH === "string") {
+    const configured = process.env.OYSTERUN_CLAUDE_ACP_TRACE_PATH.trim();
+    if (configured) return configured;
+  }
+  const configDir = process.env.OYSTERUN_CONFIG_DIR;
+  if (!configDir) return "";
+  return join(configDir, "operation_logs", "claude-acp-jsonrpc-trace.jsonl");
+}
+
+function redactAcpTraceText(value) {
+  if (typeof value !== "string") return value;
+  return {
+    redacted: true,
+    length: value.length,
+  };
+}
+
+function compactAcpTraceValue(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") return redactAcpTraceText(value);
+  if (typeof value !== "object") return value;
+  if (depth >= 4) {
+    return Array.isArray(value)
+      ? { type: "array", length: value.length }
+      : { type: "object", keys: Object.keys(value).slice(0, 20) };
+  }
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      items: value.slice(0, 4).map((entry) => compactAcpTraceValue(entry, depth + 1)),
+    };
+  }
+  const output = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (/token|secret|password|credential|authorization/i.test(key)) {
+      output[key] = "[redacted]";
+      continue;
+    }
+    if (/text|content|result|output|stdout|stderr|thinking/i.test(key)) {
+      output[key] = redactAcpTraceText(
+        typeof entry === "string" ? entry : stableJson(entry)
+      );
+      continue;
+    }
+    output[key] = compactAcpTraceValue(entry, depth + 1);
+  }
+  return output;
+}
+
+function summarizeAcpTraceMessage(message) {
+  if (!message || typeof message !== "object") return message;
+  const params = message.params && typeof message.params === "object" ? message.params : null;
+  const update = params?.update && typeof params.update === "object" ? params.update : null;
+  return compactObject({
+    id: message.id,
+    method: message.method,
+    has_result: Object.prototype.hasOwnProperty.call(message, "result"),
+    has_error: Object.prototype.hasOwnProperty.call(message, "error"),
+    session_id: params?.sessionId,
+    update_type: update?.sessionUpdate || update?.type || update?.kind,
+    update: update ? compactAcpTraceValue(update) : undefined,
+    result: message.result ? compactAcpTraceValue(message.result) : undefined,
+    error: message.error ? compactAcpTraceValue(message.error) : undefined,
+  });
+}
+
+function appendClaudeAcpTrace(direction, message) {
+  const tracePath = claudeAcpTracePath();
+  if (!tracePath) return;
+  try {
+    mkdirSync(dirname(tracePath), { recursive: true });
+    appendFileSync(
+      tracePath,
+      `${JSON.stringify({
+        at: new Date().toISOString(),
+        pid: process.pid,
+        direction,
+        message: summarizeAcpTraceMessage(message),
+      })}\n`
+    );
+  } catch {
+    // Trace must never affect provider delivery.
+  }
+}
+
+let claudeAcpRawTraceSequence = 0;
+let claudeAcpRawTraceWriteErrorReported = false;
+
+function claudeAcpRawTracePath() {
+  if (process.env.OYSTERUN_CLAUDE_ACP_RAW_TRACE !== "1") return "";
+  if (typeof process.env.OYSTERUN_CLAUDE_ACP_RAW_TRACE_PATH === "string") {
+    const configured = process.env.OYSTERUN_CLAUDE_ACP_RAW_TRACE_PATH.trim();
+    if (configured) return configured;
+  }
+  const configDir = process.env.OYSTERUN_CONFIG_DIR;
+  if (!configDir) return "";
+  return join(configDir, "operation_logs", "claude-acp-raw-events.jsonl");
+}
+
+export function appendClaudeAcpRawInboundTrace(message) {
+  const tracePath = claudeAcpRawTracePath();
+  if (!tracePath) return;
+  try {
+    mkdirSync(dirname(tracePath), { recursive: true, mode: 0o700 });
+    appendFileSync(
+      tracePath,
+      `${JSON.stringify({
+        at: new Date().toISOString(),
+        pid: process.pid,
+        sequence: ++claudeAcpRawTraceSequence,
+        direction: "in",
+        message,
+      })}\n`,
+      { encoding: "utf8", mode: 0o600 }
+    );
+    chmodSync(tracePath, 0o600);
+  } catch (error) {
+    if (!claudeAcpRawTraceWriteErrorReported) {
+      claudeAcpRawTraceWriteErrorReported = true;
+      console.warn(
+        `[claude-acp] raw trace write failed: ${error?.message || String(error)}`
+      );
+    }
+  }
+}
+
 function normalizePermissionOptions(options) {
   return asArray(options)
     .map((option, index) => {
@@ -423,6 +747,8 @@ class JsonRpcLineClient {
       this.onRuntimeError?.(new Error(`Invalid Claude ACP JSON-RPC line: ${error.message}`), { line });
       return;
     }
+    appendClaudeAcpRawInboundTrace(message);
+    appendClaudeAcpTrace("in", message);
     if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
       const pending = this.pending.get(message.id);
       if (!pending) {
@@ -485,6 +811,7 @@ class JsonRpcLineClient {
   }
 
   write(payload) {
+    appendClaudeAcpTrace("out", payload);
     this.proc.stdin?.write(`${JSON.stringify(payload)}\n`);
   }
 
@@ -526,70 +853,111 @@ class JsonRpcLineClient {
   }
 }
 
-function normalizeSessionUpdate(params) {
+export function normalizeClaudeSessionUpdate(params) {
   const update = params?.update ?? params?.sessionUpdate ?? params;
   if (!update || typeof update !== "object") {
     return [];
   }
-  const type = update.type ?? update.kind ?? update.sessionUpdate;
+  const type = update.sessionUpdate ?? update.type ?? update.kind;
   const events = [];
   if (type === "agent_message_chunk") {
     const text = textFromValue(update.content ?? update.delta ?? update.text);
     if (text) {
-      events.push({ type: "message.assistant", text, delta: true });
+      events.push({
+        type: "message.assistant",
+        text,
+        delta: true,
+        ...acpProviderMessageMetadata(update),
+      });
     }
     return events;
   }
   if (type === "agent_message" || type === "agent_message_complete") {
     const text = textFromValue(update.content ?? update.message ?? update.text);
     if (text) {
-      events.push({ type: "message.assistant", text });
+      events.push({
+        type: "message.assistant",
+        text,
+        ...acpProviderMessageMetadata(update),
+      });
     }
     return events;
   }
   if (type === "agent_thought_chunk") {
-    const text = textFromValue(update.content ?? update.delta ?? update.text ?? update.summary);
-    if (text) {
-      events.push({ type: "message.thinking", text, delta: true });
-    }
-    return events;
+    return [];
   }
   if (type === "user_message_chunk") {
     const text = textFromValue(update.content ?? update.delta ?? update.text);
     if (text) {
-      events.push({ type: "message.user.echo", text, delta: true });
+      events.push({
+        type: "message.user.echo",
+        text,
+        delta: true,
+        ...acpProviderMessageMetadata(update),
+      });
     }
     return events;
   }
   if (type === "tool_call") {
     const callId = update.toolCallId ?? update.tool_call_id ?? update.id ?? update.callId;
+    const toolName = acpClaudeToolName(update);
+    const input = acpToolInput(update);
     events.push({
       type: "tool.call",
       call_id: callId,
-      name: firstString(update.title, update.name, update.kind, "tool"),
-      input: update.rawInput ?? update.input ?? update.content ?? null,
+      tool_call_id: callId,
+      name: toolName,
+      tool_name: toolName,
+      input,
+      tool_input: input,
       status: update.status ?? "pending",
+      ...acpProviderMessageMetadata(update),
     });
     return events;
   }
   if (type === "tool_call_update") {
     const callId = update.toolCallId ?? update.tool_call_id ?? update.id ?? update.callId;
     const status = firstString(update.status, update.state);
-    const text = textFromValue(update.rawOutput ?? update.output ?? update.content ?? update.text);
-    if (text || /complete|done|fail|error|cancel/.test(status.toLowerCase())) {
+    const toolName = acpClaudeToolName(update);
+    const input = acpToolInput(update);
+    const content = acpToolContent(update);
+    const text = textFromValue(content);
+    const normalizedStatus = status.toLowerCase();
+    const terminal = ACP_TERMINAL_TOOL_STATUSES.has(normalizedStatus);
+    if (terminal) {
+      const isError = ACP_ERROR_TOOL_STATUSES.has(normalizedStatus);
       events.push({
         type: "tool.result",
         call_id: callId,
+        tool_call_id: callId,
+        name: toolName,
+        tool_name: toolName,
         output: text,
+        content,
+        tool_content: content ?? text,
         status: status || "updated",
+        is_error: isError,
+        ...acpProviderMessageMetadata(update),
       });
       return events;
     }
     events.push({
-      type: "tool.call",
+      type: "tool.update",
       call_id: callId,
-      name: firstString(update.title, update.name, update.kind, "tool"),
+      tool_call_id: callId,
+      name: toolName,
+      tool_name: toolName,
+      input,
+      tool_input: input,
+      content,
+      tool_content: content,
+      update_kind: input
+        ? "input_refinement"
+        : content !== null && content !== undefined
+        ? "output_delta"
+        : "progress",
       status: status || "updated",
+      ...acpProviderMessageMetadata(update),
     });
     return events;
   }
@@ -809,15 +1177,7 @@ function normalizeLegacyMessage(session, message) {
     const events = [];
     for (const block of asArray(message.message?.content ?? message.content)) {
       if (block?.type === "thinking") {
-        const text = String(block.thinking ?? block.text ?? "").trim();
-        if (text) {
-          events.push({
-            type: "message.thinking",
-            text,
-            signature: block.signature,
-            redacted: false,
-          });
-        }
+        continue;
       } else if (block?.type === "text") {
         const text = String(block.text ?? "").trim();
         if (text) {
@@ -926,6 +1286,7 @@ export class ClaudeCodeSession extends EventEmitter {
     this.pendingControls = new Map();
     this.seenUpdates = new Set();
     this.activePromptCount = 0;
+    this.activePromptState = null;
     this._promptEverSent = false;
     this.lastRuntimeError = null;
     this.ready = false;
@@ -1041,10 +1402,11 @@ export class ClaudeCodeSession extends EventEmitter {
         claude_auth_source: this.claudeCliResolution?.source,
       },
     });
-    const queued = this.queue.splice(0);
-    for (const text of queued) {
-      this.send(text);
-    }
+    const drain =
+      typeof this.drainPromptQueue === "function"
+        ? this.drainPromptQueue
+        : ClaudeCodeSession.prototype.drainPromptQueue;
+    drain.call(this);
   }
 
   buildSessionParams() {
@@ -1118,43 +1480,168 @@ export class ClaudeCodeSession extends EventEmitter {
     }
   }
 
+  releasePromptSlot(promptState) {
+    if (!promptState || promptState.promptSlotReleased) return;
+    promptState.promptSlotReleased = true;
+    this.activePromptCount = Math.max(0, this.activePromptCount - 1);
+  }
+
+  emitPromptCompletion(promptState, event) {
+    if (!promptState || !event || promptState.completionEmitted) return;
+    promptState.completionEmitted = true;
+    this.emit("event", event);
+    this.releasePromptSlot(promptState);
+    if (this.activePromptState === promptState) {
+      this.activePromptState = null;
+    }
+  }
+
   send(text) {
     const prompt = String(text ?? "");
+    if (!Array.isArray(this.queue)) {
+      this.queue = [];
+    }
+    this.queue.push(prompt);
+    const drain =
+      typeof this.drainPromptQueue === "function"
+        ? this.drainPromptQueue
+        : ClaudeCodeSession.prototype.drainPromptQueue;
+    drain.call(this);
+  }
+
+  hasActivePromptInFlight() {
+    return Boolean(
+      this.activePromptState &&
+        this.activePromptState.promptSlotReleased !== true &&
+        this.activePromptState.completionEmitted !== true
+    );
+  }
+
+  drainPromptQueue() {
     if (!this.ready) {
-      this.queue.push(prompt);
       return;
     }
+    if (!this.alive || !this.providerSessionId) return;
+    const activePromptInFlight =
+      typeof this.hasActivePromptInFlight === "function"
+        ? this.hasActivePromptInFlight()
+        : ClaudeCodeSession.prototype.hasActivePromptInFlight.call(this);
+    if (activePromptInFlight) {
+      if (this.queue.length > 0 && this.activePromptState) {
+        const requestId = this.activePromptState.requestId || null;
+        if (this._queueWaitRequestId !== requestId) {
+          this._queueWaitRequestId = requestId;
+          this.emit("event", {
+            type: "session.notice",
+            provider: this.provider,
+            subtype: "turn.queue_wait",
+            payload: {
+              session_id: this.providerSessionId,
+              request_id: requestId,
+              queued_prompt_count: this.queue.length,
+            },
+          });
+        }
+      }
+      return;
+    }
+    const prompt = this.queue.shift();
+    if (prompt === undefined) return;
+    const dispatch =
+      typeof this.dispatchPrompt === "function"
+        ? this.dispatchPrompt
+        : ClaudeCodeSession.prototype.dispatchPrompt;
+    dispatch.call(this, prompt);
+  }
+
+  dispatchPrompt(prompt) {
+    const promptState = {
+      outputSeen: false,
+      assistantOutputSeen: false,
+      finalOutputSeen: false,
+      completionEmitted: false,
+      promptSlotReleased: false,
+      cancelRequested: false,
+      assistantMessageAssembler: new ClaudeAcpAssistantMessageAssembler(),
+      requestId: null,
+    };
+    this.activePromptState = promptState;
+    delete this._queueWaitRequestId;
     this._promptEverSent = true;
     this.activePromptCount += 1;
-    this.rpc
-      .request("session/prompt", {
-        sessionId: this.providerSessionId,
-        prompt: buildPromptBlocks(prompt),
-      })
+    const requestPromise = this.rpc.request("session/prompt", {
+      sessionId: this.providerSessionId,
+      prompt: buildPromptBlocks(prompt),
+    });
+    if (
+      requestPromise &&
+      typeof requestPromise === "object" &&
+      Object.prototype.hasOwnProperty.call(requestPromise, "requestId")
+    ) {
+      promptState.requestId = requestPromise.requestId;
+    }
+    Promise.resolve(requestPromise)
       .then((result) => {
-        this.emit("event", {
+        if (promptState.completionEmitted) return;
+        const status = promptState.cancelRequested
+          ? "interrupted"
+          : normalizeStopStatus(result?.stopReason);
+        const completionEvent = {
           type: "turn.completed",
-          status: normalizeStopStatus(result?.stopReason),
-          stop_reason: result?.stopReason,
+          status,
+          stop_reason:
+            result?.stopReason ||
+            (promptState.cancelRequested ? "client_cancel" : null),
           usage: result?.usage ?? null,
-        });
+        };
+        if (isClaudeAcpSuccessfulPromptStatus(status)) {
+          const confirmedEvent = promptState.assistantMessageAssembler.flush();
+          if (confirmedEvent) {
+            promptState.finalOutputSeen = true;
+            this.emit("event", confirmedEvent);
+          }
+        }
+        this.emitPromptCompletion(promptState, completionEvent);
       })
       .catch((error) => {
+        if (promptState.completionEmitted) return;
         this.emitRuntimeError(error, { phase: "prompt" });
-        this.emit("event", {
+        this.emitPromptCompletion(promptState, {
           type: "turn.completed",
           status: "error",
           error: describeError(error),
         });
       })
       .finally(() => {
-        this.activePromptCount = Math.max(0, this.activePromptCount - 1);
+        this.releasePromptSlot(promptState);
+        const drain =
+          typeof this.drainPromptQueue === "function"
+            ? this.drainPromptQueue
+            : ClaudeCodeSession.prototype.drainPromptQueue;
+        drain.call(this);
       });
   }
 
   handleNotification(message) {
-    const events = this.normalizeMessage(message);
+    const normalizedEvents = this.normalizeMessage(message);
+    const promptState = this.activePromptState;
+    const events = promptState?.assistantMessageAssembler
+      ? normalizedEvents.flatMap((event) =>
+          promptState.assistantMessageAssembler.consume(event)
+        )
+      : normalizedEvents;
     for (const event of events) {
+      if (promptState) {
+        if (isClaudeAcpPromptOutputEvent(event)) {
+          promptState.outputSeen = true;
+        }
+        if (isClaudeAcpPromptAssistantOutputEvent(event)) {
+          promptState.assistantOutputSeen = true;
+        }
+        if (isClaudeAcpPromptFinalOutputEvent(event)) {
+          promptState.finalOutputSeen = true;
+        }
+      }
       this.emit("event", event);
     }
   }
@@ -1205,7 +1692,7 @@ export class ClaudeCodeSession extends EventEmitter {
         return [];
       }
       this.seenUpdates.add(dedupeKey);
-      return normalizeSessionUpdate(message.params);
+      return normalizeClaudeSessionUpdate(message.params);
     }
     if (message.method === "session/request_permission") {
       return [normalizePermissionRequest(message)];
@@ -1213,7 +1700,7 @@ export class ClaudeCodeSession extends EventEmitter {
     if (message.type) {
       return normalizeLegacyMessage(this, message);
     }
-    return normalizeSessionUpdate(message);
+    return normalizeClaudeSessionUpdate(message);
   }
 
   respondToControl(payload = {}) {
@@ -1358,12 +1845,39 @@ export class ClaudeCodeSession extends EventEmitter {
         raw_provider_response_exposed: false,
       };
     }
+    const activePromptState = this.activePromptState;
+    if (
+      !activePromptState ||
+      activePromptState.promptSlotReleased === true ||
+      activePromptState.completionEmitted === true
+    ) {
+      return {
+        status: "no_active_prompt",
+        accepted: false,
+        idempotent: true,
+        provider: "claude",
+        provider_interrupt_attempted: false,
+        provider_interrupt_method: "session/cancel",
+        provider_session_id_present: true,
+        reason: "claude_acp_prompt_not_in_flight",
+        raw_provider_response_exposed: false,
+      };
+    }
+    if (activePromptState.cancelRequested === true) {
+      return {
+        status: "already_interrupting",
+        accepted: true,
+        idempotent: true,
+        provider: "claude",
+        provider_interrupt_attempted: false,
+        provider_interrupt_method: "session/cancel",
+        provider_session_id_present: true,
+        reason: "claude_acp_cancel_already_requested",
+        raw_provider_response_exposed: false,
+      };
+    }
+    activePromptState.cancelRequested = true;
     this.rpc.notify("session/cancel", { sessionId: this.providerSessionId });
-    this.emit("event", {
-      type: "turn.completed",
-      status: "interrupted",
-      stop_reason: "client_cancel",
-    });
     return {
       status: "accepted",
       accepted: true,

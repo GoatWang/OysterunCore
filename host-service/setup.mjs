@@ -16,6 +16,7 @@
  *   node setup.mjs --enable-cloud                # Register this Host with Oysterun Cloud
  *   node setup.mjs --backend-url <url>           # Custom Cloud backend URL
  *   node setup.mjs --show-qr                     # Re-show Cloud onboarding QR
+ *   node setup.mjs --non-interactive             # Accept defaults without prompting
  */
 
 import qrcode from "qrcode-terminal";
@@ -130,6 +131,8 @@ function parseArgs() {
       opts.port = parseInt(args[++i], 10);
     } else if (args[i] === "--show-qr") {
       opts.showQr = true;
+    } else if (args[i] === "--non-interactive") {
+      opts.nonInteractive = true;
     } else if (args[i] === "--reset") {
       opts.reset = true;
     } else if (args[i] === "--release-setup") {
@@ -1164,7 +1167,11 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
     console.log(`  Backend: ${backendUrl}`);
     if (config.onboarding_url) {
       console.log(`  Onboarding URL: ${config.onboarding_url}`);
-      console.log("\n  Use --show-qr to display the QR code again.");
+      if (opts.showQr) {
+        printOnboardingQr(config.onboarding_url, config.device_id);
+      } else {
+        console.log("\n  Use --show-qr to display the QR code again.");
+      }
       console.log("  Use --reset to re-register.\n");
     }
     return;
@@ -1173,11 +1180,15 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   const displayName = (
     opts.displayName !== undefined
       ? opts.displayName
-      : await promptWithDefault("Farm display name", displayNameDefault)
+      : opts.nonInteractive
+        ? displayNameDefault
+        : await promptWithDefault("Farm display name", displayNameDefault)
   ).trim() || null;
   const ngrokDomain = opts.ngrokDomain
     || getConfigValue("ngrok_domain", "OYSTERUN_NGROK_DOMAIN")
-    || await prompt("Ngrok static domain (e.g. 'foo.ngrok-free.dev', or press Enter to skip): ");
+    || (opts.nonInteractive
+      ? ""
+      : await prompt("Ngrok static domain (e.g. 'foo.ngrok-free.dev', or press Enter to skip): "));
   const portValue = String(
     parseInt(getConfigValue("port", "OYSTERUN_PORT") || String(defaultConfig.port), 10)
   );
@@ -1188,8 +1199,12 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   if (!Number.isInteger(port) || port <= 0) {
     throw new Error(`Invalid port: ${portInput}`);
   }
-  const defaultBrowseRoot = await promptDefaultBrowseRootForSetup(opts, config);
-  const telemetryUpdates = await promptDailyTelemetryConsentForSetup(config);
+  const defaultBrowseRoot = opts.nonInteractive
+    ? undefined
+    : await promptDefaultBrowseRootForSetup(opts, config);
+  const telemetryUpdates = opts.nonInteractive
+    ? {}
+    : await promptDailyTelemetryConsentForSetup(config);
 
   console.log(`\n  Registering with backend at ${backendUrl}...`);
 
@@ -1265,10 +1280,11 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   console.log(`  Onboarding URL: ${data.onboarding_url}`);
   printDetectedProviderStatus(detectedCommands);
 
-  await maybeShowPhoneAppDownloadStep();
+  if (!opts.nonInteractive) {
+    await maybeShowPhoneAppDownloadStep();
+  }
   printSetupStep(7, "Login QR");
-  console.log("\n  Scan this QR code with the Oysterun app to claim your farm:\n");
-  qrcode.generate(data.onboarding_url, { small: true });
+  printOnboardingQr(data.onboarding_url, data.device_id);
 
   console.log(`\n  Config saved to ${getConfigPath()}`);
   console.log(`  Cloud identity saved to ${getCloudIdentityPath()}`);
@@ -1277,6 +1293,13 @@ async function configureCloudMode(opts, config, backendUrl, backendStage, detect
   console.log(`    2. Run: oysterun`);
   console.log(`       (${creds.tunnel_provider} tunnel will auto-start at ${creds.tunnel_hostname})`);
   console.log();
+}
+
+function printOnboardingQr(onboardingUrl, deviceId) {
+  console.log("\n  Scan this QR code with the Oysterun app to claim your farm:\n");
+  qrcode.generate(onboardingUrl, { small: true });
+  console.log(`\n  URL: ${onboardingUrl}`);
+  console.log(`  Device ID: ${deviceId}\n`);
 }
 
 // ── Main ─────────────────────────────────────────────────────
@@ -1292,7 +1315,7 @@ async function main() {
   const config = readConfig();
 
   // ── --show-qr: Re-display existing QR ──────────────────
-  if (opts.showQr) {
+  if (opts.showQr && !opts.enableCloud) {
     if (config.connection_mode === "direct" && config.host_id && config.direct_host_url) {
       printDirectHostLoginQr({
         hostId: config.host_id,
@@ -1305,10 +1328,7 @@ async function main() {
       console.error("No Host QR found. Run setup with --enable-cloud-direct or --enable-cloud first.");
       process.exit(1);
     }
-    console.log("\n  Scan this QR code with the Oysterun app to onboard your farm:\n");
-    qrcode.generate(config.onboarding_url, { small: true });
-    console.log(`\n  URL: ${config.onboarding_url}`);
-    console.log(`  Device ID: ${config.device_id}\n`);
+    printOnboardingQr(config.onboarding_url, config.device_id);
     return;
   }
 

@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Website
 
-Canonical product skill source lives at `skills/oysterun-website/`. The repo-local Codex mirror at `.codex/skills/oysterun-website/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-website/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-website/`. Generated mirrors live at `.codex/skills/Oysterun/modules/oysterun-website/`, `host-service/assets/product-skills/oysterun-website/`, and `host-service/assets/product-skills/Oysterun/modules/oysterun-website/`. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product website operations. It wraps the P86 product CLI contract:
 
@@ -18,13 +18,13 @@ oysterun website <action> [options]
 The helper delegates to the same CLI surface:
 
 ```bash
-node .codex/skills/oysterun-website/scripts/oysterun_website.mjs validate --agent-id <agent_id> --agent-folder /absolute/agent
+node .codex/skills/Oysterun/modules/oysterun-website/scripts/oysterun_website.mjs validate --agent-id <agent_id> --agent-folder /absolute/agent
 ```
 
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-website/scripts/oysterun_website.mjs status --agent-id <agent_id>
+node .claude/skills/Oysterun/modules/oysterun-website/scripts/oysterun_website.mjs status --agent-id <agent_id>
 ```
 
 ## Commands
@@ -33,6 +33,8 @@ node .claude/skills/oysterun-website/scripts/oysterun_website.mjs status --agent
 - `url`
 - `validate`
 - `init`
+- `enable`
+- `disable --confirm` or `disable --dry-run`
 - `access get`
 - `access set --confirm` or `access set --dry-run`
 - `password set --confirm` or `password set --dry-run`
@@ -58,7 +60,7 @@ external operator shells may still use dashboard CLI auth.
 - Shared agent config: `.oysterun/config.json`
 - Local private overrides: `.oysterun/local.json`
 - Default website root: `.oysterun/site`
-- Shared website config keys: `web.root` and `web.access`
+- Shared website config keys: `web.root`, `web.access`, and `web.enabled`
 - Supported `web.access` values: `owner_only`, `password`, `public`
 - Canonical browser route: `/sites/<agent_id>/...`
 - Required entry page: `.oysterun/site/index.html`
@@ -79,6 +81,13 @@ Use `owner_only` unless a route explicitly asks for public or password-protected
 5. Use relative links and relative asset paths inside the site.
 6. Keep source file preview paths separate from browser routes. `.oysterun/site/index.html` is a source path; `/sites/<agent_id>/` is the browser route.
 7. Validate with `oysterun website validate` before reporting completion.
+8. Enable an initialized website with `oysterun website enable --agent-id <agent_id> --agent-folder /absolute/agent`.
+
+`oysterun website enable` requires an initialized site with an existing
+`index.html`; it must not create a fake enabled state. Run
+`oysterun website init` first when the site does not exist. `oysterun website
+disable --confirm` persists `web.enabled=false` and does not delete website
+files.
 
 ## Phone-First Requirements
 
@@ -101,5 +110,7 @@ Use `owner_only` unless a route explicitly asks for public or password-protected
 - Do not require `vite`, `python -m http.server`, `npx serve`, Django, or any localhost server for the final Oysterun user flow.
 - Do not tell users to open `file://` URLs or fixed-IP report URLs.
 - Do not call website Host endpoints directly from this skill.
+- Website enable/disable is persisted agent-folder state, not a
+  current-session-only runtime override.
 - Use `--dry-run` before access or password changes unless the route explicitly authorizes mutation.
 - Do not print tokens, cookies, passwords, auth headers, raw profile files, or raw website passwords.

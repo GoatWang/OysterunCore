@@ -29,8 +29,17 @@ data/latest_report.html
 
 ## Scheduled Run
 
-The sample includes an enabled daily scheduler at 11:30 Asia/Taipei. The
-scheduled task runs:
+The sample includes enabled daily scheduler templates at 11:30 Asia/Taipei for
+both Codex and Claude.
+
+Scheduler task contracts:
+
+```text
+Codex  -> .codex/prompts/scheduler_task.md
+Claude -> .claude/commands/scheduler_task.md
+```
+
+Both scheduled tasks run:
 
 ```bash
 uv run tasks/repo_crawler_rich.py --days 1

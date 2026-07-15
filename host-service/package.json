@@ -1,6 +1,6 @@
 {
   "name": "oysterun-host-service",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "type": "module",
   "description": "Oysterun host service — runs on Mac mini, manages Claude Code sessions",
   "scripts": {
@@ -16,7 +16,8 @@
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
     "cli": "node cli.mjs",
-    "test": "node test-jwt-auth.mjs && node test-host-boundary.mjs && node test-apns-push.mjs && node test-host-telemetry.mjs",
+    "test": "node test-jwt-auth.mjs && node test-telegram-markdown-delivery.mjs && node test-host-boundary.mjs && node test-apns-push.mjs && node test-host-telemetry.mjs",
+    "test:telegram-markdown": "node test-telegram-markdown-delivery.mjs",
     "test:telemetry": "node test-host-telemetry.mjs"
   },
   "dependencies": {

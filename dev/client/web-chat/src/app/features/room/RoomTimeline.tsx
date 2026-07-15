@@ -702,6 +702,74 @@ function getRouteCHostOwnerNeighborAnchorKey(anchor: RouteCHostOwnerNeighborAnch
     : `${anchor.kind}:${anchor.source}`;
 }
 
+function getRouteCHostOwnerNeighborWindowExhausted(
+  response: OysterunHostOwnerMessageNeighborsResponse | null,
+  direction: 'previous' | 'next'
+): boolean {
+  if (!response) return false;
+  const boundaryValue =
+    direction === 'previous'
+      ? response.boundaries.previous_window_exhausted
+      : response.boundaries.next_window_exhausted;
+  const proofValue =
+    direction === 'previous'
+      ? response.proof.previous_window_exhausted
+      : response.proof.next_window_exhausted;
+  return boundaryValue === true || proofValue === true;
+}
+
+function getRouteCHostOwnerNeighborDisabledReason(
+  response: OysterunHostOwnerMessageNeighborsResponse | null,
+  direction: 'previous' | 'next',
+  loading: boolean,
+  fallback: string | null
+): string {
+  if (loading) return 'loading';
+  if (!response) return fallback ?? 'not_ready';
+  const target = direction === 'previous' ? response.previous : response.next;
+  if (target?.event_id) return '';
+  if (getRouteCHostOwnerNeighborWindowExhausted(response, direction)) {
+    return `${direction}_window_exhausted`;
+  }
+  if (response.boundaries.no_host_owner_messages) return 'no_host_owner_messages';
+  if (direction === 'previous' && response.boundaries.at_first_host_owner_message) {
+    return 'at_first_host_owner_message';
+  }
+  if (direction === 'next' && response.boundaries.at_latest_host_owner_message) {
+    return 'at_latest_host_owner_message';
+  }
+  return `no_${direction}_host_owner_message`;
+}
+
+function getRouteCHostOwnerNeighborTitle({
+  direction,
+  disabledReason,
+}: {
+  direction: 'previous' | 'next';
+  disabledReason: string;
+}): string {
+  if (!disabledReason) {
+    return direction === 'previous' ? 'Previous Host Owner message' : 'Next Host Owner message';
+  }
+  if (disabledReason === 'loading') return 'Loading Host Owner messages';
+  if (disabledReason === 'previous_window_exhausted') {
+    return 'No nearby previous Host Owner message found. Scroll closer or use search.';
+  }
+  if (disabledReason === 'next_window_exhausted') {
+    return 'No nearby next Host Owner message found. Scroll closer or use search.';
+  }
+  if (disabledReason === 'at_first_host_owner_message') {
+    return 'Already at first Host Owner message';
+  }
+  if (disabledReason === 'at_latest_host_owner_message') {
+    return 'Already at latest Host Owner message';
+  }
+  if (disabledReason === 'no_host_owner_messages') return 'No Host Owner messages found';
+  return direction === 'previous'
+    ? 'No previous Host Owner message found'
+    : 'No next Host Owner message found';
+}
+
 function oysterunUniqueEventIds(eventIds: string[]): string[] {
   return Array.from(new Set(eventIds));
 }
@@ -754,7 +822,7 @@ function getOysterunToolPayloadValue(
   payload: OysterunSemanticPayload,
   semanticType: string
 ): unknown {
-  if (semanticType === 'tool.call') return payload.tool_input;
+  if (semanticType === 'tool.call' || semanticType === 'tool.update') return payload.tool_input;
   return payload.tool_content ?? payload.tool_input;
 }
 
@@ -4234,6 +4302,36 @@ export function RoomTimeline({
   const routeCHostOwnerPreviousEventId =
     routeCHostOwnerNeighborState.response?.previous?.event_id ?? '';
   const routeCHostOwnerNextEventId = routeCHostOwnerNeighborState.response?.next?.event_id ?? '';
+  const routeCHostOwnerNeighborResponse = routeCHostOwnerNeighborState.response;
+  const routeCHostOwnerNeighborProof = routeCHostOwnerNeighborResponse?.proof;
+  const routeCHostOwnerPreviousWindowExhausted = getRouteCHostOwnerNeighborWindowExhausted(
+    routeCHostOwnerNeighborResponse,
+    'previous'
+  );
+  const routeCHostOwnerNextWindowExhausted = getRouteCHostOwnerNeighborWindowExhausted(
+    routeCHostOwnerNeighborResponse,
+    'next'
+  );
+  const routeCHostOwnerPreviousDisabledReason = getRouteCHostOwnerNeighborDisabledReason(
+    routeCHostOwnerNeighborResponse,
+    'previous',
+    routeCHostOwnerNeighborState.loading,
+    routeCHostOwnerNeighborState.disabledReason
+  );
+  const routeCHostOwnerNextDisabledReason = getRouteCHostOwnerNeighborDisabledReason(
+    routeCHostOwnerNeighborResponse,
+    'next',
+    routeCHostOwnerNeighborState.loading,
+    routeCHostOwnerNeighborState.disabledReason
+  );
+  const routeCHostOwnerPreviousTitle = getRouteCHostOwnerNeighborTitle({
+    direction: 'previous',
+    disabledReason: routeCHostOwnerPreviousDisabledReason,
+  });
+  const routeCHostOwnerNextTitle = getRouteCHostOwnerNeighborTitle({
+    direction: 'next',
+    disabledReason: routeCHostOwnerNextDisabledReason,
+  });
   const routeCHostOwnerNeighborControlsVisible = routeCChatShell && displayItemsLength > 0;
   const routeCHostOwnerLookupState = routeCHostOwnerNeighborState.loading
     ? 'loading'
@@ -4433,21 +4531,58 @@ export function RoomTimeline({
           }
           data-oysterun-routec-host-owner-neighbor-error={routeCHostOwnerNeighborState.error ?? ''}
           data-oysterun-routec-host-owner-neighbor-actor-key="human"
+          data-oysterun-routec-host-owner-neighbor-actor-kind="human"
           data-oysterun-routec-host-owner-neighbor-body-scan-used="false"
           data-oysterun-routec-host-owner-neighbor-display-name-used="false"
+          data-oysterun-routec-host-owner-neighbor-proof-schema={
+            routeCHostOwnerNeighborProof?.schema_version ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-lookup-strategy={
+            routeCHostOwnerNeighborProof?.lookup_strategy ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-total-event-count={
+            routeCHostOwnerNeighborProof?.total_event_count ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-max-scan-events-per-direction={
+            routeCHostOwnerNeighborProof?.max_scan_events_per_direction ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-previous-scanned-event-count={
+            routeCHostOwnerNeighborProof?.previous_scanned_event_count ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-next-scanned-event-count={
+            routeCHostOwnerNeighborProof?.next_scanned_event_count ?? ''
+          }
+          data-oysterun-routec-host-owner-neighbor-previous-window-exhausted={String(
+            routeCHostOwnerPreviousWindowExhausted
+          )}
+          data-oysterun-routec-host-owner-neighbor-next-window-exhausted={String(
+            routeCHostOwnerNextWindowExhausted
+          )}
+          data-oysterun-routec-host-owner-neighbor-previous-disabled-reason={
+            routeCHostOwnerPreviousDisabledReason
+          }
+          data-oysterun-routec-host-owner-neighbor-next-disabled-reason={
+            routeCHostOwnerNextDisabledReason
+          }
           data-oysterun-routec-host-owner-neighbor-placement="right_bottom_above_composer"
           data-oysterun-routec-host-owner-neighbor-layout="vertical"
         >
           <button
             type="button"
-            aria-label="Previous Host Owner message"
-            title="Previous Host Owner message"
+            aria-label={routeCHostOwnerPreviousTitle}
+            title={routeCHostOwnerPreviousTitle}
             disabled={routeCHostOwnerNeighborState.loading || !routeCHostOwnerPreviousEventId}
             onClick={() => handleRouteCHostOwnerNeighborNavigation('previous')}
             data-testid="oysterun-routec-host-owner-neighbor-previous"
             data-oysterun-routec-host-owner-neighbor-control="previous"
             data-oysterun-routec-host-owner-neighbor-target-event-id={
               routeCHostOwnerPreviousEventId
+            }
+            data-oysterun-routec-host-owner-neighbor-window-exhausted={String(
+              routeCHostOwnerPreviousWindowExhausted
+            )}
+            data-oysterun-routec-host-owner-neighbor-disabled-reason={
+              routeCHostOwnerPreviousDisabledReason
             }
             style={{
               display: 'inline-flex',
@@ -4470,13 +4605,19 @@ export function RoomTimeline({
           </button>
           <button
             type="button"
-            aria-label="Next Host Owner message"
-            title="Next Host Owner message"
+            aria-label={routeCHostOwnerNextTitle}
+            title={routeCHostOwnerNextTitle}
             disabled={routeCHostOwnerNeighborState.loading || !routeCHostOwnerNextEventId}
             onClick={() => handleRouteCHostOwnerNeighborNavigation('next')}
             data-testid="oysterun-routec-host-owner-neighbor-next"
             data-oysterun-routec-host-owner-neighbor-control="next"
             data-oysterun-routec-host-owner-neighbor-target-event-id={routeCHostOwnerNextEventId}
+            data-oysterun-routec-host-owner-neighbor-window-exhausted={String(
+              routeCHostOwnerNextWindowExhausted
+            )}
+            data-oysterun-routec-host-owner-neighbor-disabled-reason={
+              routeCHostOwnerNextDisabledReason
+            }
             style={{
               display: 'inline-flex',
               alignItems: 'center',

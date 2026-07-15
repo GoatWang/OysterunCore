@@ -7,7 +7,7 @@ metadata:
 
 # Oysterun Scheduler
 
-Canonical product skill source lives at `skills/oysterun-scheduler/`. The repo-local Codex mirror at `.codex/skills/oysterun-scheduler/` and the Host packaged asset at `host-service/assets/product-skills/oysterun-scheduler/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
+Canonical product skill source lives at `skills/oysterun-scheduler/`. The repo-local Codex mirror at `.codex/skills/Oysterun/modules/oysterun-scheduler/` and Host packaged assets at `host-service/assets/product-skills/oysterun-scheduler/` and `host-service/assets/product-skills/Oysterun/modules/oysterun-scheduler/` are generated mirrors. Run `node tool_scripts/sync_product_skills_to_codex.mjs` after changing this skill and `node tool_scripts/check_product_skill_mirrors.mjs` before review.
 
 Use this module skill for normal product scheduler operations. It wraps the P86 product CLI contract:
 
@@ -18,13 +18,13 @@ oysterun scheduler <action> [options]
 The helper delegates to the same CLI surface:
 
 ```bash
-node .codex/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs list --host http://localhost:2322
+node .codex/skills/Oysterun/modules/oysterun-scheduler/scripts/oysterun_scheduler.mjs list --host http://localhost:2322
 ```
 
 When Host injects this skill into a live session, the helper path is:
 
 ```bash
-node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs list
+node .claude/skills/Oysterun/modules/oysterun-scheduler/scripts/oysterun_scheduler.mjs list
 ```
 
 ## Commands
@@ -53,8 +53,8 @@ create --interval ...` for in-session loops.
 When creating or updating a Host scheduler, prefer an existing session config:
 
 ```bash
-node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --prompt "..." --frequency daily --time 09:00
-node .claude/skills/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --session-ref "My Agent Session" --prompt "..." --frequency daily --time 09:00
+node .claude/skills/Oysterun/modules/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --prompt "..." --frequency daily --time 09:00
+node .claude/skills/Oysterun/modules/oysterun-scheduler/scripts/oysterun_scheduler.mjs create --session-ref "My Agent Session" --prompt "..." --frequency daily --time 09:00
 ```
 
 Do not import Host scheduler internals, call `/scheduler/*` endpoints directly,
