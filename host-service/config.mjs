@@ -315,6 +315,16 @@ const DEBUG_P135_CODEX_REPLAY_MODEL_CATALOG = freezeModelCatalog([
   },
 ]);
 
+const DEBUG_ROUTEC_STRUCTURAL_REPLAY_MODEL_CATALOG = freezeModelCatalog([
+  {
+    id: "routec-structural-replay",
+    label: "Route C Structural Replay",
+    reasoningEffortOptions: [],
+    defaultReasoningEffort: null,
+    isDefault: true,
+  },
+]);
+
 const PROVIDER_MODEL_CATALOG = Object.freeze({
   claude: CLAUDE_MODEL_CATALOG,
   codex: CODEX_MODEL_CATALOG,
@@ -329,6 +339,8 @@ const PROVIDER_MODEL_CATALOG = Object.freeze({
     },
   ]),
   "debug-p135-codex-replay": DEBUG_P135_CODEX_REPLAY_MODEL_CATALOG,
+  "debug-routec-structural-replay":
+    DEBUG_ROUTEC_STRUCTURAL_REPLAY_MODEL_CATALOG,
 });
 
 const DEFAULT_SESSION_DEFAULTS = Object.freeze({
@@ -503,6 +515,7 @@ const DEFAULT_CONFIG = Object.freeze({
   debug_fixture_provider_enabled: false,
   debug_large_tool_spillover_provider_enabled: false,
   debug_p135_codex_replay_provider_enabled: false,
+  debug_routec_structural_replay_provider_enabled: false,
   debug_show_capability_ui: false,
   show_interface_style_in_session_setup_profile: false,
   debug_dashboard_session_ttl_hours: -1,
@@ -513,11 +526,13 @@ const DEFAULT_CONFIG = Object.freeze({
   debug_routec_auth_loss_diagnostics_enabled: false,
   debug_routec_runtime_proof_artifacts_enabled: false,
   debug_routec_chat_liveness_diagnostics_enabled: false,
+  debug_routec_viewport_geometry_diagnostics_enabled: false,
   debug_routec_tool_detail_source_ui_enabled: false,
   debug_routec_facade_transcript_rotation_enabled: true,
   debug_routec_facade_transcript_max_bytes: 262144,
   debug_routec_facade_transcript_max_files: 3,
   debug_host_preferences_full_disk_access_block_enabled: false,
+  debug_host_preferences_beta_update_enabled: false,
   debug_cloud_backend_stage: PRODUCT_CLOUD_BACKEND_STAGE,
   allowed_path: DEFAULT_ALLOWED_PATH_DEBUG_CONFIG,
   provider_permission: DEFAULT_PROVIDER_PERMISSION_DEBUG_CONFIG,
@@ -536,6 +551,7 @@ const DEBUG_CONFIG_KEYS = Object.freeze([
   "debug_fixture_provider_enabled",
   "debug_large_tool_spillover_provider_enabled",
   "debug_p135_codex_replay_provider_enabled",
+  "debug_routec_structural_replay_provider_enabled",
   "debug_show_capability_ui",
   "show_interface_style_in_session_setup_profile",
   "debug_dashboard_session_ttl_hours",
@@ -545,12 +561,14 @@ const DEBUG_CONFIG_KEYS = Object.freeze([
   "debug_routec_auth_loss_diagnostics_enabled",
   "debug_routec_runtime_proof_artifacts_enabled",
   "debug_routec_chat_liveness_diagnostics_enabled",
+  "debug_routec_viewport_geometry_diagnostics_enabled",
   "debug_routec_tool_detail_source_ui_enabled",
   "debug_apns_runtime_observability_enabled",
   "debug_routec_facade_transcript_rotation_enabled",
   "debug_routec_facade_transcript_max_bytes",
   "debug_routec_facade_transcript_max_files",
   "debug_host_preferences_full_disk_access_block_enabled",
+  "debug_host_preferences_beta_update_enabled",
   "debug_cloud_backend_stage",
   "allowed_path",
   "provider_permission",
@@ -1790,6 +1808,11 @@ function normalizeConfig(config) {
       migratedCredentialConfig.debug_fixture_provider_enabled,
       DEFAULT_CONFIG.debug_fixture_provider_enabled
     ),
+    debug_routec_structural_replay_provider_enabled:
+      normalizeBooleanWithDefault(
+        migratedCredentialConfig.debug_routec_structural_replay_provider_enabled,
+        DEFAULT_CONFIG.debug_routec_structural_replay_provider_enabled
+      ),
     debug_show_capability_ui: normalizeBooleanWithDefault(
       migratedCredentialConfig.debug_show_capability_ui,
       DEFAULT_CONFIG.debug_show_capability_ui
@@ -1823,6 +1846,11 @@ function normalizeConfig(config) {
       migratedCredentialConfig.debug_routec_chat_liveness_diagnostics_enabled,
       DEFAULT_CONFIG.debug_routec_chat_liveness_diagnostics_enabled
     ),
+    debug_routec_viewport_geometry_diagnostics_enabled:
+      normalizeBooleanWithDefault(
+        migratedCredentialConfig.debug_routec_viewport_geometry_diagnostics_enabled,
+        DEFAULT_CONFIG.debug_routec_viewport_geometry_diagnostics_enabled
+      ),
     debug_routec_tool_detail_source_ui_enabled: normalizeBooleanWithDefault(
       migratedCredentialConfig.debug_routec_tool_detail_source_ui_enabled,
       DEFAULT_CONFIG.debug_routec_tool_detail_source_ui_enabled
@@ -1845,6 +1873,10 @@ function normalizeConfig(config) {
         migratedCredentialConfig.debug_host_preferences_full_disk_access_block_enabled,
         DEFAULT_CONFIG.debug_host_preferences_full_disk_access_block_enabled
       ),
+    debug_host_preferences_beta_update_enabled: normalizeBooleanWithDefault(
+      migratedCredentialConfig.debug_host_preferences_beta_update_enabled,
+      DEFAULT_CONFIG.debug_host_preferences_beta_update_enabled
+    ),
     debug_cloud_backend_stage: normalizeCloudBackendStage(
       migratedCredentialConfig.debug_cloud_backend_stage
     ),

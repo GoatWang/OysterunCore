@@ -53,7 +53,7 @@ import { eventWithShortcode, factoryEventSentBy, getMxIdLocalPart } from '../../
 import { useMatrixClient } from '../../hooks/useMatrixClient';
 import { useVirtualPaginator, ItemRange } from '../../hooks/useVirtualPaginator';
 import { useAlive } from '../../hooks/useAlive';
-import { editableActiveElement, isIntersectingScrollView, scrollToBottom } from '../../utils/dom';
+import { editableActiveElement, scrollToBottom } from '../../utils/dom';
 import {
   DefaultPlaceholder,
   CompactPlaceholder,
@@ -127,7 +127,6 @@ import { useRoomCreators } from '../../hooks/useRoomCreators';
 import { useRoomPermissions } from '../../hooks/useRoomPermissions';
 import { useAccessiblePowerTagColors, useGetMemberPowerTag } from '../../hooks/useMemberPowerTag';
 import { useTheme } from '../../hooks/useTheme';
-import { ScreenSize, useScreenSizeContext } from '../../hooks/useScreenSize';
 import { useRoomCreatorsTag } from '../../hooks/useRoomCreatorsTag';
 import { usePowerLevelTags } from '../../hooks/usePowerLevelTags';
 import {
@@ -139,7 +138,9 @@ import {
   getOysterunHostSessionChatPath,
   getOysterunHostSessionBrowserPathOrTargetFallback,
   getOysterunHostSessionRouteSearch,
+  isOysterunRouteCViewportGeometryDiagnosticsEnabled,
   recordOysterunCancelControlProof,
+  recordOysterunRouteCViewportGeometryDiagnostic,
   requestOysterunActiveRoomTimelineFocus,
   subscribeOysterunActiveRoomTimelineFocus,
   type OysterunHostOwnerMessageNeighborsResponse,
@@ -153,16 +154,13 @@ import {
   type OysterunRouteCRespondingState,
 } from '../../../oysterun/OysterunMessageLifecycle';
 import { isOysterunCapacitorIOSRuntime } from '../../../oysterun/OysterunNotificationRuntime';
+import { normalizeOysterunInternalAppRouteTarget } from '../../../oysterun/OysterunInternalAppRoute';
+import { useOysterunIOSRemotePaginationTransaction } from '../../../oysterun/useOysterunIOSRemotePaginationTransaction';
 import type {
   OysterunSemanticControlOutcome,
   OysterunSemanticPayload,
-  OysterunToolCompression,
-  OysterunToolCompressionDetail,
 } from '../../../oysterun/OysterunSemanticRenderer';
-import {
-  isOysterunProviderCompletionMarkerContent,
-  isOysterunToolSemanticType,
-} from '../../../oysterun/OysterunSemanticRenderer';
+import { isOysterunProviderCompletionMarkerContent } from '../../../oysterun/OysterunSemanticRenderer';
 
 const OYSTERUN_ROUTE_C_PHASE1_EDIT_ENABLED = false;
 const OYSTERUN_SEMANTIC_NAMESPACE = 'org.oysterun.semantic.v1';
@@ -185,7 +183,7 @@ const TimelineFloat = as<'div', css.TimelineFloatVariants>(
       {...props}
       ref={ref}
     />
-  )
+  ),
 );
 
 const TimelineDivider = as<'div', { variant?: ContainerColor | 'Inherit' }>(
@@ -195,17 +193,19 @@ const TimelineDivider = as<'div', { variant?: ContainerColor | 'Inherit' }>(
       {children}
       <Line style={{ flexGrow: 1 }} variant={variant} size="300" />
     </Box>
-  )
+  ),
 );
 
 type RouteCEmptyComposerGuidanceProps = {
-  displayItemsLength: number;
-  displayRange: ItemRange;
+  rawEventCount: number;
+  rawEventRange: ItemRange;
+  productVisibleEventCount: number;
 };
 
 function RouteCEmptyComposerGuidance({
-  displayItemsLength,
-  displayRange,
+  rawEventCount,
+  rawEventRange,
+  productVisibleEventCount,
 }: RouteCEmptyComposerGuidanceProps) {
   return (
     <Box
@@ -221,10 +221,14 @@ function RouteCEmptyComposerGuidance({
       data-oysterun-clean-session-testid="oysterun-clean-session-empty-composer-guidance"
       data-oysterun-routec-empty-guidance="composer"
       data-oysterun-clean-session-empty-guidance="composer"
-      data-oysterun-routec-empty-guidance-display-items={String(displayItemsLength)}
-      data-oysterun-clean-session-empty-guidance-display-items={String(displayItemsLength)}
-      data-oysterun-routec-empty-guidance-range={`${displayRange.start}-${displayRange.end}`}
-      data-oysterun-clean-session-empty-guidance-range={`${displayRange.start}-${displayRange.end}`}
+      data-oysterun-routec-empty-guidance-raw-events={String(rawEventCount)}
+      data-oysterun-clean-session-empty-guidance-raw-events={String(rawEventCount)}
+      data-oysterun-routec-empty-guidance-range={`${rawEventRange.start}-${rawEventRange.end}`}
+      data-oysterun-clean-session-empty-guidance-range={`${rawEventRange.start}-${rawEventRange.end}`}
+      data-oysterun-routec-empty-guidance-product-visible-events={String(productVisibleEventCount)}
+      data-oysterun-clean-session-empty-guidance-product-visible-events={String(
+        productVisibleEventCount,
+      )}
     >
       <Box
         direction="Column"
@@ -286,7 +290,7 @@ export const getEventTimeline = (room: Room, eventId: string): EventTimeline | u
 
 export const getFirstLinkedTimeline = (
   timeline: EventTimeline,
-  direction: Direction
+  direction: Direction,
 ): EventTimeline => {
   const linkedTm = timeline.getNeighbouringTimeline(direction);
   if (!linkedTm) return timeline;
@@ -316,7 +320,7 @@ export const getTimelinesEventsCount = (timelines: EventTimeline[]): number => {
 
 export const getTimelineAndBaseIndex = (
   timelines: EventTimeline[],
-  index: number
+  index: number,
 ): [EventTimeline | undefined, number] => {
   let uptoTimelineLen = 0;
   const timeline = timelines.find((t) => {
@@ -337,7 +341,7 @@ export const getTimelineEvent = (timeline: EventTimeline, index: number): Matrix
 export const getEventIdAbsoluteIndex = (
   timelines: EventTimeline[],
   eventTimeline: EventTimeline,
-  eventId: string
+  eventId: string,
 ): number | undefined => {
   const timelineIndex = timelines.findIndex((t) => t === eventTimeline);
   if (timelineIndex === -1) return undefined;
@@ -358,27 +362,27 @@ type RoomTimelineProps = {
 };
 
 const PAGINATION_LIMIT = 80;
-// Keep Cinny's bottom anchor semantics, plus a small Route C distance tolerance for heavy renders.
-const OYSTERUN_ROUTE_C_BOTTOM_ANCHOR_ROOT_MARGIN = '100px';
-const OYSTERUN_ROUTE_C_NEAR_BOTTOM_THRESHOLD_PX = 160;
-const OYSTERUN_ROUTE_C_PROGRAMMATIC_SCROLL_GUARD_MS = 300;
-const OYSTERUN_ROUTE_C_IOS_SCROLL_PAINT_NUDGE_PX = 1;
-const OYSTERUN_ROUTE_C_INITIAL_BOTTOM_SETTLE_MS = 1500;
-const OYSTERUN_ROUTE_C_REMOTE_PAGINATION_SETTLE_MS = 600;
-const OYSTERUN_ROUTE_C_COMPRESSED_TOOL_PLACEHOLDER_HEIGHT_PX = 0.25;
-const OYSTERUN_ROUTE_C_DENSE_TOOL_PAGINATION_MAX_LIMIT = 240;
-const OYSTERUN_ROUTE_C_DENSE_TOOL_PAGINATION_PADDING = 16;
-const OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_RETRY_LIMIT = 2;
-const OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_THRESHOLD_PX = 96;
-const OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_PLACEHOLDER_RATIO = 0.75;
-const OYSTERUN_ROUTE_C_ESTIMATED_MATRIX_EVENT_PROGRESS_PX = 64;
-const OYSTERUN_ROUTE_C_ESTIMATED_DIVIDER_PROGRESS_PX = 24;
-const OYSTERUN_ROUTE_C_ESTIMATED_COMPRESSED_GROUP_PROGRESS_PX = 24;
-const OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE = 10;
 const OYSTERUN_ROUTE_C_INLINE_LINK_SELECTOR = 'a[data-oysterun-inline-link-kind]';
 const OYSTERUN_ROUTE_C_LOCAL_PATH_DISCLOSURE_SELECTOR = `${OYSTERUN_ROUTE_C_INLINE_LINK_SELECTOR}[data-oysterun-local-path-disclosure]`;
 const OYSTERUN_ROUTE_C_HOST_OWNER_NEIGHBOR_LOOKUP_DEBOUNCE_MS = 320;
 const OYSTERUN_ROUTE_C_HOST_OWNER_FOCUS_SCROLL_GUARD_MS = 1600;
+const OYSTERUN_ROUTE_C_VIEWPORT_DIAGNOSTIC_SCROLL_WINDOW_MS = 1_200;
+const OYSTERUN_ROUTE_C_VIEWPORT_DIAGNOSTIC_SCROLL_THROTTLE_MS = 100;
+
+type RouteCLiveBottomTransaction = {
+  revision: number;
+  matrixEventId?: string;
+  previousMaxScrollTop: number;
+};
+
+type RouteCLiveBottomTransactionDiagnostic = {
+  phase: 'queued' | 'committed' | 'cancelled';
+  revision: number;
+  matrixEventId?: string;
+  previousMaxScrollTop: number;
+  currentMaxScrollTop?: number;
+  behavior?: 'instant' | 'smooth';
+};
 
 type RouteCHostOwnerNeighborAnchor =
   | {
@@ -399,31 +403,24 @@ type RouteCHostOwnerNeighborState = {
   disabledReason: string | null;
 };
 
-type RouteCOpenEventOptions = {
-  forceScroll?: boolean;
-  scrollBehavior?: 'auto' | 'instant' | 'smooth';
-};
-
 type OysterunRouteCInlineLinkKind =
-  | 'file_preview_link'
-  | 'directory_link'
-  | 'browser_link'
-  | 'external_url';
+  'file_preview_link' | 'directory_link' | 'browser_link' | 'internal_app_route' | 'external_url';
 
 function isOysterunRouteCInlineLinkKind(
-  value: string | null
+  value: string | null,
 ): value is OysterunRouteCInlineLinkKind {
   return (
     value === 'file_preview_link' ||
     value === 'directory_link' ||
     value === 'browser_link' ||
+    value === 'internal_app_route' ||
     value === 'external_url'
   );
 }
 
 function isOysterunCleanSessionRoutePath(
   pathname: string,
-  expectedSurface: 'file-preview' | 'explorer'
+  expectedSurface: 'file-preview' | 'explorer',
 ): boolean {
   const parts = pathname.split('/').filter(Boolean);
   return (
@@ -436,12 +433,15 @@ function isOysterunCleanSessionRoutePath(
 
 function readOysterunRouteCInlineLinkTarget(
   anchor: HTMLAnchorElement,
-  kind: OysterunRouteCInlineLinkKind
+  kind: OysterunRouteCInlineLinkKind,
 ): string | undefined {
   if (kind === 'external_url') return undefined;
   const rawTarget =
     anchor.getAttribute('data-oysterun-inline-link-target') || anchor.getAttribute('href');
   if (!rawTarget) return undefined;
+  if (kind === 'internal_app_route') {
+    return normalizeOysterunInternalAppRouteTarget(rawTarget, window.location.origin);
+  }
   let targetUrl: URL;
   try {
     targetUrl = new URL(rawTarget, window.location.origin);
@@ -480,7 +480,7 @@ function openOysterunRouteCInlineLinkTarget(routeTarget: string): void {
   window.open(
     new URL(routeTarget, window.location.origin).toString(),
     '_blank',
-    'noopener,noreferrer'
+    'noopener,noreferrer',
   );
 }
 
@@ -518,7 +518,7 @@ function collapseOysterunLocalPathLinks(root: Element, except?: HTMLAnchorElemen
   let collapsed = false;
   root
     .querySelectorAll<HTMLAnchorElement>(
-      `${OYSTERUN_ROUTE_C_INLINE_LINK_SELECTOR}[data-oysterun-inline-link-expanded="true"]`
+      `${OYSTERUN_ROUTE_C_INLINE_LINK_SELECTOR}[data-oysterun-inline-link-expanded="true"]`,
     )
     .forEach((anchor) => {
       if (anchor !== except && collapseOysterunLocalPathLink(anchor)) {
@@ -555,70 +555,73 @@ function isOysterunLocalPathDisclosureDeadArea(target: Element): boolean {
       '[role="menuitem"]',
       '[role="dialog"]',
       '[contenteditable="true"]',
-    ].join(',')
+    ].join(','),
   );
 }
 
 type Timeline = {
   linkedTimelines: EventTimeline[];
   range: ItemRange;
-  displayModelRevision: number;
 };
 
-type RouteCDisplayTimelineEventItem = {
-  kind: 'matrix_event' | 'compressed_tool_group' | 'compressed_tool_placeholder';
-  id: string;
-  displayIndex: number;
-  rawEventIndex: number;
-  rawStartIndex: number;
-  rawEndIndex: number;
-  eventTimeline: EventTimeline;
-  timelineSet: EventTimelineSet;
-  mEvent: MatrixEvent;
-  mEventId: string;
-  collapse: boolean;
-  sourceEventIds: string[];
-  oysterunToolCompression?: OysterunToolCompression;
-};
-
-type RouteCDisplayTimelineDividerItem = {
-  kind: 'day_divider' | 'new_messages_divider';
-  id: string;
-  displayIndex: number;
-  sourceEventId: string;
-  ts: number;
-};
-
-type RouteCDisplayTimelineItem = RouteCDisplayTimelineEventItem | RouteCDisplayTimelineDividerItem;
-
-type RouteCDisplayTimelineItemInput =
-  | Omit<RouteCDisplayTimelineEventItem, 'displayIndex'>
-  | Omit<RouteCDisplayTimelineDividerItem, 'displayIndex'>;
-
-type RouteCDisplayTimelineModel = {
-  items: RouteCDisplayTimelineItem[];
-  displayIndexByEventId: Map<string, number>;
-  rawEventIndexByEventId: Map<string, number>;
-  rawEventIndexToDisplayIndex: Map<number, number>;
-  compressedToolGroupCount: number;
-};
-
-type RouteCDisplayTimelineBuildOptions = {
+type RouteCProductVisibleEventOptions = {
   ignoredUsersSet: Set<string>;
   showHiddenEvents: boolean;
   hideMembershipEvents: boolean;
   hideNickAvatarEvents: boolean;
-  readUptoEventId: string | undefined;
-  currentUserId: string | null;
 };
 
-function isRouteCDisplayTimelineEventItem(
-  item: RouteCDisplayTimelineItem
-): item is RouteCDisplayTimelineEventItem {
-  return (
-    item.kind === 'matrix_event' ||
-    item.kind === 'compressed_tool_group' ||
-    item.kind === 'compressed_tool_placeholder'
+function isRouteCProductVisibleTimelineEvent(
+  mEvent: MatrixEvent,
+  {
+    ignoredUsersSet,
+    showHiddenEvents,
+    hideMembershipEvents,
+    hideNickAvatarEvents,
+  }: RouteCProductVisibleEventOptions,
+): boolean {
+  const sender = mEvent.getSender();
+  if (sender && ignoredUsersSet.has(sender)) return false;
+  if (isOysterunProviderCompletionMarkerContent(mEvent.getContent())) return false;
+  if (mEvent.isRedacted()) return showHiddenEvents;
+  if (reactionOrEditEvent(mEvent)) return false;
+
+  const eventType = mEvent.getType();
+  if (eventType === StateEvent.RoomMember) {
+    return isMembershipChanged(mEvent) ? !hideMembershipEvents : !hideNickAvatarEvents;
+  }
+  if (
+    eventType === MessageEvent.RoomMessage ||
+    eventType === MessageEvent.RoomMessageEncrypted ||
+    eventType === MessageEvent.Sticker ||
+    eventType === StateEvent.RoomName ||
+    eventType === StateEvent.RoomTopic ||
+    eventType === StateEvent.RoomAvatar
+  ) {
+    return true;
+  }
+  if (eventType === StateEvent.GroupCallMemberPrefix) {
+    const content = mEvent.getContent<SessionMembershipData>();
+    return !(content.application && 'application' in mEvent.getPrevContent());
+  }
+  if (!showHiddenEvents) return false;
+  if (typeof mEvent.getStateKey() === 'string') return true;
+  if (Object.keys(mEvent.getContent()).length === 0) return false;
+  if (mEvent.getRelation() || mEvent.isRedaction()) return false;
+  return true;
+}
+
+function getRouteCProductVisibleEventCount(
+  linkedTimelines: EventTimeline[],
+  options: RouteCProductVisibleEventOptions,
+): number {
+  return linkedTimelines.reduce(
+    (count, linkedTimeline) =>
+      count +
+      linkedTimeline
+        .getEvents()
+        .filter((mEvent) => isRouteCProductVisibleTimelineEvent(mEvent, options)).length,
+    0,
   );
 }
 
@@ -641,22 +644,100 @@ function isOysterunHostOwnerTimelineMessageEvent(mEvent: MatrixEvent): boolean {
   );
 }
 
-function getRouteCHostOwnerAnchorEventId(item: RouteCDisplayTimelineItem | undefined) {
-  if (!item) return undefined;
-  if (isRouteCDisplayTimelineEventItem(item)) {
-    return item.sourceEventIds[0] || item.mEventId;
-  }
-  return item.sourceEventId;
+function getRouteCRawTimelineEventAtIndex(
+  linkedTimelines: EventTimeline[],
+  index: number,
+): MatrixEvent | undefined {
+  const [eventTimeline, baseIndex] = getTimelineAndBaseIndex(linkedTimelines, index);
+  if (!eventTimeline) return undefined;
+  return getTimelineEvent(eventTimeline, getTimelineRelativeIndex(index, baseIndex));
+}
+
+function getRouteCViewportCenterEventId(
+  scrollElement: HTMLElement | null,
+  linkedTimelines: EventTimeline[],
+): string | undefined {
+  if (!scrollElement) return undefined;
+  const viewportRect = scrollElement.getBoundingClientRect();
+  const viewportCenter = viewportRect.top + viewportRect.height / 2;
+  let closest:
+    | {
+        distance: number;
+        eventId: string;
+      }
+    | undefined;
+
+  scrollElement.querySelectorAll<HTMLElement>('[data-message-item]').forEach((element) => {
+    const index = Number(element.getAttribute('data-message-item'));
+    if (!Number.isSafeInteger(index) || index < 0) return;
+    const eventId = getRouteCRawTimelineEventAtIndex(linkedTimelines, index)?.getId();
+    if (!eventId) return;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom < viewportRect.top || rect.top > viewportRect.bottom) return;
+    const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter);
+    if (!closest || distance < closest.distance) {
+      closest = { distance, eventId };
+    }
+  });
+
+  return closest?.eventId;
+}
+
+function getRouteCViewportVisibleEventIds(
+  scrollElement: HTMLElement,
+  linkedTimelines: EventTimeline[],
+): {
+  count: number;
+  firstEventId?: string;
+  centerEventId?: string;
+  lastEventId?: string;
+} {
+  const viewportRect = scrollElement.getBoundingClientRect();
+  const viewportCenter = viewportRect.top + viewportRect.height / 2;
+  const visible: Array<{
+    eventId: string;
+    top: number;
+    bottom: number;
+    centerDistance: number;
+  }> = [];
+  scrollElement.querySelectorAll<HTMLElement>('[data-message-item]').forEach((element) => {
+    const index = Number(element.getAttribute('data-message-item'));
+    if (!Number.isSafeInteger(index) || index < 0) return;
+    const eventId = getRouteCRawTimelineEventAtIndex(linkedTimelines, index)?.getId();
+    if (!eventId) return;
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom < viewportRect.top || rect.top > viewportRect.bottom) return;
+    visible.push({
+      eventId,
+      top: rect.top,
+      bottom: rect.bottom,
+      centerDistance: Math.abs(rect.top + rect.height / 2 - viewportCenter),
+    });
+  });
+  visible.sort((left, right) => left.top - right.top || left.bottom - right.bottom);
+  const center = visible.reduce<(typeof visible)[number] | undefined>(
+    (closest, current) =>
+      !closest || current.centerDistance < closest.centerDistance ? current : closest,
+    undefined,
+  );
+  return {
+    count: visible.length,
+    firstEventId: visible[0]?.eventId,
+    centerEventId: center?.eventId,
+    lastEventId: visible[visible.length - 1]?.eventId,
+  };
 }
 
 function getRouteCHostOwnerNeighborAnchor({
   focusEventId,
-  displayItems,
-  visibleDisplayItems,
+  viewportEventId,
+  linkedTimelines,
+  visibleEventIndexes,
 }: {
   focusEventId: string | undefined;
-  displayItems: RouteCDisplayTimelineItem[];
-  visibleDisplayItems: number[];
+  viewportEventId: string | undefined;
+  linkedTimelines: EventTimeline[];
+  visibleEventIndexes: number[];
 }): RouteCHostOwnerNeighborAnchor {
   if (focusEventId) {
     return {
@@ -666,11 +747,18 @@ function getRouteCHostOwnerNeighborAnchor({
     };
   }
 
-  const visibleItems = visibleDisplayItems
-    .map((index) => displayItems[index])
-    .filter((item): item is RouteCDisplayTimelineItem => Boolean(item));
-  const centerItem = visibleItems[Math.floor(visibleItems.length / 2)];
-  const centerEventId = getRouteCHostOwnerAnchorEventId(centerItem);
+  if (viewportEventId) {
+    return {
+      kind: 'event',
+      eventId: viewportEventId,
+      source: 'viewport_center',
+    };
+  }
+
+  const visibleEvents = visibleEventIndexes
+    .map((index) => getRouteCRawTimelineEventAtIndex(linkedTimelines, index))
+    .filter((event): event is MatrixEvent => Boolean(event));
+  const centerEventId = visibleEvents[Math.floor(visibleEvents.length / 2)]?.getId();
   if (centerEventId) {
     return {
       kind: 'event',
@@ -679,8 +767,8 @@ function getRouteCHostOwnerNeighborAnchor({
     };
   }
 
-  for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
-    const latestVisibleEventId = getRouteCHostOwnerAnchorEventId(visibleItems[index]);
+  for (let index = visibleEvents.length - 1; index >= 0; index -= 1) {
+    const latestVisibleEventId = visibleEvents[index]?.getId();
     if (latestVisibleEventId) {
       return {
         kind: 'event',
@@ -704,7 +792,7 @@ function getRouteCHostOwnerNeighborAnchorKey(anchor: RouteCHostOwnerNeighborAnch
 
 function getRouteCHostOwnerNeighborWindowExhausted(
   response: OysterunHostOwnerMessageNeighborsResponse | null,
-  direction: 'previous' | 'next'
+  direction: 'previous' | 'next',
 ): boolean {
   if (!response) return false;
   const boundaryValue =
@@ -722,7 +810,7 @@ function getRouteCHostOwnerNeighborDisabledReason(
   response: OysterunHostOwnerMessageNeighborsResponse | null,
   direction: 'previous' | 'next',
   loading: boolean,
-  fallback: string | null
+  fallback: string | null,
 ): string {
   if (loading) return 'loading';
   if (!response) return fallback ?? 'not_ready';
@@ -780,7 +868,7 @@ function isOysterunEventId(value: string | undefined): value is string {
 
 function collectOysterunHost2TimelineCandidateEventIds(
   mx: MatrixClient,
-  linkedTimelines: EventTimeline[]
+  linkedTimelines: EventTimeline[],
 ): string[] {
   return oysterunUniqueEventIds(
     linkedTimelines.flatMap((linkedTimeline) =>
@@ -788,26 +876,26 @@ function collectOysterunHost2TimelineCandidateEventIds(
         .getEvents()
         .filter((candidateEvent) => isOysterunCancelableUserTextEvent(mx, candidateEvent))
         .map((candidateEvent) => candidateEvent.getId())
-        .filter(isOysterunEventId)
-    )
+        .filter(isOysterunEventId),
+    ),
   );
 }
 
 function collectOysterunHost2RenderedCandidateEventIds(
   mx: MatrixClient,
-  renderedDisplayItems: RouteCDisplayTimelineItem[]
+  linkedTimelines: EventTimeline[],
+  renderedEventIndexes: number[],
 ): string[] {
   return oysterunUniqueEventIds(
-    renderedDisplayItems
-      .filter(isRouteCDisplayTimelineEventItem)
-      .map((item) => {
-        const candidateEvent = item.mEvent;
+    renderedEventIndexes
+      .map((index) => {
+        const candidateEvent = getRouteCRawTimelineEventAtIndex(linkedTimelines, index);
         if (!candidateEvent || !isOysterunCancelableUserTextEvent(mx, candidateEvent)) {
           return undefined;
         }
         return candidateEvent.getId();
       })
-      .filter(isOysterunEventId)
+      .filter(isOysterunEventId),
   );
 }
 
@@ -818,152 +906,8 @@ function getOysterunEventSemanticPayload(mEvent: MatrixEvent): OysterunSemanticP
   return payload as OysterunSemanticPayload;
 }
 
-function getOysterunToolPayloadValue(
-  payload: OysterunSemanticPayload,
-  semanticType: string
-): unknown {
-  if (semanticType === 'tool.call' || semanticType === 'tool.update') return payload.tool_input;
-  return payload.tool_content ?? payload.tool_input;
-}
-
-function getOysterunToolCompressionDetail(
-  mEvent: MatrixEvent
-): OysterunToolCompressionDetail | undefined {
-  if (mEvent.getType() !== MessageEvent.RoomMessage || mEvent.isRedacted()) return undefined;
-  const payload = getOysterunEventSemanticPayload(mEvent);
-  if (!payload) return undefined;
-  const semanticType = payload.semantic_type ?? payload.semantic_category;
-  if (typeof semanticType !== 'string' || !isOysterunToolSemanticType(semanticType)) {
-    return undefined;
-  }
-  return {
-    eventId: mEvent.getId() ?? undefined,
-    semanticId: typeof payload?.semantic_id === 'string' ? payload.semantic_id : undefined,
-    semanticType,
-    hostSessionId:
-      typeof payload?.host_session_id === 'string' ? payload.host_session_id : undefined,
-    matrixRoomId: typeof payload?.matrix_room_id === 'string' ? payload.matrix_room_id : undefined,
-    targetTurnId: typeof payload?.target_turn_id === 'string' ? payload.target_turn_id : undefined,
-    providerTurnId:
-      typeof payload?.provider_turn_id === 'string' ? payload.provider_turn_id : undefined,
-    providerTurnIdKind:
-      typeof payload?.provider_turn_id_kind === 'string'
-        ? payload.provider_turn_id_kind
-        : undefined,
-    toolName: typeof payload?.tool_name === 'string' ? payload.tool_name : undefined,
-    toolCallId: typeof payload?.tool_call_id === 'string' ? payload.tool_call_id : undefined,
-    toolIsError: typeof payload?.tool_is_error === 'boolean' ? payload.tool_is_error : null,
-    payload: getOysterunToolPayloadValue(payload, semanticType),
-    fallbackBody:
-      typeof mEvent.getContent().body === 'string' ? String(mEvent.getContent().body) : undefined,
-    matrixEventSender:
-      typeof payload?.matrix_event_sender === 'string'
-        ? payload.matrix_event_sender
-        : mEvent.getSender() ?? undefined,
-    matrixEventSenderActorKey:
-      typeof payload?.matrix_event_sender_actor_key === 'string'
-        ? payload.matrix_event_sender_actor_key
-        : undefined,
-    matrixEventSenderActorKind:
-      typeof payload?.matrix_event_sender_actor_kind === 'string'
-        ? payload.matrix_event_sender_actor_kind
-        : undefined,
-    detailAvailable: payload?.tool_detail_available === true || payload?.detail_available === true,
-    detailStorageKind:
-      typeof payload?.tool_detail_storage_kind === 'string'
-        ? payload.tool_detail_storage_kind
-        : undefined,
-    toolTransferProjection: payload?.tool_transfer_projection,
-    ts: mEvent.getTs(),
-  };
-}
-
-type OysterunToolCompressionGroupKey = {
-  kind: 'provider_turn_id' | 'target_turn_id' | 'matrix_event_sender';
-  value: string;
-};
-
-function buildOysterunToolCompression({
-  details,
-  retainedRunDetails,
-  toolGroupKey,
-  compressionKind = 'tool_semantic_stream_page',
-  batchIndex,
-  batchCount,
-  batchSize,
-  batchStartIndex,
-  batchEndIndex,
-}: {
-  details: OysterunToolCompressionDetail[];
-  retainedRunDetails?: OysterunToolCompressionDetail[];
-  toolGroupKey: OysterunToolCompressionGroupKey;
-  compressionKind?: OysterunToolCompression['compressionKind'];
-  batchIndex?: number;
-  batchCount?: number;
-  batchSize?: number;
-  batchStartIndex?: number;
-  batchEndIndex?: number;
-}): OysterunToolCompression {
-  const currentDetail = details[0];
-  return {
-    compressionKind,
-    totalCount: details.length,
-    compressedCount: Math.max(0, details.length - 1),
-    groupStartEventId: details[0]?.eventId,
-    groupEndEventId: details[details.length - 1]?.eventId,
-    groupingKeyKind: toolGroupKey.kind,
-    groupingKey: toolGroupKey.value,
-    batchIndex,
-    batchCount,
-    batchSize,
-    batchStartIndex,
-    batchEndIndex,
-    providerTurnId: currentDetail?.providerTurnId,
-    providerTurnIdKind: currentDetail?.providerTurnIdKind,
-    matrixEventSender: currentDetail?.matrixEventSender,
-    matrixEventSenderActorKey: currentDetail?.matrixEventSenderActorKey,
-    matrixEventSenderActorKind: currentDetail?.matrixEventSenderActorKind,
-    details,
-    retainedRunDetails,
-  };
-}
-
-function getOysterunToolCompressionGroupKey(
-  mEvent: MatrixEvent
-): OysterunToolCompressionGroupKey | undefined {
-  const detail = getOysterunToolCompressionDetail(mEvent);
-  if (!detail) return undefined;
-  if (detail.providerTurnId) {
-    return {
-      kind: 'provider_turn_id',
-      value: detail.providerTurnId,
-    };
-  }
-  if (detail.targetTurnId) {
-    return {
-      kind: 'target_turn_id',
-      value: detail.targetTurnId,
-    };
-  }
-  const sender = detail.matrixEventSender || mEvent.getSender() || '';
-  if (!sender) return undefined;
-  return {
-    kind: 'matrix_event_sender',
-    value: sender,
-  };
-}
-
-function isSameOysterunToolRunEvent(
-  mEvent: MatrixEvent | undefined,
-  groupKey: OysterunToolCompressionGroupKey
-): boolean {
-  if (!mEvent) return false;
-  const candidateKey = getOysterunToolCompressionGroupKey(mEvent);
-  return candidateKey?.kind === groupKey.kind && candidateKey.value === groupKey.value;
-}
-
 function collectOysterunProviderControlOutcomes(
-  linkedTimelines: EventTimeline[]
+  linkedTimelines: EventTimeline[],
 ): Record<string, OysterunSemanticControlOutcome> {
   const outcomes: Record<string, OysterunSemanticControlOutcome> = {};
   linkedTimelines.forEach((linkedTimeline) => {
@@ -1016,7 +960,7 @@ function collectOysterunProviderControlOutcomes(
 
 function getOysterunProviderControlOutcomeForEvent(
   mEvent: MatrixEvent,
-  outcomes: Record<string, OysterunSemanticControlOutcome>
+  outcomes: Record<string, OysterunSemanticControlOutcome>,
 ): OysterunSemanticControlOutcome | undefined {
   if (mEvent.getType() !== MessageEvent.RoomMessage) return undefined;
   const payload = getOysterunEventSemanticPayload(mEvent);
@@ -1031,735 +975,6 @@ function getOysterunProviderControlOutcomeForEvent(
   return outcomes[controlRequestId];
 }
 
-type RouteCDisplayTimelineSourceEvent = {
-  rawEventIndex: number;
-  eventTimeline: EventTimeline;
-  timelineSet: EventTimelineSet;
-  mEvent: MatrixEvent;
-  mEventId: string;
-};
-
-function getOysterunRetainedToolRunDetails(
-  sourceEvents: RouteCDisplayTimelineSourceEvent[],
-  sourceIndex: number,
-  toolGroupKey: OysterunToolCompressionGroupKey,
-  isRenderableSourceEvent: (sourceEvent: RouteCDisplayTimelineSourceEvent) => boolean
-): OysterunToolCompressionDetail[] {
-  const anchorEvent = sourceEvents[sourceIndex];
-  if (!anchorEvent) return [];
-  const isRetainedRunSourceEvent = (candidate: RouteCDisplayTimelineSourceEvent) =>
-    candidate.eventTimeline === anchorEvent.eventTimeline &&
-    isRenderableSourceEvent(candidate) &&
-    isSameOysterunToolRunEvent(candidate.mEvent, toolGroupKey) &&
-    getOysterunToolCompressionDetail(candidate.mEvent) !== undefined;
-  const reverseBeforeIndexes = sourceEvents
-    .slice(0, sourceIndex)
-    .map((_, offset) => sourceIndex - 1 - offset);
-  const firstBreakBeforeIndex = reverseBeforeIndexes.find(
-    (index) => !isRetainedRunSourceEvent(sourceEvents[index])
-  );
-  const startIndex = firstBreakBeforeIndex === undefined ? 0 : firstBreakBeforeIndex + 1;
-  const forwardIndexes = sourceEvents.slice(sourceIndex).map((_, offset) => sourceIndex + offset);
-  const firstBreakAfterIndex = forwardIndexes.find(
-    (index) => !isRetainedRunSourceEvent(sourceEvents[index])
-  );
-  const endIndex = firstBreakAfterIndex === undefined ? sourceEvents.length : firstBreakAfterIndex;
-  return sourceEvents
-    .slice(startIndex, endIndex)
-    .map((sourceEvent) => getOysterunToolCompressionDetail(sourceEvent.mEvent))
-    .filter((detail): detail is OysterunToolCompressionDetail => detail !== undefined);
-}
-
-function isRouteCRenderableTimelineEvent({
-  mEvent,
-  ignoredUsersSet,
-  showHiddenEvents,
-  hideMembershipEvents,
-  hideNickAvatarEvents,
-}: {
-  mEvent: MatrixEvent;
-  ignoredUsersSet: Set<string>;
-  showHiddenEvents: boolean;
-  hideMembershipEvents: boolean;
-  hideNickAvatarEvents: boolean;
-}): boolean {
-  const eventSender = mEvent.getSender();
-  if (eventSender && ignoredUsersSet.has(eventSender)) return false;
-  if (mEvent.isRedacted() && !showHiddenEvents) return false;
-  if (reactionOrEditEvent(mEvent)) return false;
-  if (isOysterunProviderCompletionMarkerContent(mEvent.getContent())) return false;
-
-  switch (mEvent.getType()) {
-    case MessageEvent.RoomMessage:
-    case MessageEvent.RoomMessageEncrypted:
-    case MessageEvent.Sticker:
-    case StateEvent.RoomName:
-    case StateEvent.RoomTopic:
-    case StateEvent.RoomAvatar:
-      return true;
-    case StateEvent.RoomMember: {
-      const membershipChanged = isMembershipChanged(mEvent);
-      if (membershipChanged && hideMembershipEvents) return false;
-      if (!membershipChanged && hideNickAvatarEvents) return false;
-      return true;
-    }
-    case StateEvent.GroupCallMemberPrefix: {
-      const content = mEvent.getContent<SessionMembershipData>();
-      const prevContent = mEvent.getPrevContent() ?? {};
-      return !(content.application && 'application' in prevContent);
-    }
-    default:
-      if (!showHiddenEvents) return false;
-      if (Object.keys(mEvent.getContent()).length === 0) return false;
-      if (mEvent.getRelation()) return false;
-      if (mEvent.isRedaction()) return false;
-      return true;
-  }
-}
-
-function collectRouteCDisplayTimelineSourceEvents(
-  linkedTimelines: EventTimeline[]
-): RouteCDisplayTimelineSourceEvent[] {
-  const sourceEvents: RouteCDisplayTimelineSourceEvent[] = [];
-  linkedTimelines.forEach((eventTimeline, timelineIndex) => {
-    const timelineSet = eventTimeline.getTimelineSet();
-    eventTimeline.getEvents().forEach((mEvent, eventIndex) => {
-      const mEventId = mEvent.getId();
-      if (!mEventId) return;
-      const rawEventIndex =
-        getTimelinesEventsCount(linkedTimelines.slice(0, timelineIndex)) + eventIndex;
-      sourceEvents.push({
-        rawEventIndex,
-        eventTimeline,
-        timelineSet,
-        mEvent,
-        mEventId,
-      });
-    });
-  });
-  return sourceEvents;
-}
-
-function getRouteCDisplayItemId(kind: RouteCDisplayTimelineItem['kind'], eventId: string): string {
-  return `routec-display:${kind}:${eventId}`;
-}
-
-function addRouteCDisplayEventIndexMappings(
-  item: RouteCDisplayTimelineEventItem,
-  displayIndexByEventId: Map<string, number>,
-  rawEventIndexToDisplayIndex: Map<number, number>
-): void {
-  item.sourceEventIds.forEach((eventId) => {
-    if (!displayIndexByEventId.has(eventId)) {
-      displayIndexByEventId.set(eventId, item.displayIndex);
-    }
-  });
-  for (let rawIndex = item.rawStartIndex; rawIndex <= item.rawEndIndex; rawIndex += 1) {
-    if (!rawEventIndexToDisplayIndex.has(rawIndex)) {
-      rawEventIndexToDisplayIndex.set(rawIndex, item.displayIndex);
-    }
-  }
-}
-
-function buildRouteCDisplayTimelineModel({
-  linkedTimelines,
-  ignoredUsersSet,
-  showHiddenEvents,
-  hideMembershipEvents,
-  hideNickAvatarEvents,
-  readUptoEventId,
-  currentUserId,
-}: {
-  linkedTimelines: EventTimeline[];
-  ignoredUsersSet: Set<string>;
-  showHiddenEvents: boolean;
-  hideMembershipEvents: boolean;
-  hideNickAvatarEvents: boolean;
-  readUptoEventId: string | undefined;
-  currentUserId: string | null;
-}): RouteCDisplayTimelineModel {
-  const items: RouteCDisplayTimelineItem[] = [];
-  const displayIndexByEventId = new Map<string, number>();
-  const rawEventIndexByEventId = new Map<string, number>();
-  const rawEventIndexToDisplayIndex = new Map<number, number>();
-  const sourceEvents = collectRouteCDisplayTimelineSourceEvents(linkedTimelines);
-  sourceEvents.forEach((sourceEvent) => {
-    rawEventIndexByEventId.set(sourceEvent.mEventId, sourceEvent.rawEventIndex);
-  });
-  let prevRenderedEvent: MatrixEvent | undefined;
-  let compressedToolGroupCount = 0;
-
-  const addItem = (item: RouteCDisplayTimelineItemInput) => {
-    const displayIndex = items.length;
-    items.push({ ...item, displayIndex } as RouteCDisplayTimelineItem);
-    return displayIndex;
-  };
-  const isRenderableSourceEvent = (sourceEvent: RouteCDisplayTimelineSourceEvent): boolean =>
-    isRouteCRenderableTimelineEvent({
-      mEvent: sourceEvent.mEvent,
-      ignoredUsersSet,
-      showHiddenEvents,
-      hideMembershipEvents,
-      hideNickAvatarEvents,
-    });
-
-  for (let sourceIndex = 0; sourceIndex < sourceEvents.length; sourceIndex += 1) {
-    const sourceEvent = sourceEvents[sourceIndex];
-    if (!isRenderableSourceEvent(sourceEvent)) {
-      continue;
-    }
-
-    let rawStartIndex = sourceEvent.rawEventIndex;
-    let rawEndIndex = sourceEvent.rawEventIndex;
-    let renderSourceEvent = sourceEvent;
-    let sourceEventIds = [sourceEvent.mEventId];
-    let oysterunToolCompression: OysterunToolCompression | undefined;
-    let kind: RouteCDisplayTimelineEventItem['kind'] = 'matrix_event';
-    let compressedToolPlaceholderSourceEvents: RouteCDisplayTimelineSourceEvent[] = [];
-    const toolGroupKey = getOysterunToolCompressionGroupKey(sourceEvent.mEvent);
-
-    if (toolGroupKey) {
-      const retainedRunDetails = getOysterunRetainedToolRunDetails(
-        sourceEvents,
-        sourceIndex,
-        toolGroupKey,
-        isRenderableSourceEvent
-      );
-      const runDetails: OysterunToolCompressionDetail[] = [];
-      const runSourceEvents: RouteCDisplayTimelineSourceEvent[] = [];
-      let runEndSourceIndex = sourceIndex;
-      while (runEndSourceIndex < sourceEvents.length) {
-        const candidate = sourceEvents[runEndSourceIndex];
-        if (candidate.eventTimeline !== sourceEvent.eventTimeline) break;
-        if (!isSameOysterunToolRunEvent(candidate.mEvent, toolGroupKey)) break;
-        if (!isRenderableSourceEvent(candidate)) break;
-        const detail = getOysterunToolCompressionDetail(candidate.mEvent);
-        if (!detail) break;
-        runDetails.push(detail);
-        runSourceEvents.push(candidate);
-        runEndSourceIndex += 1;
-      }
-
-      const details = runDetails;
-      const groupEndSourceIndex = runEndSourceIndex;
-
-      if (details.length > 1) {
-        const batchCount = Math.ceil(details.length / OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE);
-        for (
-          let batchStartIndex = 0;
-          batchStartIndex < details.length;
-          batchStartIndex += OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE
-        ) {
-          const batchEndIndex = Math.min(
-            batchStartIndex + OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE,
-            details.length
-          );
-          const batchDetails = details.slice(batchStartIndex, batchEndIndex);
-          const batchSourceEvents = runSourceEvents.slice(batchStartIndex, batchEndIndex);
-          const batchRenderSourceEvent = batchSourceEvents[0];
-          if (!batchRenderSourceEvent) continue;
-          const batchLastSourceEvent =
-            batchSourceEvents[batchSourceEvents.length - 1] ?? batchRenderSourceEvent;
-          const batchEventSender = batchRenderSourceEvent.mEvent.getSender();
-          const shouldRenderNewDivider = Boolean(
-            readUptoEventId &&
-              prevRenderedEvent?.getId() === readUptoEventId &&
-              batchEventSender !== currentUserId
-          );
-          const shouldRenderDayDivider =
-            prevRenderedEvent !== undefined &&
-            !inSameDay(prevRenderedEvent.getTs(), batchRenderSourceEvent.mEvent.getTs());
-
-          if (shouldRenderNewDivider) {
-            addItem({
-              kind: 'new_messages_divider',
-              id: getRouteCDisplayItemId('new_messages_divider', batchRenderSourceEvent.mEventId),
-              sourceEventId: batchRenderSourceEvent.mEventId,
-              ts: batchRenderSourceEvent.mEvent.getTs(),
-            });
-          }
-          if (shouldRenderDayDivider) {
-            addItem({
-              kind: 'day_divider',
-              id: getRouteCDisplayItemId('day_divider', batchRenderSourceEvent.mEventId),
-              sourceEventId: batchRenderSourceEvent.mEventId,
-              ts: batchRenderSourceEvent.mEvent.getTs(),
-            });
-          }
-
-          const collapse =
-            prevRenderedEvent !== undefined &&
-            !shouldRenderDayDivider &&
-            (!shouldRenderNewDivider || batchEventSender === currentUserId) &&
-            prevRenderedEvent.getSender() === batchEventSender &&
-            prevRenderedEvent.getType() === batchRenderSourceEvent.mEvent.getType() &&
-            minuteDifference(prevRenderedEvent.getTs(), batchRenderSourceEvent.mEvent.getTs()) < 2;
-
-          const displayIndex = addItem({
-            kind: 'compressed_tool_group',
-            id: getRouteCDisplayItemId('compressed_tool_group', batchRenderSourceEvent.mEventId),
-            rawEventIndex: batchRenderSourceEvent.rawEventIndex,
-            rawStartIndex: batchRenderSourceEvent.rawEventIndex,
-            rawEndIndex: batchLastSourceEvent.rawEventIndex,
-            eventTimeline: batchRenderSourceEvent.eventTimeline,
-            timelineSet: batchRenderSourceEvent.timelineSet,
-            mEvent: batchRenderSourceEvent.mEvent,
-            mEventId: batchRenderSourceEvent.mEventId,
-            collapse,
-            sourceEventIds: batchSourceEvents.map((batchSourceEvent) => batchSourceEvent.mEventId),
-            oysterunToolCompression: buildOysterunToolCompression({
-              details: batchDetails,
-              retainedRunDetails,
-              toolGroupKey,
-              compressionKind: 'tool_semantic_stream_page',
-              batchIndex: Math.floor(batchStartIndex / OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE) + 1,
-              batchCount,
-              batchSize: OYSTERUN_ROUTE_C_TOOL_OUTPUT_BATCH_SIZE,
-              batchStartIndex: batchStartIndex + 1,
-              batchEndIndex,
-            }),
-          });
-
-          const displayItem = items[displayIndex];
-          if (displayItem && isRouteCDisplayTimelineEventItem(displayItem)) {
-            addRouteCDisplayEventIndexMappings(
-              displayItem,
-              displayIndexByEventId,
-              rawEventIndexToDisplayIndex
-            );
-          }
-          compressedToolGroupCount += 1;
-          prevRenderedEvent = batchLastSourceEvent.mEvent;
-        }
-        sourceIndex = groupEndSourceIndex - 1;
-        continue;
-      }
-    }
-
-    const eventSender = renderSourceEvent.mEvent.getSender();
-    const shouldRenderNewDivider = Boolean(
-      readUptoEventId &&
-        prevRenderedEvent?.getId() === readUptoEventId &&
-        eventSender !== currentUserId
-    );
-    const shouldRenderDayDivider =
-      prevRenderedEvent !== undefined &&
-      !inSameDay(prevRenderedEvent.getTs(), renderSourceEvent.mEvent.getTs());
-
-    if (shouldRenderNewDivider) {
-      addItem({
-        kind: 'new_messages_divider',
-        id: getRouteCDisplayItemId('new_messages_divider', renderSourceEvent.mEventId),
-        sourceEventId: renderSourceEvent.mEventId,
-        ts: renderSourceEvent.mEvent.getTs(),
-      });
-    }
-    if (shouldRenderDayDivider) {
-      addItem({
-        kind: 'day_divider',
-        id: getRouteCDisplayItemId('day_divider', renderSourceEvent.mEventId),
-        sourceEventId: renderSourceEvent.mEventId,
-        ts: renderSourceEvent.mEvent.getTs(),
-      });
-    }
-
-    compressedToolPlaceholderSourceEvents.forEach((placeholderSourceEvent) => {
-      const placeholderDisplayIndex = addItem({
-        kind: 'compressed_tool_placeholder',
-        id: getRouteCDisplayItemId('compressed_tool_placeholder', placeholderSourceEvent.mEventId),
-        rawEventIndex: placeholderSourceEvent.rawEventIndex,
-        rawStartIndex: placeholderSourceEvent.rawEventIndex,
-        rawEndIndex: placeholderSourceEvent.rawEventIndex,
-        eventTimeline: placeholderSourceEvent.eventTimeline,
-        timelineSet: placeholderSourceEvent.timelineSet,
-        mEvent: placeholderSourceEvent.mEvent,
-        mEventId: placeholderSourceEvent.mEventId,
-        collapse: true,
-        sourceEventIds: [placeholderSourceEvent.mEventId],
-      });
-      const placeholderItem = items[placeholderDisplayIndex];
-      if (placeholderItem && isRouteCDisplayTimelineEventItem(placeholderItem)) {
-        addRouteCDisplayEventIndexMappings(
-          placeholderItem,
-          displayIndexByEventId,
-          rawEventIndexToDisplayIndex
-        );
-      }
-    });
-
-    const collapse =
-      prevRenderedEvent !== undefined &&
-      !shouldRenderDayDivider &&
-      (!shouldRenderNewDivider || eventSender === currentUserId) &&
-      prevRenderedEvent.getSender() === eventSender &&
-      prevRenderedEvent.getType() === renderSourceEvent.mEvent.getType() &&
-      minuteDifference(prevRenderedEvent.getTs(), renderSourceEvent.mEvent.getTs()) < 2;
-
-    const displayIndex = addItem({
-      kind,
-      id: getRouteCDisplayItemId(kind, renderSourceEvent.mEventId),
-      rawEventIndex: renderSourceEvent.rawEventIndex,
-      rawStartIndex,
-      rawEndIndex,
-      eventTimeline: renderSourceEvent.eventTimeline,
-      timelineSet: renderSourceEvent.timelineSet,
-      mEvent: renderSourceEvent.mEvent,
-      mEventId: renderSourceEvent.mEventId,
-      collapse,
-      sourceEventIds,
-      oysterunToolCompression,
-    });
-
-    const displayItem = items[displayIndex];
-    if (displayItem && isRouteCDisplayTimelineEventItem(displayItem)) {
-      addRouteCDisplayEventIndexMappings(
-        displayItem,
-        displayIndexByEventId,
-        rawEventIndexToDisplayIndex
-      );
-    }
-    prevRenderedEvent = renderSourceEvent.mEvent;
-  }
-
-  return {
-    items,
-    displayIndexByEventId,
-    rawEventIndexByEventId,
-    rawEventIndexToDisplayIndex,
-    compressedToolGroupCount,
-  };
-}
-
-function normalizeRouteCDisplayRange(range: ItemRange, count: number): ItemRange {
-  if (count <= 0) return { start: 0, end: 0 };
-  const requestedSize = Math.max(0, range.end - range.start);
-  const end = Math.min(Math.max(range.end, 0), count);
-  const start =
-    range.end >= count ? Math.max(end - requestedSize, 0) : Math.min(Math.max(range.start, 0), end);
-  return { start, end };
-}
-
-function getRouteCLiveTailDisplayRange({
-  previousRange,
-  previousDisplayCount,
-  nextDisplayCount,
-}: {
-  previousRange: ItemRange;
-  previousDisplayCount: number;
-  nextDisplayCount: number;
-}): ItemRange {
-  const normalizedPreviousRange = normalizeRouteCDisplayRange(previousRange, previousDisplayCount);
-  const rangeSize = Math.max(
-    normalizedPreviousRange.end - normalizedPreviousRange.start,
-    PAGINATION_LIMIT
-  );
-  return normalizeRouteCDisplayRange(
-    {
-      start: Math.max(nextDisplayCount - rangeSize, 0),
-      end: nextDisplayCount,
-    },
-    nextDisplayCount
-  );
-}
-
-function getRouteCDisplayAnchorEventIds(item: RouteCDisplayTimelineItem | undefined): string[] {
-  if (!item) return [];
-  if (isRouteCDisplayTimelineEventItem(item)) return [...item.sourceEventIds].reverse();
-  return [item.sourceEventId];
-}
-
-function findRouteCDisplayAnchorIndex(
-  model: RouteCDisplayTimelineModel,
-  anchorEventIds: string[],
-  anchorItemId?: string
-): number | undefined {
-  if (anchorItemId) {
-    const displayIndex = model.items.findIndex((item) => item.id === anchorItemId);
-    if (displayIndex >= 0) return displayIndex;
-  }
-  for (const eventId of anchorEventIds) {
-    const displayIndex = model.displayIndexByEventId.get(eventId);
-    if (typeof displayIndex === 'number') return displayIndex;
-  }
-  return undefined;
-}
-
-function isRouteCCompressedToolBoundaryItem(item: RouteCDisplayTimelineItem | undefined): boolean {
-  return Boolean(
-    item &&
-      isRouteCDisplayTimelineEventItem(item) &&
-      (item.kind === 'compressed_tool_group' || item.kind === 'compressed_tool_placeholder')
-  );
-}
-
-function getRouteCCompressedToolBoundaryCount(
-  model: RouteCDisplayTimelineModel,
-  itemIndex: number
-): number {
-  const item = model.items[itemIndex];
-  if (!isRouteCCompressedToolBoundaryItem(item)) return 0;
-
-  let firstBoundaryIndex = itemIndex;
-  while (
-    firstBoundaryIndex > 0 &&
-    isRouteCCompressedToolBoundaryItem(model.items[firstBoundaryIndex - 1])
-  ) {
-    firstBoundaryIndex -= 1;
-  }
-
-  let lastBoundaryIndex = itemIndex;
-  while (
-    lastBoundaryIndex + 1 < model.items.length &&
-    isRouteCCompressedToolBoundaryItem(model.items[lastBoundaryIndex + 1])
-  ) {
-    lastBoundaryIndex += 1;
-  }
-
-  let placeholderCount = 0;
-  let largestCompressedGroupTotal = 0;
-  for (let index = firstBoundaryIndex; index <= lastBoundaryIndex; index += 1) {
-    const boundaryItem = model.items[index];
-    if (!isRouteCDisplayTimelineEventItem(boundaryItem)) continue;
-    if (boundaryItem.kind === 'compressed_tool_placeholder') {
-      placeholderCount += 1;
-      continue;
-    }
-    if (boundaryItem.kind === 'compressed_tool_group') {
-      largestCompressedGroupTotal = Math.max(
-        largestCompressedGroupTotal,
-        boundaryItem.oysterunToolCompression?.totalCount ?? boundaryItem.sourceEventIds.length
-      );
-    }
-  }
-
-  return Math.max(placeholderCount, largestCompressedGroupTotal);
-}
-
-function getRouteCDenseCompressedToolPaginationLimit(
-  baseLimit: number,
-  snapshot: RouteCDisplayPaginationSnapshot
-): number {
-  if (snapshot.denseCompressedToolBoundaryCount <= baseLimit) return baseLimit;
-  return Math.min(
-    OYSTERUN_ROUTE_C_DENSE_TOOL_PAGINATION_MAX_LIMIT,
-    Math.max(
-      baseLimit,
-      snapshot.denseCompressedToolBoundaryCount + OYSTERUN_ROUTE_C_DENSE_TOOL_PAGINATION_PADDING
-    )
-  );
-}
-
-function getRouteCInsertedDisplayItemsBeforeAnchor({
-  snapshot,
-  nextModel,
-}: {
-  snapshot: RouteCDisplayPaginationSnapshot;
-  nextModel: RouteCDisplayTimelineModel;
-}): RouteCDisplayTimelineItem[] {
-  const nextAnchorIndex = findRouteCDisplayAnchorIndex(
-    nextModel,
-    snapshot.anchorEventIds,
-    snapshot.anchorItemId
-  );
-  if (typeof nextAnchorIndex !== 'number') return [];
-  const insertedItemCount = nextAnchorIndex - snapshot.anchorDisplayIndex;
-  if (insertedItemCount <= 0) return [];
-  return nextModel.items.slice(0, insertedItemCount);
-}
-
-function estimateRouteCDisplayItemVisibleProgressPx(item: RouteCDisplayTimelineItem): number {
-  if (isRouteCDisplayTimelineEventItem(item)) {
-    if (item.kind === 'compressed_tool_placeholder') {
-      return OYSTERUN_ROUTE_C_COMPRESSED_TOOL_PLACEHOLDER_HEIGHT_PX;
-    }
-    if (item.kind === 'compressed_tool_group') {
-      return OYSTERUN_ROUTE_C_ESTIMATED_COMPRESSED_GROUP_PROGRESS_PX;
-    }
-    return OYSTERUN_ROUTE_C_ESTIMATED_MATRIX_EVENT_PROGRESS_PX;
-  }
-  return OYSTERUN_ROUTE_C_ESTIMATED_DIVIDER_PROGRESS_PX;
-}
-
-function shouldRetryRouteCDenseToolLowVisibleProgress({
-  snapshot,
-  nextModel,
-  retryCount,
-}: {
-  snapshot: RouteCDisplayPaginationSnapshot;
-  nextModel: RouteCDisplayTimelineModel;
-  retryCount: number;
-}): boolean {
-  if (retryCount >= OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_RETRY_LIMIT) return false;
-  const insertedItems = getRouteCInsertedDisplayItemsBeforeAnchor({ snapshot, nextModel });
-  if (insertedItems.length === 0) return false;
-
-  const compressedBoundaryItemCount = insertedItems.filter(
-    isRouteCCompressedToolBoundaryItem
-  ).length;
-  if (compressedBoundaryItemCount === 0) return false;
-  const compressedBoundaryRatio = compressedBoundaryItemCount / insertedItems.length;
-  if (compressedBoundaryRatio < OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_PLACEHOLDER_RATIO) {
-    return false;
-  }
-
-  const estimatedProgressPx = insertedItems.reduce(
-    (total, item) => total + estimateRouteCDisplayItemVisibleProgressPx(item),
-    0
-  );
-  return estimatedProgressPx < OYSTERUN_ROUTE_C_LOW_VISIBLE_PROGRESS_THRESHOLD_PX;
-}
-
-type RouteCDisplayPaginationSnapshot = {
-  previousRange: ItemRange;
-  rangeSize: number;
-  anchorDisplayIndex: number;
-  anchorOffsetWithinRange: number;
-  anchorItemId?: string;
-  anchorEventIds: string[];
-  denseCompressedToolBoundaryCount: number;
-  anchorViewportOffset?: number;
-};
-
-type RouteCRemotePaginationScrollRestore = {
-  anchorItemId?: string;
-  anchorEventIds: string[];
-  anchorViewportOffset: number;
-};
-
-function buildRouteCDisplayModelForPagination(
-  linkedTimelines: EventTimeline[],
-  options: RouteCDisplayTimelineBuildOptions
-): RouteCDisplayTimelineModel {
-  const model = buildRouteCDisplayTimelineModel({
-    linkedTimelines,
-    ignoredUsersSet: options.ignoredUsersSet,
-    showHiddenEvents: options.showHiddenEvents,
-    hideMembershipEvents: options.hideMembershipEvents,
-    hideNickAvatarEvents: options.hideNickAvatarEvents,
-    readUptoEventId: options.readUptoEventId,
-    currentUserId: options.currentUserId,
-  });
-  assertRouteCDisplayTimelineModelInvariant(model);
-  return model;
-}
-
-function captureRouteCDisplayPaginationSnapshot({
-  previousModel,
-  previousRange,
-  backwards,
-  getScrollElement,
-  getItemElement,
-}: {
-  previousModel: RouteCDisplayTimelineModel;
-  previousRange: ItemRange;
-  backwards: boolean;
-  getScrollElement?: () => HTMLElement | null;
-  getItemElement?: (index: number) => HTMLElement | undefined;
-}): RouteCDisplayPaginationSnapshot {
-  const normalizedPreviousRange = normalizeRouteCDisplayRange(
-    previousRange,
-    previousModel.items.length
-  );
-  const rangeSize = Math.max(
-    normalizedPreviousRange.end - normalizedPreviousRange.start,
-    PAGINATION_LIMIT
-  );
-  const anchorPreviousIndex = backwards
-    ? normalizedPreviousRange.start
-    : Math.max(normalizedPreviousRange.end - 1, normalizedPreviousRange.start);
-  let visibleAnchorIndex = anchorPreviousIndex;
-  let anchorViewportOffset: number | undefined;
-
-  const scrollElement = backwards ? getScrollElement?.() : undefined;
-  if (scrollElement && getItemElement) {
-    for (
-      let itemIndex = normalizedPreviousRange.start;
-      itemIndex < normalizedPreviousRange.end;
-      itemIndex += 1
-    ) {
-      const itemElement = getItemElement(itemIndex);
-      if (!itemElement || !isIntersectingScrollView(scrollElement, itemElement)) continue;
-      visibleAnchorIndex = itemIndex;
-      anchorViewportOffset = itemElement.offsetTop - scrollElement.scrollTop;
-      break;
-    }
-  }
-
-  const anchorOffsetWithinRange = visibleAnchorIndex - normalizedPreviousRange.start;
-  const anchorItem = previousModel.items[visibleAnchorIndex];
-  const anchorEventIds = getRouteCDisplayAnchorEventIds(anchorItem);
-  const denseCompressedToolBoundaryCount = backwards
-    ? getRouteCCompressedToolBoundaryCount(previousModel, visibleAnchorIndex)
-    : 0;
-
-  return {
-    previousRange,
-    rangeSize,
-    anchorDisplayIndex: visibleAnchorIndex,
-    anchorOffsetWithinRange,
-    anchorItemId: anchorItem?.id,
-    anchorEventIds,
-    denseCompressedToolBoundaryCount,
-    anchorViewportOffset,
-  };
-}
-
-function recalibrateRouteCDisplayPaginationRange({
-  snapshot,
-  nextModel,
-}: {
-  snapshot: RouteCDisplayPaginationSnapshot;
-  nextModel: RouteCDisplayTimelineModel;
-}): ItemRange {
-  const nextAnchorIndex = findRouteCDisplayAnchorIndex(
-    nextModel,
-    snapshot.anchorEventIds,
-    snapshot.anchorItemId
-  );
-
-  if (typeof nextAnchorIndex !== 'number') {
-    return normalizeRouteCDisplayRange(snapshot.previousRange, nextModel.items.length);
-  }
-
-  const nextStart = nextAnchorIndex - snapshot.anchorOffsetWithinRange;
-  return normalizeRouteCDisplayRange(
-    {
-      start: nextStart,
-      end: nextStart + snapshot.rangeSize,
-    },
-    nextModel.items.length
-  );
-}
-
-function assertRouteCDisplayTimelineModelInvariant(model: RouteCDisplayTimelineModel): void {
-  model.items.forEach((item, index) => {
-    if (item.displayIndex !== index) {
-      throw new Error(`Route C display item index mismatch at ${index}`);
-    }
-    if (!item.id) {
-      throw new Error(`Route C display item ${index} is missing a stable id`);
-    }
-    if (item.kind === 'compressed_tool_group') {
-      const allowsSingleEventToolPage =
-        item.oysterunToolCompression?.compressionKind === 'tool_semantic_stream_page';
-      if (
-        !item.oysterunToolCompression ||
-        item.sourceEventIds.length < 1 ||
-        (!allowsSingleEventToolPage && item.sourceEventIds.length <= 1)
-      ) {
-        throw new Error(
-          `Route C compressed tool display item ${item.id} is missing group metadata`
-        );
-      }
-    }
-    if (item.kind === 'compressed_tool_placeholder') {
-      if (item.sourceEventIds.length !== 1 || item.oysterunToolCompression) {
-        throw new Error(`Route C compressed tool placeholder ${item.id} must map one hidden event`);
-      }
-    }
-  });
-}
-
 function mergeOysterunHost2CancelCandidateEventIds({
   timelineCandidateEventIds,
   renderedCandidateEventIds,
@@ -1769,7 +984,7 @@ function mergeOysterunHost2CancelCandidateEventIds({
 }): string[] {
   const timelineTail = timelineCandidateEventIds.slice(-OYSTERUN_HOST2_CANCEL_CANDIDATE_LIMIT);
   const renderedTail = renderedCandidateEventIds.slice(
-    -OYSTERUN_HOST2_CANCEL_RENDERED_CANDIDATE_LIMIT
+    -OYSTERUN_HOST2_CANCEL_RENDERED_CANDIDATE_LIMIT,
   );
   return oysterunUniqueEventIds([...timelineTail, ...renderedTail]);
 }
@@ -1779,14 +994,12 @@ const useEventTimelineLoader = (
   room: Room,
   onLoad: (eventId: string, linkedTimelines: EventTimeline[], evtAbsIndex: number) => void,
   onError: (err: Error | null) => void,
-  forceRouteCMatrixContextFocus: boolean
 ) => {
   const loadEventTimeline = useCallback(
     async (eventId: string) => {
-      const timelineSet = forceRouteCMatrixContextFocus
-        ? new EventTimelineSet(room, { timelineSupport: true }, mx)
-        : room.getUnfilteredTimelineSet();
-      const [err, replyEvtTimeline] = await to(mx.getEventTimeline(timelineSet, eventId));
+      const [err, replyEvtTimeline] = await to(
+        mx.getEventTimeline(room.getUnfilteredTimelineSet(), eventId),
+      );
       if (!replyEvtTimeline) {
         onError(err ?? null);
         return;
@@ -1801,7 +1014,7 @@ const useEventTimelineLoader = (
 
       onLoad(eventId, linkedTimelines, absIndex);
     },
-    [forceRouteCMatrixContextFocus, mx, room, onLoad, onError]
+    [mx, room, onLoad, onError],
   );
 
   return loadEventTimeline;
@@ -1812,12 +1025,7 @@ const useTimelinePagination = (
   timeline: Timeline,
   setTimeline: Dispatch<SetStateAction<Timeline>>,
   limit: number,
-  displayTimelineBuildOptions: RouteCDisplayTimelineBuildOptions,
-  getScrollElement?: () => HTMLElement | null,
-  getItemElement?: (index: number) => HTMLElement | undefined,
-  setRemoteScrollRestore?: (restore: RouteCRemotePaginationScrollRestore) => void,
-  scheduleRemotePaginationCommit?: (backwards: boolean, commit: () => void) => void,
-  routeCForwardEndLiveHandoff = false
+  beforeCommit?: () => Promise<void>,
 ) => {
   const timelineRef = useRef(timeline);
   timelineRef.current = timeline;
@@ -1826,177 +1034,96 @@ const useTimelinePagination = (
   const handleTimelinePagination = useMemo(() => {
     let fetching = false;
 
-    const buildDisplayModel = (linkedTimelines: EventTimeline[]) =>
-      buildRouteCDisplayModelForPagination(linkedTimelines, displayTimelineBuildOptions);
-    const commitPagination = (backwards: boolean, commit: () => void) => {
-      if (scheduleRemotePaginationCommit) {
-        scheduleRemotePaginationCommit(backwards, commit);
-        return;
-      }
-      commit();
-    };
-    const decryptFetchedTimeline = async (fetchedTimeline: EventTimeline) => {
-      const roomId = fetchedTimeline.getRoomId();
-      const room = roomId ? mx.getRoom(roomId) : null;
-
-      if (room?.hasEncryptionStateEvent()) {
-        await to(decryptAllTimelineEvent(mx, fetchedTimeline));
-      }
-    };
-
     const recalibratePagination = (
       linkedTimelines: EventTimeline[],
-      snapshot: RouteCDisplayPaginationSnapshot
+      timelinesEventsCount: number[],
+      backwards: boolean,
     ) => {
       const topTimeline = linkedTimelines[0];
+      const timelineMatch = (mt: EventTimeline) => (t: EventTimeline) => t === mt;
 
       const newLTimelines = getLinkedTimelines(topTimeline);
-      const nextDisplayModel = buildDisplayModel(newLTimelines);
+      const topTmIndex = newLTimelines.findIndex(timelineMatch(topTimeline));
+      const topAddedTm = topTmIndex === -1 ? [] : newLTimelines.slice(0, topTmIndex);
 
-      if (typeof snapshot.anchorViewportOffset === 'number' && snapshot.anchorEventIds.length > 0) {
-        setRemoteScrollRestore?.({
-          anchorItemId: snapshot.anchorItemId,
-          anchorEventIds: snapshot.anchorEventIds,
-          anchorViewportOffset: snapshot.anchorViewportOffset,
-        });
-      }
+      const topTmAddedEvt =
+        timelineToEventsCount(newLTimelines[topTmIndex]) - timelinesEventsCount[0];
+      const offsetRange = getTimelinesEventsCount(topAddedTm) + (backwards ? topTmAddedEvt : 0);
 
       setTimeline((currentTimeline) => ({
         linkedTimelines: newLTimelines,
-        displayModelRevision: currentTimeline.displayModelRevision + 1,
-        range: recalibrateRouteCDisplayPaginationRange({
-          snapshot,
-          nextModel: nextDisplayModel,
-        }),
+        range:
+          offsetRange > 0
+            ? {
+                start: currentTimeline.range.start + offsetRange,
+                end: currentTimeline.range.end + offsetRange,
+              }
+            : { ...currentTimeline.range },
       }));
-    };
-    const rebaseForwardEndToLiveTimeline = (timelineCursor: EventTimeline): boolean => {
-      if (!routeCForwardEndLiveHandoff) return false;
-      const roomId = timelineCursor.getRoomId();
-      const paginatedRoom = roomId ? mx.getRoom(roomId) : null;
-      if (!paginatedRoom) return false;
-
-      const cursorLinkedTimelines = getLinkedTimelines(timelineCursor);
-      if (
-        cursorLinkedTimelines[cursorLinkedTimelines.length - 1] === getLiveTimeline(paginatedRoom)
-      ) {
-        return false;
-      }
-
-      const liveTimeline = getInitialTimeline(paginatedRoom, displayTimelineBuildOptions);
-      setTimeline((currentTimeline) => ({
-        ...liveTimeline,
-        displayModelRevision: currentTimeline.displayModelRevision + 1,
-      }));
-      return true;
     };
 
     return async (backwards: boolean) => {
       if (fetching) return false;
-      const { linkedTimelines: lTimelines, range: previousRange } = timelineRef.current;
+      const { linkedTimelines: lTimelines } = timelineRef.current;
+      const timelinesEventsCount = lTimelines.map(timelineToEventsCount);
 
       const timelineToPaginate = backwards ? lTimelines[0] : lTimelines[lTimelines.length - 1];
       if (!timelineToPaginate) return false;
-      const previousDisplayModel = buildDisplayModel(lTimelines);
-      const snapshot = captureRouteCDisplayPaginationSnapshot({
-        previousModel: previousDisplayModel,
-        previousRange,
-        backwards,
-        getScrollElement,
-        getItemElement,
-      });
 
       const paginationToken = timelineToPaginate.getPaginationToken(
-        backwards ? Direction.Backward : Direction.Forward
+        backwards ? Direction.Backward : Direction.Forward,
       );
       if (
         !paginationToken &&
         getTimelinesEventsCount(lTimelines) !==
           getTimelinesEventsCount(getLinkedTimelines(timelineToPaginate))
       ) {
-        commitPagination(backwards, () => recalibratePagination(lTimelines, snapshot));
+        await beforeCommit?.();
+        if (!alive()) return false;
+        recalibratePagination(lTimelines, timelinesEventsCount, backwards);
         return true;
       }
 
       fetching = true;
       try {
-        let timelineCursor = timelineToPaginate;
-        let effectiveLimit = backwards
-          ? getRouteCDenseCompressedToolPaginationLimit(limit, snapshot)
-          : limit;
-        let denseToolLowVisibleProgressRetryCount = 0;
+        const [err] = await to(
+          mx.paginateEventTimeline(timelineToPaginate, {
+            backwards,
+            limit,
+          }),
+        );
+        if (err) {
+          // TODO: handle pagination error.
+          return false;
+        }
+        const fetchedTimeline =
+          timelineToPaginate.getNeighbouringTimeline(
+            backwards ? Direction.Backward : Direction.Forward,
+          ) ?? timelineToPaginate;
+        // Decrypt all event ahead of render cycle
+        const roomId = fetchedTimeline.getRoomId();
+        const room = roomId ? mx.getRoom(roomId) : null;
 
-        while (true) {
-          const [err, canPaginateMore] = await to(
-            mx.paginateEventTimeline(timelineCursor, {
-              backwards,
-              limit: effectiveLimit,
-            })
-          );
-          if (err) return false;
-
-          const fetchedTimeline =
-            timelineCursor.getNeighbouringTimeline(
-              backwards ? Direction.Backward : Direction.Forward
-            ) ?? timelineCursor;
-          // Decrypt all event ahead of render cycle.
-          await decryptFetchedTimeline(fetchedTimeline);
-
-          if (!backwards) {
-            if (canPaginateMore === false) {
-              if (alive()) {
-                commitPagination(backwards, () => {
-                  if (!rebaseForwardEndToLiveTimeline(timelineCursor)) {
-                    recalibratePagination(lTimelines, snapshot);
-                  }
-                });
-                return true;
-              }
-              return false;
-            }
-            break;
-          }
-
-          const paginatedLinkedTimelines = getLinkedTimelines(timelineCursor);
-          const nextDisplayModel = buildDisplayModel(paginatedLinkedTimelines);
-          if (
-            !shouldRetryRouteCDenseToolLowVisibleProgress({
-              snapshot,
-              nextModel: nextDisplayModel,
-              retryCount: denseToolLowVisibleProgressRetryCount,
-            })
-          ) {
-            break;
-          }
-
-          const nextTopTimeline = paginatedLinkedTimelines[0];
-          if (!nextTopTimeline?.getPaginationToken(Direction.Backward)) break;
-          denseToolLowVisibleProgressRetryCount += 1;
-          timelineCursor = nextTopTimeline;
-          effectiveLimit = limit;
+        if (room?.hasEncryptionStateEvent()) {
+          await to(decryptAllTimelineEvent(mx, fetchedTimeline));
         }
 
-        if (alive()) {
-          commitPagination(backwards, () => recalibratePagination(lTimelines, snapshot));
-          return true;
-        }
-        return false;
+        const nextLinkedTimelines = getLinkedTimelines(timelineToPaginate);
+        const changed =
+          getTimelinesEventsCount(nextLinkedTimelines) !==
+            timelinesEventsCount.reduce((total, eventCount) => total + eventCount, 0) ||
+          nextLinkedTimelines.length !== lTimelines.length ||
+          nextLinkedTimelines.some((linkedTimeline, index) => linkedTimeline !== lTimelines[index]);
+        if (!alive() || !changed) return false;
+        await beforeCommit?.();
+        if (!alive()) return false;
+        recalibratePagination(lTimelines, timelinesEventsCount, backwards);
+        return true;
       } finally {
         fetching = false;
       }
     };
-  }, [
-    mx,
-    alive,
-    setTimeline,
-    limit,
-    displayTimelineBuildOptions,
-    getScrollElement,
-    getItemElement,
-    setRemoteScrollRestore,
-    scheduleRemotePaginationCommit,
-    routeCForwardEndLiveHandoff,
-  ]);
+  }, [mx, alive, setTimeline, limit, beforeCommit]);
   return handleTimelinePagination;
 };
 
@@ -2007,7 +1134,7 @@ const useLiveEventArrive = (room: Room, onArrive: (mEvent: MatrixEvent) => void)
       eventRoom,
       toStartOfTimeline,
       removed,
-      data
+      data,
     ) => {
       if (eventRoom?.roomId !== room.roomId || !data.liveEvent) return;
       onArrive(mEvent);
@@ -2026,26 +1153,6 @@ const useLiveEventArrive = (room: Room, onArrive: (mEvent: MatrixEvent) => void)
   }, [room, onArrive]);
 };
 
-const useTimelineHydrationRefresh = (room: Room, onHydrate: () => void) => {
-  useEffect(() => {
-    const handleTimelineEvent: EventTimelineSetHandlerMap[RoomEvent.Timeline] = (
-      _mEvent,
-      eventRoom,
-      _toStartOfTimeline,
-      removed,
-      data
-    ) => {
-      if (eventRoom?.roomId !== room.roomId || removed || data.liveEvent) return;
-      onHydrate();
-    };
-
-    room.on(RoomEvent.Timeline, handleTimelineEvent);
-    return () => {
-      room.removeListener(RoomEvent.Timeline, handleTimelineEvent);
-    };
-  }, [room, onHydrate]);
-};
-
 const useLiveTimelineRefresh = (room: Room, onRefresh: () => void) => {
   useEffect(() => {
     const handleTimelineRefresh: RoomEventHandlerMap[RoomEvent.TimelineRefresh] = (r) => {
@@ -2060,21 +1167,14 @@ const useLiveTimelineRefresh = (room: Room, onRefresh: () => void) => {
   }, [room, onRefresh]);
 };
 
-const getInitialTimeline = (
-  room: Room,
-  displayTimelineBuildOptions?: RouteCDisplayTimelineBuildOptions
-) => {
+const getInitialTimeline = (room: Room) => {
   const linkedTimelines = getLinkedTimelines(getLiveTimeline(room));
-  const timelineLength = displayTimelineBuildOptions
-    ? buildRouteCDisplayModelForPagination(linkedTimelines, displayTimelineBuildOptions).items
-        .length
-    : getTimelinesEventsCount(linkedTimelines);
+  const evLength = getTimelinesEventsCount(linkedTimelines);
   return {
     linkedTimelines,
-    displayModelRevision: 0,
     range: {
-      start: Math.max(timelineLength - PAGINATION_LIMIT, 0),
-      end: timelineLength,
+      start: Math.max(evLength - PAGINATION_LIMIT, 0),
+      end: evLength,
     },
   };
 };
@@ -2082,21 +1182,7 @@ const getInitialTimeline = (
 const getEmptyTimeline = () => ({
   range: { start: 0, end: 0 },
   linkedTimelines: [],
-  displayModelRevision: 0,
 });
-
-const refreshLiveTimelineSource = (room: Room, linkedTimelines: EventTimeline[]): EventTimeline[] =>
-  linkedTimelines[linkedTimelines.length - 1] === getLiveTimeline(room)
-    ? getLinkedTimelines(getLiveTimeline(room))
-    : linkedTimelines;
-
-const getDisplayTimelineSource = (
-  linkedTimelines: EventTimeline[],
-  displayModelRevision: number
-): EventTimeline[] => {
-  if (!Number.isFinite(displayModelRevision)) return linkedTimelines;
-  return linkedTimelines;
-};
 
 const getRoomUnreadInfo = (room: Room, scrollTo = false) => {
   const readUptoEventId = room.getEventReadUpTo(room.client.getUserId() ?? '');
@@ -2110,32 +1196,6 @@ const getRoomUnreadInfo = (room: Room, scrollTo = false) => {
   };
 };
 
-const getDistanceFromScrollBottom = (scrollElement: HTMLElement): number =>
-  Math.max(0, scrollElement.scrollHeight - scrollElement.offsetHeight - scrollElement.scrollTop);
-
-const isScrollAtOrNearBottom = (scrollElement: HTMLElement): boolean =>
-  getDistanceFromScrollBottom(scrollElement) <= OYSTERUN_ROUTE_C_NEAR_BOTTOM_THRESHOLD_PX;
-
-const isRouteCVisibleForSmoothBottomSettle = (): boolean =>
-  document.visibilityState !== 'hidden' && document.hasFocus();
-
-const nudgeOysterunIOSScrollPaint = (scrollElement: HTMLElement): boolean => {
-  const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
-  if (maxScrollTop <= 0) return false;
-
-  const originalScrollTop = scrollElement.scrollTop;
-  const nudgeDirection =
-    originalScrollTop >= maxScrollTop
-      ? -OYSTERUN_ROUTE_C_IOS_SCROLL_PAINT_NUDGE_PX
-      : OYSTERUN_ROUTE_C_IOS_SCROLL_PAINT_NUDGE_PX;
-  const nudgedScrollTop = Math.max(0, Math.min(maxScrollTop, originalScrollTop + nudgeDirection));
-  if (nudgedScrollTop === originalScrollTop) return false;
-
-  scrollElement.scrollTop = nudgedScrollTop;
-  scrollElement.scrollTop = originalScrollTop;
-  return true;
-};
-
 export function RoomTimeline({
   room,
   eventId,
@@ -2144,11 +1204,7 @@ export function RoomTimeline({
   routeCRespondingState,
 }: RoomTimelineProps) {
   const mx = useMatrixClient();
-  const currentUserId = mx.getUserId();
-  const screenSize = useScreenSizeContext();
-  const mobileScrollbarVisible = screenSize === ScreenSize.Mobile;
   const routeCChatShell = Boolean(getOysterunHostSessionRouteSearch());
-  const routeCIOSScrollPaintNudgeEnabled = routeCChatShell && isOysterunCapacitorIOSRuntime();
   const useAuthentication = useMediaAuthentication();
   const [hideActivity] = useSetting(settingsAtom, 'hideActivity');
   const [messageLayout] = useSetting(settingsAtom, 'messageLayout');
@@ -2182,7 +1238,7 @@ export function RoomTimeline({
   const accessiblePowerTagColors = useAccessiblePowerTagColors(
     theme.kind,
     creatorsTag,
-    powerLevelTags
+    powerLevelTags,
   );
 
   const permissions = useRoomPermissions(creators, powerLevels);
@@ -2208,59 +1264,48 @@ export function RoomTimeline({
   if (unreadInfo) {
     readUptoEventIdRef.current = unreadInfo.readUptoEventId;
   }
-  const currentReadUptoEventId = unreadInfo?.readUptoEventId ?? readUptoEventIdRef.current;
-
   const atBottomAnchorRef = useRef<HTMLElement>(null);
   const [atBottom, setAtBottom] = useState<boolean>(true);
   const atBottomRef = useRef(atBottom);
   atBottomRef.current = atBottom;
-  const followingLatestIntentRef = useRef(true);
-  const backgroundBottomSettlePendingRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollContentRef = useRef<HTMLDivElement>(null);
-  const programmaticScrollUntilRef = useRef(0);
-  const initialBottomSettleUntilRef = useRef(0);
   const routeCHostOwnerFocusUntilRef = useRef(0);
-  const routeCPendingOpenEventOptionsRef = useRef<
-    | {
-        eventId: string;
-        options: RouteCOpenEventOptions;
-      }
-    | undefined
-  >();
-  const remotePaginationSettleUntilRef = useRef(0);
-  const routeCTouchActiveRef = useRef(false);
-  const remotePaginationTouchReleaseRequiredRef = useRef(false);
-  const deferredRemotePaginationCommitRef = useRef<(() => void) | undefined>();
-  const remotePaginationScrollRestoreRef = useRef<RouteCRemotePaginationScrollRestore>();
   const scrollToBottomRef = useRef({
     count: 0,
     smooth: true,
   });
+  const routeCViewportDiagnosticWindowUntilRef = useRef(0);
+  const routeCViewportDiagnosticLastScrollAtRef = useRef(0);
+  const routeCViewportDiagnosticWriteErrorReportedRef = useRef(false);
+  const routeCLiveBottomTransactionRevisionRef = useRef(0);
+  const routeCLiveBottomTransactionRef = useRef<RouteCLiveBottomTransaction>();
+  const routeCLiveBottomTransactionFrameRef = useRef<number>();
 
   const [focusItem, setFocusItem] = useState<
     | {
         index: number;
         scrollTo: boolean;
         highlight: boolean;
-        forceScroll?: boolean;
-        scrollBehavior?: 'auto' | 'instant' | 'smooth';
       }
     | undefined
   >();
   const [routeCHostOwnerFocusedAnchorEventId, setRouteCHostOwnerFocusedAnchorEventId] =
     useState<string>();
+  const [routeCHostOwnerViewportAnchorEventId, setRouteCHostOwnerViewportAnchorEventId] =
+    useState<string>();
+  const routeCHostOwnerViewportMeasureFrameRef = useRef<number>();
   const alive = useAlive();
 
   const linkifyOpts = useMemo<LinkifyOpts>(
     () => ({
       ...LINKIFY_OPTS,
       render: factoryRenderLinkifyWithMention((href) =>
-        renderMatrixMention(mx, room.roomId, href, makeMentionCustomProps(mentionClickHandler))
+        renderMatrixMention(mx, room.roomId, href, makeMentionCustomProps(mentionClickHandler)),
       ),
     }),
-    [mx, room, mentionClickHandler]
+    [mx, room, mentionClickHandler],
   );
   const htmlReactParserOptions = useMemo<HTMLReactParserOptions>(
     () =>
@@ -2270,46 +1315,23 @@ export function RoomTimeline({
         handleSpoilerClick: spoilerClickHandler,
         handleMentionClick: mentionClickHandler,
       }),
-    [mx, room, linkifyOpts, spoilerClickHandler, mentionClickHandler, useAuthentication]
+    [mx, room, linkifyOpts, spoilerClickHandler, mentionClickHandler, useAuthentication],
   );
   const parseMemberEvent = useMemberEventParser();
-  const routeCDisplayTimelineBuildOptions = useMemo<RouteCDisplayTimelineBuildOptions>(
-    () => ({
-      ignoredUsersSet,
-      showHiddenEvents,
-      hideMembershipEvents,
-      hideNickAvatarEvents,
-      readUptoEventId: currentReadUptoEventId,
-      currentUserId,
-    }),
-    [
-      ignoredUsersSet,
-      showHiddenEvents,
-      hideMembershipEvents,
-      hideNickAvatarEvents,
-      currentReadUptoEventId,
-      currentUserId,
-    ]
-  );
 
   const [timeline, setTimeline] = useState<Timeline>(() =>
-    eventId ? getEmptyTimeline() : getInitialTimeline(room, routeCDisplayTimelineBuildOptions)
+    eventId ? getEmptyTimeline() : getInitialTimeline(room),
   );
-  const displayTimelineModel = useMemo(
-    () =>
-      buildRouteCDisplayTimelineModel({
-        linkedTimelines: getDisplayTimelineSource(
-          timeline.linkedTimelines,
-          timeline.displayModelRevision
-        ),
-        ...routeCDisplayTimelineBuildOptions,
-      }),
-    [timeline.linkedTimelines, timeline.displayModelRevision, routeCDisplayTimelineBuildOptions]
+  const eventsLength = getTimelinesEventsCount(timeline.linkedTimelines);
+  const routeCProductVisibleEventCount = getRouteCProductVisibleEventCount(
+    timeline.linkedTimelines,
+    {
+      ignoredUsersSet,
+      showHiddenEvents,
+      hideMembershipEvents,
+      hideNickAvatarEvents,
+    },
   );
-  assertRouteCDisplayTimelineModelInvariant(displayTimelineModel);
-  const displayItems = displayTimelineModel.items;
-  const displayItemsLength = displayItems.length;
-  const displayRange = normalizeRouteCDisplayRange(timeline.range, displayItemsLength);
   const [routeCHostOwnerNeighborState, setRouteCHostOwnerNeighborState] =
     useState<RouteCHostOwnerNeighborState>({
       loading: false,
@@ -2336,10 +1358,122 @@ export function RoomTimeline({
     timeline.linkedTimelines[timeline.linkedTimelines.length - 1] === getLiveTimeline(room);
   const canPaginateBack =
     typeof timeline.linkedTimelines[0]?.getPaginationToken(Direction.Backward) === 'string';
-  const rangeAtStart = displayRange.start === 0;
-  const rangeAtEnd = displayRange.end === displayItemsLength;
+  const rangeAtStart = timeline.range.start === 0;
+  const rangeAtEnd = timeline.range.end === eventsLength;
   const atLiveEndRef = useRef(liveTimelineLinked && rangeAtEnd);
   atLiveEndRef.current = liveTimelineLinked && rangeAtEnd;
+  const routeCViewportGeometryDiagnosticsEnabled =
+    routeCChatShell && isOysterunRouteCViewportGeometryDiagnosticsEnabled();
+  const routeCViewportGeometryStateRef = useRef({
+    linkedTimelines: timeline.linkedTimelines,
+    rangeStart: timeline.range.start,
+    rangeEnd: timeline.range.end,
+    eventsLength,
+    atBottom,
+    liveTimelineLinked,
+    rangeAtStart,
+    rangeAtEnd,
+  });
+  routeCViewportGeometryStateRef.current = {
+    linkedTimelines: timeline.linkedTimelines,
+    rangeStart: timeline.range.start,
+    rangeEnd: timeline.range.end,
+    eventsLength,
+    atBottom,
+    liveTimelineLinked,
+    rangeAtStart,
+    rangeAtEnd,
+  };
+
+  const recordRouteCViewportGeometry = useCallback(
+    (
+      trigger: string,
+      matrixEvent?: MatrixEvent,
+      transaction?: RouteCLiveBottomTransactionDiagnostic,
+    ) => {
+      if (!routeCViewportGeometryDiagnosticsEnabled) return;
+      const scrollElement = scrollRef.current;
+      const scrollContent = scrollContentRef.current;
+      const bottomAnchor = atBottomAnchorRef.current;
+      if (!scrollElement || !scrollContent || !bottomAnchor) return;
+      const state = routeCViewportGeometryStateRef.current;
+      const viewportRect = scrollElement.getBoundingClientRect();
+      const bottomAnchorRect = bottomAnchor.getBoundingClientRect();
+      const visible = getRouteCViewportVisibleEventIds(scrollElement, state.linkedTimelines);
+      const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+      void recordOysterunRouteCViewportGeometryDiagnostic({
+        trigger,
+        matrix_event_id: matrixEvent?.getId(),
+        matrix_event_type: matrixEvent?.getType(),
+        matrix_event_sender: matrixEvent?.getSender(),
+        client_recorded_at_ms: performance.now(),
+        scroll_top: scrollElement.scrollTop,
+        scroll_height: scrollElement.scrollHeight,
+        client_height: scrollElement.clientHeight,
+        max_scroll_top: maxScrollTop,
+        distance_from_bottom: maxScrollTop - scrollElement.scrollTop,
+        scroll_content_height: scrollContent.getBoundingClientRect().height,
+        bottom_anchor_top: bottomAnchorRect.top,
+        bottom_anchor_bottom: bottomAnchorRect.bottom,
+        bottom_anchor_distance_from_viewport_bottom: viewportRect.bottom - bottomAnchorRect.bottom,
+        timeline_range_start: state.rangeStart,
+        timeline_range_end: state.rangeEnd,
+        timeline_event_count: state.eventsLength,
+        visible_rendered_count: visible.count,
+        viewport_first_event_id: visible.firstEventId,
+        viewport_center_event_id: visible.centerEventId,
+        viewport_last_event_id: visible.lastEventId,
+        scroll_to_bottom_request_count: scrollToBottomRef.current.count,
+        scroll_to_bottom_smooth: scrollToBottomRef.current.smooth,
+        live_bottom_transaction_phase: transaction?.phase,
+        live_bottom_transaction_revision: transaction?.revision,
+        live_bottom_transaction_event_id: transaction?.matrixEventId,
+        live_bottom_previous_max_scroll_top: transaction?.previousMaxScrollTop,
+        live_bottom_current_max_scroll_top: transaction?.currentMaxScrollTop,
+        live_bottom_transaction_behavior: transaction?.behavior,
+        at_bottom: state.atBottom,
+        live_timeline_linked: state.liveTimelineLinked,
+        range_at_start: state.rangeAtStart,
+        range_at_end: state.rangeAtEnd,
+        backward_placeholder_present: Boolean(
+          scrollElement.querySelector('[data-paginator-anchor="B"]'),
+        ),
+        forward_placeholder_present: Boolean(
+          scrollElement.querySelector('[data-paginator-anchor="F"]'),
+        ),
+        document_has_focus: document.hasFocus(),
+      }).catch((error) => {
+        if (routeCViewportDiagnosticWriteErrorReportedRef.current) return;
+        routeCViewportDiagnosticWriteErrorReportedRef.current = true;
+        console.warn('[oysterun-routec] viewport geometry diagnostic write failed', error);
+      });
+    },
+    [routeCViewportGeometryDiagnosticsEnabled],
+  );
+
+  const scheduleRouteCViewportGeometryDiagnostics = useCallback(
+    (matrixEvent: MatrixEvent) => {
+      if (!routeCViewportGeometryDiagnosticsEnabled) return;
+      routeCViewportDiagnosticWindowUntilRef.current =
+        performance.now() + OYSTERUN_ROUTE_C_VIEWPORT_DIAGNOSTIC_SCROLL_WINDOW_MS;
+      recordRouteCViewportGeometry('live_event_immediate', matrixEvent);
+      window.requestAnimationFrame(() => {
+        if (!alive()) return;
+        recordRouteCViewportGeometry('live_event_raf_1', matrixEvent);
+        window.requestAnimationFrame(() => {
+          if (!alive()) return;
+          recordRouteCViewportGeometry('live_event_raf_2', matrixEvent);
+        });
+      });
+      window.setTimeout(() => {
+        if (alive()) recordRouteCViewportGeometry('live_event_250ms', matrixEvent);
+      }, 250);
+      window.setTimeout(() => {
+        if (alive()) recordRouteCViewportGeometry('live_event_750ms', matrixEvent);
+      }, 750);
+    },
+    [alive, recordRouteCViewportGeometry, routeCViewportGeometryDiagnosticsEnabled],
+  );
 
   const handleOysterunHost2Cancel = useCallback(
     async (targetEventId: string) => {
@@ -2358,7 +1492,7 @@ export function RoomTimeline({
           same_event_both_canceled_and_started:
             currentState.proof.same_event_both_canceled_and_started === true,
         },
-        'click_requested'
+        'click_requested',
       );
       setOysterunCancelControlsByEventId((current) => ({
         ...current,
@@ -2383,10 +1517,10 @@ export function RoomTimeline({
           ? await commitOysterunCancelSemanticSourceHooks(response.proof)
           : [];
         const requestSemanticCommit = semanticCommits.find(
-          (commit) => commit.semantic_type === 'control.request'
+          (commit) => commit.semantic_type === 'control.request',
         );
         const outcomeSemanticCommit = semanticCommits.find(
-          (commit) => commit.semantic_type === 'control.outcome'
+          (commit) => commit.semantic_type === 'control.outcome',
         );
         recordOysterunCancelControlProof(
           {
@@ -2399,10 +1533,10 @@ export function RoomTimeline({
             control_request_id: response.proof.control_request_id,
             control_outcome: response.proof.control_outcome,
             cancel_request_semantic_event_source_hook_present: Boolean(
-              response.proof.cancel_request_semantic_event_source_hook
+              response.proof.cancel_request_semantic_event_source_hook,
             ),
             cancel_outcome_semantic_event_source_hook_present: Boolean(
-              response.proof.cancel_outcome_semantic_event_source_hook
+              response.proof.cancel_outcome_semantic_event_source_hook,
             ),
             cancel_semantic_matrix_event_commit_count: semanticCommits.length,
             cancel_request_semantic_event_committed: Boolean(requestSemanticCommit),
@@ -2417,7 +1551,7 @@ export function RoomTimeline({
             same_event_both_canceled_and_started:
               response.proof.same_event_both_canceled_and_started === true,
           },
-          'click_resolved'
+          'click_resolved',
         );
         setOysterunCancelControlsByEventId((current) => ({
           ...current,
@@ -2436,7 +1570,7 @@ export function RoomTimeline({
             matrix_room_id: currentState.proof.matrix_room_id,
             error: message,
           },
-          'click_failed'
+          'click_failed',
         );
         setOysterunCancelControlsByEventId((current) => ({
           ...current,
@@ -2448,7 +1582,7 @@ export function RoomTimeline({
         }));
       }
     },
-    [oysterunCancelControlsByEventId, room.roomId]
+    [oysterunCancelControlsByEventId, room.roomId],
   );
 
   const getScrollElement = useCallback(() => scrollRef.current, []);
@@ -2457,180 +1591,117 @@ export function RoomTimeline({
     if (!root) return false;
     return resetOysterunLocalPathLinks(root);
   }, []);
-  const getTimelineItemElement = useCallback(
-    (index: number) =>
-      (scrollRef.current?.querySelector(`[data-message-item="${index}"]`) as HTMLElement) ??
-      undefined,
-    []
-  );
-  const setRemoteScrollRestore = useCallback((restore: RouteCRemotePaginationScrollRestore) => {
-    remotePaginationScrollRestoreRef.current = restore;
-  }, []);
-  const flushDeferredRemotePaginationCommit = useCallback(() => {
-    const commit = deferredRemotePaginationCommitRef.current;
-    deferredRemotePaginationCommitRef.current = undefined;
-    if (commit) commit();
-  }, []);
-  const scheduleRemotePaginationCommit = useCallback((backwards: boolean, commit: () => void) => {
-    if (!backwards || !routeCTouchActiveRef.current) {
-      commit();
-      return;
-    }
-    deferredRemotePaginationCommitRef.current = commit;
-    remotePaginationTouchReleaseRequiredRef.current = true;
-  }, []);
-  const shouldSuppressPagination = useCallback((backwards: boolean) => {
-    if (!backwards) return false;
-    if (deferredRemotePaginationCommitRef.current) {
-      return OYSTERUN_ROUTE_C_REMOTE_PAGINATION_SETTLE_MS;
-    }
-
-    if (remotePaginationTouchReleaseRequiredRef.current) {
-      if (routeCTouchActiveRef.current) {
-        return OYSTERUN_ROUTE_C_REMOTE_PAGINATION_SETTLE_MS;
-      }
-      remotePaginationTouchReleaseRequiredRef.current = false;
-    }
-
-    const settleRemainingMs = remotePaginationSettleUntilRef.current - performance.now();
-    return settleRemainingMs > 0 ? Math.ceil(settleRemainingMs + 16) : false;
-  }, []);
-
+  const routeCIOSRemotePaginationTransactionEnabled =
+    routeCChatShell && isOysterunCapacitorIOSRuntime();
+  const {
+    beforeRemoteCommit: beforeRouteCIOSRemotePaginationCommit,
+    paginateRemote: paginateRouteCIOSRemote,
+    handleTouchStart: handleRouteCIOSRemotePaginationTouchStart,
+    handleTouchEnd: handleRouteCIOSRemotePaginationTouchEnd,
+  } = useOysterunIOSRemotePaginationTransaction({
+    enabled: routeCIOSRemotePaginationTransactionEnabled,
+    scopeKey: room.roomId,
+    range: timeline.range,
+    count: eventsLength,
+    getScrollElement,
+  });
   const handleTimelinePagination = useTimelinePagination(
     mx,
     timeline,
     setTimeline,
     PAGINATION_LIMIT,
-    routeCDisplayTimelineBuildOptions,
-    getScrollElement,
-    getTimelineItemElement,
-    setRemoteScrollRestore,
-    scheduleRemotePaginationCommit,
-    routeCChatShell
+    beforeRouteCIOSRemotePaginationCommit,
+  );
+  const handlePaginatorEnd = useCallback(
+    (backwards: boolean) => {
+      if (routeCIOSRemotePaginationTransactionEnabled) {
+        return paginateRouteCIOSRemote(backwards, handleTimelinePagination);
+      }
+      handleTimelinePagination(backwards);
+      return undefined;
+    },
+    [
+      handleTimelinePagination,
+      paginateRouteCIOSRemote,
+      routeCIOSRemotePaginationTransactionEnabled,
+    ],
   );
 
-  const isTimelineAtOrNearBottom = useCallback(() => {
-    const scrollElement = getScrollElement();
-    return scrollElement ? isScrollAtOrNearBottom(scrollElement) : atBottomRef.current;
-  }, [getScrollElement]);
-  const startInitialBottomSettle = useCallback(() => {
-    followingLatestIntentRef.current = true;
-    initialBottomSettleUntilRef.current =
-      performance.now() + OYSTERUN_ROUTE_C_INITIAL_BOTTOM_SETTLE_MS;
-  }, []);
-  const isInitialBottomSettleActive = useCallback(
-    () => performance.now() <= initialBottomSettleUntilRef.current,
-    []
-  );
-  const isRouteCHostOwnerUserFocusActive = useCallback(
-    () => performance.now() <= routeCHostOwnerFocusUntilRef.current,
-    []
-  );
-  const shouldFollowTimelineBottom = useCallback(() => {
-    if (isRouteCHostOwnerUserFocusActive()) return false;
-    return (
-      followingLatestIntentRef.current ||
-      isTimelineAtOrNearBottom() ||
-      isInitialBottomSettleActive()
-    );
-  }, [
-    isInitialBottomSettleActive,
-    isRouteCHostOwnerUserFocusActive,
-    isTimelineAtOrNearBottom,
-  ]);
   const beginRouteCHostOwnerUserFocus = useCallback((evtId: string) => {
     const focusUntil = performance.now() + OYSTERUN_ROUTE_C_HOST_OWNER_FOCUS_SCROLL_GUARD_MS;
     routeCHostOwnerFocusUntilRef.current = focusUntil;
-    followingLatestIntentRef.current = false;
-    backgroundBottomSettlePendingRef.current = false;
-    initialBottomSettleUntilRef.current = 0;
-    atBottomRef.current = false;
-    setAtBottom(false);
     setRouteCHostOwnerFocusedAnchorEventId(evtId);
-    programmaticScrollUntilRef.current = focusUntil;
+    setRouteCHostOwnerViewportAnchorEventId(undefined);
   }, []);
-  const handleTimelineScroll = useCallback(() => {
-    if (performance.now() <= programmaticScrollUntilRef.current) return;
-    setRouteCHostOwnerFocusedAnchorEventId(undefined);
-    const followingLatest = isTimelineAtOrNearBottom() || isInitialBottomSettleActive();
-    followingLatestIntentRef.current = followingLatest;
-    if (!followingLatest) {
-      initialBottomSettleUntilRef.current = 0;
+  const refreshRouteCHostOwnerViewportAnchor = useCallback(() => {
+    const viewportEventId = getRouteCViewportCenterEventId(
+      getScrollElement(),
+      timeline.linkedTimelines,
+    );
+    setRouteCHostOwnerViewportAnchorEventId((current) =>
+      current === viewportEventId ? current : viewportEventId,
+    );
+  }, [getScrollElement, timeline.linkedTimelines]);
+  const scheduleRouteCHostOwnerViewportAnchorRefresh = useCallback(() => {
+    if (routeCHostOwnerViewportMeasureFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(routeCHostOwnerViewportMeasureFrameRef.current);
     }
-  }, [isInitialBottomSettleActive, isTimelineAtOrNearBottom]);
-  const nudgeOysterunIOSScrollPaintIfNeeded = useCallback(() => {
-    if (!routeCIOSScrollPaintNudgeEnabled) return;
-
-    requestAnimationFrame(() => {
-      if (!alive() || !shouldFollowTimelineBottom()) return;
-      requestAnimationFrame(() => {
-        if (!alive() || !shouldFollowTimelineBottom()) return;
-        const scrollElement = getScrollElement();
-        if (!scrollElement || !isScrollAtOrNearBottom(scrollElement)) return;
-        programmaticScrollUntilRef.current =
-          performance.now() + OYSTERUN_ROUTE_C_PROGRAMMATIC_SCROLL_GUARD_MS;
-        nudgeOysterunIOSScrollPaint(scrollElement);
-      });
+    routeCHostOwnerViewportMeasureFrameRef.current = window.requestAnimationFrame(() => {
+      routeCHostOwnerViewportMeasureFrameRef.current = undefined;
+      refreshRouteCHostOwnerViewportAnchor();
     });
-  }, [alive, getScrollElement, routeCIOSScrollPaintNudgeEnabled, shouldFollowTimelineBottom]);
-  const scrollToTimelineBottom = useCallback(
-    (behavior: 'auto' | 'instant' | 'smooth' = 'instant') => {
-      const scrollElement = getScrollElement();
-      if (!scrollElement) return;
+  }, [refreshRouteCHostOwnerViewportAnchor]);
+  const handleTimelineScroll = useCallback(() => {
+    const now = performance.now();
+    if (
+      routeCViewportGeometryDiagnosticsEnabled &&
+      now <= routeCViewportDiagnosticWindowUntilRef.current &&
+      now - routeCViewportDiagnosticLastScrollAtRef.current >=
+        OYSTERUN_ROUTE_C_VIEWPORT_DIAGNOSTIC_SCROLL_THROTTLE_MS
+    ) {
+      routeCViewportDiagnosticLastScrollAtRef.current = now;
+      recordRouteCViewportGeometry('live_event_scroll');
+    }
+    if (performance.now() <= routeCHostOwnerFocusUntilRef.current) return;
+    setRouteCHostOwnerFocusedAnchorEventId(undefined);
+    scheduleRouteCHostOwnerViewportAnchorRefresh();
+  }, [
+    recordRouteCViewportGeometry,
+    routeCViewportGeometryDiagnosticsEnabled,
+    scheduleRouteCHostOwnerViewportAnchorRefresh,
+  ]);
 
-      const scrollOnce = (scrollBehavior: 'auto' | 'instant' | 'smooth') => {
-        programmaticScrollUntilRef.current =
-          performance.now() + OYSTERUN_ROUTE_C_PROGRAMMATIC_SCROLL_GUARD_MS;
-        scrollToBottom(scrollElement, scrollBehavior);
-      };
-
-      scrollOnce(behavior);
-      nudgeOysterunIOSScrollPaintIfNeeded();
-      requestAnimationFrame(() => {
-        if (!alive() || !shouldFollowTimelineBottom()) return;
-        scrollOnce('instant');
-        nudgeOysterunIOSScrollPaintIfNeeded();
-        requestAnimationFrame(() => {
-          if (!alive() || !shouldFollowTimelineBottom()) return;
-          scrollOnce('instant');
-          nudgeOysterunIOSScrollPaintIfNeeded();
-        });
-      });
-    },
-    [alive, getScrollElement, nudgeOysterunIOSScrollPaintIfNeeded, shouldFollowTimelineBottom]
-  );
-
-  const {
-    getItems,
-    scrollToItem,
-    scrollToElement,
-    observeBackAnchor,
-    observeFrontAnchor,
-    retrySuppressedPagination,
-  } = useVirtualPaginator({
-    count: displayItemsLength,
-    limit: PAGINATION_LIMIT,
-    range: displayRange,
-    onRangeChange: useCallback((r) => setTimeline((cs) => ({ ...cs, range: r })), []),
-    getScrollElement,
-    getItemElement: getTimelineItemElement,
-    onEnd: handleTimelinePagination,
-    shouldSuppressPagination,
-  });
-  const visibleDisplayItems = getItems();
+  const { getItems, scrollToItem, scrollToElement, observeBackAnchor, observeFrontAnchor } =
+    useVirtualPaginator({
+      count: eventsLength,
+      limit: PAGINATION_LIMIT,
+      range: timeline.range,
+      onRangeChange: useCallback((r) => setTimeline((cs) => ({ ...cs, range: r })), []),
+      getScrollElement,
+      getItemElement: useCallback(
+        (index: number) =>
+          (scrollRef.current?.querySelector(`[data-message-item="${index}"]`) as HTMLElement) ??
+          undefined,
+        [],
+      ),
+      onEnd: handlePaginatorEnd,
+      remoteEndTransaction: routeCIOSRemotePaginationTransactionEnabled,
+    });
+  const visibleEventIndexes = getItems();
   const shouldShowRouteCEmptyComposerGuidance =
     routeCChatShell &&
-    displayItemsLength === 0 &&
+    routeCProductVisibleEventCount === 0 &&
     rangeAtStart &&
     rangeAtEnd &&
     !canPaginateBack &&
     liveTimelineLinked;
-  const routeCHostOwnerVisibleDisplayItemsKey = visibleDisplayItems.join(',');
+  const routeCHostOwnerVisibleEventIndexesKey = visibleEventIndexes.join(',');
   const routeCHostOwnerNeighborFocusEventIdFromUrl = routeCChatShell
     ? getOysterunHostSessionChatFocusEventId()
     : undefined;
   useEffect(() => {
     setRouteCHostOwnerFocusedAnchorEventId(undefined);
+    setRouteCHostOwnerViewportAnchorEventId(undefined);
   }, [room.roomId]);
   useEffect(() => {
     if (!routeCChatShell) {
@@ -2641,17 +1712,40 @@ export function RoomTimeline({
       setRouteCHostOwnerFocusedAnchorEventId(routeCHostOwnerNeighborFocusEventIdFromUrl);
     }
   }, [routeCChatShell, routeCHostOwnerNeighborFocusEventIdFromUrl]);
+  useLayoutEffect(() => {
+    if (!routeCChatShell || routeCHostOwnerFocusedAnchorEventId) return undefined;
+    scheduleRouteCHostOwnerViewportAnchorRefresh();
+    return () => {
+      if (routeCHostOwnerViewportMeasureFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(routeCHostOwnerViewportMeasureFrameRef.current);
+        routeCHostOwnerViewportMeasureFrameRef.current = undefined;
+      }
+    };
+  }, [
+    routeCChatShell,
+    routeCHostOwnerFocusedAnchorEventId,
+    routeCHostOwnerVisibleEventIndexesKey,
+    scheduleRouteCHostOwnerViewportAnchorRefresh,
+    timeline.range.end,
+    timeline.range.start,
+  ]);
   const routeCHostOwnerNeighborAnchor = useMemo(
     () =>
       getRouteCHostOwnerNeighborAnchor({
         focusEventId: routeCHostOwnerFocusedAnchorEventId,
-        displayItems,
-        visibleDisplayItems,
+        viewportEventId: routeCHostOwnerViewportAnchorEventId,
+        linkedTimelines: timeline.linkedTimelines,
+        visibleEventIndexes,
       }),
-    [displayItems, routeCHostOwnerFocusedAnchorEventId, routeCHostOwnerVisibleDisplayItemsKey]
+    [
+      routeCHostOwnerFocusedAnchorEventId,
+      routeCHostOwnerViewportAnchorEventId,
+      routeCHostOwnerVisibleEventIndexesKey,
+      timeline.linkedTimelines,
+    ],
   );
   const routeCHostOwnerNeighborAnchorKey = getRouteCHostOwnerNeighborAnchorKey(
-    routeCHostOwnerNeighborAnchor
+    routeCHostOwnerNeighborAnchor,
   );
 
   const requestRouteCHostOwnerNeighbors = useCallback(
@@ -2713,7 +1807,7 @@ export function RoomTimeline({
         }
       }
     },
-    [alive, room.roomId, routeCChatShell]
+    [alive, room.roomId, routeCChatShell],
   );
   const requestRouteCHostOwnerNeighborsDebounced = useDebounce(requestRouteCHostOwnerNeighbors, {
     wait: OYSTERUN_ROUTE_C_HOST_OWNER_NEIGHBOR_LOOKUP_DEBOUNCE_MS,
@@ -2730,7 +1824,7 @@ export function RoomTimeline({
       });
       return;
     }
-    if (displayItemsLength === 0) {
+    if (eventsLength === 0) {
       setRouteCHostOwnerNeighborState({
         loading: false,
         error: null,
@@ -2742,10 +1836,10 @@ export function RoomTimeline({
     }
     requestRouteCHostOwnerNeighborsDebounced(
       routeCHostOwnerNeighborAnchor,
-      routeCHostOwnerNeighborAnchorKey
+      routeCHostOwnerNeighborAnchorKey,
     );
   }, [
-    displayItemsLength,
+    eventsLength,
     requestRouteCHostOwnerNeighborsDebounced,
     routeCChatShell,
     routeCHostOwnerNeighborAnchor,
@@ -2753,48 +1847,17 @@ export function RoomTimeline({
     routeCHostOwnerNeighborInvalidationSeq,
   ]);
 
-  useLayoutEffect(() => {
-    const restore = remotePaginationScrollRestoreRef.current;
-    if (!restore) return;
-
-    const scrollElement = getScrollElement();
-    const anchorIndex = findRouteCDisplayAnchorIndex(
-      displayTimelineModel,
-      restore.anchorEventIds,
-      restore.anchorItemId
-    );
-    if (!scrollElement || typeof anchorIndex !== 'number') {
-      remotePaginationScrollRestoreRef.current = undefined;
-      return;
-    }
-
-    const anchorElement = getTimelineItemElement(anchorIndex);
-    if (!anchorElement) return;
-
-    programmaticScrollUntilRef.current =
-      performance.now() + OYSTERUN_ROUTE_C_PROGRAMMATIC_SCROLL_GUARD_MS;
-    remotePaginationSettleUntilRef.current =
-      performance.now() + OYSTERUN_ROUTE_C_REMOTE_PAGINATION_SETTLE_MS;
-    remotePaginationTouchReleaseRequiredRef.current = routeCTouchActiveRef.current;
-    scrollElement.scrollTo({
-      top: Math.max(anchorElement.offsetTop - restore.anchorViewportOffset, 0),
-      behavior: 'instant',
-    });
-    remotePaginationScrollRestoreRef.current = undefined;
-  }, [displayRange, displayTimelineModel, getScrollElement, getTimelineItemElement]);
-
   const oysterunHost2TimelineCandidateEventIds = collectOysterunHost2TimelineCandidateEventIds(
     mx,
-    timeline.linkedTimelines
+    timeline.linkedTimelines,
   );
   const oysterunHost2RenderedCandidateEventIds = collectOysterunHost2RenderedCandidateEventIds(
     mx,
-    visibleDisplayItems
-      .map((itemIndex) => displayItems[itemIndex])
-      .filter((item): item is RouteCDisplayTimelineItem => Boolean(item))
+    timeline.linkedTimelines,
+    visibleEventIndexes,
   );
   const oysterunProviderControlOutcomesByRequestId = collectOysterunProviderControlOutcomes(
-    timeline.linkedTimelines
+    timeline.linkedTimelines,
   );
   const oysterunHost2CandidateEventIds = mergeOysterunHost2CancelCandidateEventIds({
     timelineCandidateEventIds: oysterunHost2TimelineCandidateEventIds,
@@ -2813,85 +1876,44 @@ export function RoomTimeline({
     useCallback(
       (evtId, lTimelines, evtAbsIndex) => {
         if (!alive()) return;
-        const loadedDisplayTimelineModel = buildRouteCDisplayTimelineModel({
-          linkedTimelines: lTimelines,
-          ignoredUsersSet,
-          showHiddenEvents,
-          hideMembershipEvents,
-          hideNickAvatarEvents,
-          readUptoEventId: readUptoEventIdRef.current,
-          currentUserId: mx.getUserId(),
-        });
-        assertRouteCDisplayTimelineModelInvariant(loadedDisplayTimelineModel);
-        const displayIndex =
-          loadedDisplayTimelineModel.displayIndexByEventId.get(evtId) ??
-          loadedDisplayTimelineModel.rawEventIndexToDisplayIndex.get(evtAbsIndex) ??
-          0;
-        const displayLength = loadedDisplayTimelineModel.items.length;
-        const pendingOpenEventOptions =
-          routeCPendingOpenEventOptionsRef.current?.eventId === evtId
-            ? routeCPendingOpenEventOptionsRef.current.options
-            : undefined;
-        if (routeCPendingOpenEventOptionsRef.current?.eventId === evtId) {
-          routeCPendingOpenEventOptionsRef.current = undefined;
-        }
-
-        followingLatestIntentRef.current = false;
-        backgroundBottomSettlePendingRef.current = false;
-        atBottomRef.current = false;
-        setAtBottom(false);
-        setRouteCHostOwnerFocusedAnchorEventId(evtId);
-        programmaticScrollUntilRef.current =
-          performance.now() + OYSTERUN_ROUTE_C_HOST_OWNER_FOCUS_SCROLL_GUARD_MS;
+        const evLength = getTimelinesEventsCount(lTimelines);
 
         setFocusItem({
-          index: displayIndex,
+          index: evtAbsIndex,
           scrollTo: true,
           highlight: evtId !== readUptoEventIdRef.current,
-          forceScroll: pendingOpenEventOptions?.forceScroll,
-          scrollBehavior: pendingOpenEventOptions?.scrollBehavior,
         });
         setTimeline({
           linkedTimelines: lTimelines,
-          displayModelRevision: 0,
           range: {
-            start: Math.max(displayIndex - PAGINATION_LIMIT, 0),
-            end: Math.min(displayIndex + PAGINATION_LIMIT, displayLength),
+            start: Math.max(evtAbsIndex - PAGINATION_LIMIT, 0),
+            end: Math.min(evtAbsIndex + PAGINATION_LIMIT, evLength),
           },
         });
       },
-      [alive, ignoredUsersSet, showHiddenEvents, hideMembershipEvents, hideNickAvatarEvents, mx]
+      [alive],
     ),
     useCallback(() => {
       if (!alive()) return;
-      routeCPendingOpenEventOptionsRef.current = undefined;
-      setTimeline(getInitialTimeline(room, routeCDisplayTimelineBuildOptions));
+      setTimeline(getInitialTimeline(room));
       scrollToBottomRef.current.count += 1;
       scrollToBottomRef.current.smooth = false;
-    }, [alive, room, routeCDisplayTimelineBuildOptions]),
-    routeCChatShell
+    }, [alive, room]),
   );
 
   useLiveEventArrive(
     room,
     useCallback(
       (mEvt: MatrixEvent) => {
-        const sentByCurrentUser = mEvt.getSender() === mx.getUserId();
         if (isOysterunHostOwnerTimelineMessageEvent(mEvt)) {
           setRouteCHostOwnerNeighborInvalidationSeq((seq) => seq + 1);
         }
-        if (sentByCurrentUser) {
-          routeCHostOwnerFocusUntilRef.current = 0;
-          setRouteCHostOwnerFocusedAnchorEventId(undefined);
-        }
-        const shouldFollowBottom = sentByCurrentUser || shouldFollowTimelineBottom();
-
-        // If the user is at/near the bottom, keep paginating through layout settle.
-        // Explicit sends also move to bottom even when the user had scrolled upward.
-        // Otherwise update the timeline without moving the viewport, so edits/reactions still render.
-        if (shouldFollowBottom) {
-          followingLatestIntentRef.current = true;
-          if (document.hasFocus() && (!unreadInfo || sentByCurrentUser)) {
+        // if user is at bottom of timeline
+        // keep paginating timeline and conditionally mark as read
+        // otherwise we update timeline without paginating
+        // so timeline can be updated with evt like: edits, reactions etc
+        if (atBottomRef.current) {
+          if (document.hasFocus() && (!unreadInfo || mEvt.getSender() === mx.getUserId())) {
             // Check if the document is in focus (user is actively viewing the app),
             // and either there are no unread messages or the latest message is from the current user.
             // If either condition is met, trigger the markAsRead function to send a read receipt.
@@ -2902,57 +1924,71 @@ export function RoomTimeline({
             setUnreadInfo(getRoomUnreadInfo(room));
           }
 
-          const visibleForSmoothBottomSettle = isRouteCVisibleForSmoothBottomSettle();
-          scrollToBottomRef.current.count += 1;
-          scrollToBottomRef.current.smooth = visibleForSmoothBottomSettle;
-          backgroundBottomSettlePendingRef.current =
-            backgroundBottomSettlePendingRef.current || !visibleForSmoothBottomSettle;
-
-          if (sentByCurrentUser && !atLiveEndRef.current) {
-            setTimeline(getInitialTimeline(room, routeCDisplayTimelineBuildOptions));
-          } else {
-            setTimeline((ct) => {
-              const refreshedLinkedTimelines = refreshLiveTimelineSource(room, ct.linkedTimelines);
-              const previousDisplayModel = buildRouteCDisplayModelForPagination(
-                getDisplayTimelineSource(ct.linkedTimelines, ct.displayModelRevision),
-                routeCDisplayTimelineBuildOptions
-              );
-              const nextDisplayModel = buildRouteCDisplayModelForPagination(
-                refreshedLinkedTimelines,
-                routeCDisplayTimelineBuildOptions
-              );
-              return {
-                ...ct,
-                linkedTimelines: refreshedLinkedTimelines,
-                displayModelRevision: ct.displayModelRevision + 1,
-                range: getRouteCLiveTailDisplayRange({
-                  previousRange: ct.range,
-                  previousDisplayCount: previousDisplayModel.items.length,
-                  nextDisplayCount: nextDisplayModel.items.length,
-                }),
-              };
+          const scrollElement = scrollRef.current;
+          const previousMaxScrollTop = scrollElement
+            ? Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight)
+            : 0;
+          const previousTransaction = routeCLiveBottomTransactionRef.current;
+          if (previousTransaction) {
+            if (typeof routeCLiveBottomTransactionFrameRef.current === 'number') {
+              window.cancelAnimationFrame(routeCLiveBottomTransactionFrameRef.current);
+              routeCLiveBottomTransactionFrameRef.current = undefined;
+            }
+            recordRouteCViewportGeometry('live_bottom_transaction_cancelled', undefined, {
+              phase: 'cancelled',
+              revision: previousTransaction.revision,
+              matrixEventId: previousTransaction.matrixEventId,
+              previousMaxScrollTop: previousTransaction.previousMaxScrollTop,
+              currentMaxScrollTop: previousMaxScrollTop,
             });
           }
+          if (scrollElement) {
+            scrollElement.scrollTo({
+              top: Math.min(Math.max(0, scrollElement.scrollTop), previousMaxScrollTop),
+              behavior: 'instant',
+            });
+          }
+          const transaction: RouteCLiveBottomTransaction = {
+            revision: routeCLiveBottomTransactionRevisionRef.current + 1,
+            matrixEventId: mEvt.getId(),
+            previousMaxScrollTop,
+          };
+          routeCLiveBottomTransactionRevisionRef.current = transaction.revision;
+          routeCLiveBottomTransactionRef.current = transaction;
+          recordRouteCViewportGeometry('live_bottom_transaction_queued', mEvt, {
+            phase: 'queued',
+            revision: transaction.revision,
+            matrixEventId: transaction.matrixEventId,
+            previousMaxScrollTop,
+            currentMaxScrollTop: previousMaxScrollTop,
+            behavior: 'instant',
+          });
+          scheduleRouteCViewportGeometryDiagnostics(mEvt);
+
+          setTimeline((ct) => ({
+            ...ct,
+            range: {
+              start: ct.range.start + 1,
+              end: ct.range.end + 1,
+            },
+          }));
           return;
         }
-        setTimeline((ct) => ({
-          ...ct,
-          linkedTimelines: refreshLiveTimelineSource(room, ct.linkedTimelines),
-          displayModelRevision: ct.displayModelRevision + 1,
-        }));
+        scheduleRouteCViewportGeometryDiagnostics(mEvt);
+        setTimeline((ct) => ({ ...ct }));
         if (!unreadInfo) {
           setUnreadInfo(getRoomUnreadInfo(room));
         }
       },
       [
-        mx,
-        room,
-        unreadInfo,
         hideActivity,
-        shouldFollowTimelineBottom,
-        routeCDisplayTimelineBuildOptions,
-      ]
-    )
+        mx,
+        recordRouteCViewportGeometry,
+        room,
+        scheduleRouteCViewportGeometryDiagnostics,
+        unreadInfo,
+      ],
+    ),
   );
 
   const handleOpenEvent = useCallback(
@@ -2960,38 +1996,29 @@ export function RoomTimeline({
       evtId: string,
       highlight = true,
       onScroll: ((scrolled: boolean) => void) | undefined = undefined,
-      options: RouteCOpenEventOptions = {}
     ) => {
       const evtTimeline = getEventTimeline(room, evtId);
       const absoluteIndex =
         evtTimeline && getEventIdAbsoluteIndex(timeline.linkedTimelines, evtTimeline, evtId);
-      const displayIndex =
-        displayTimelineModel.displayIndexByEventId.get(evtId) ??
-        (typeof absoluteIndex === 'number'
-          ? displayTimelineModel.rawEventIndexToDisplayIndex.get(absoluteIndex)
-          : undefined);
 
-      if (typeof displayIndex === 'number') {
-        programmaticScrollUntilRef.current =
-          performance.now() + OYSTERUN_ROUTE_C_HOST_OWNER_FOCUS_SCROLL_GUARD_MS;
-        const scrolled = scrollToItem(displayIndex, {
-          behavior: options.scrollBehavior ?? 'smooth',
+      if (typeof absoluteIndex === 'number') {
+        const scrolled = scrollToItem(absoluteIndex, {
+          behavior: 'smooth',
           align: 'center',
-          stopInView: !options.forceScroll,
+          stopInView: true,
         });
         if (onScroll) onScroll(scrolled);
         setFocusItem({
-          index: displayIndex,
+          index: absoluteIndex,
           scrollTo: false,
           highlight,
         });
       } else {
-        routeCPendingOpenEventOptionsRef.current = { eventId: evtId, options };
         setTimeline(getEmptyTimeline());
         loadEventTimeline(evtId);
       }
     },
-    [room, timeline, displayTimelineModel, scrollToItem, loadEventTimeline]
+    [room, timeline, scrollToItem, loadEventTimeline],
   );
 
   const handleRouteCHostOwnerNeighborNavigation = useCallback(
@@ -3011,10 +2038,7 @@ export function RoomTimeline({
       });
       if (samePageHandled) return;
 
-      void handleOpenEvent(targetEventId, true, undefined, {
-        forceScroll: true,
-        scrollBehavior: 'instant',
-      });
+      void handleOpenEvent(targetEventId);
       const cleanFocusPath = getOysterunHostSessionChatFocusPath(targetEventId);
       if (cleanFocusPath) {
         window.history.replaceState(window.history.state, '', cleanFocusPath);
@@ -3025,17 +2049,14 @@ export function RoomTimeline({
       handleOpenEvent,
       room.roomId,
       routeCHostOwnerNeighborState.response,
-    ]
+    ],
   );
 
   useEffect(() => {
     if (!routeCChatShell) return undefined;
     return subscribeOysterunActiveRoomTimelineFocus(room.roomId, (evtId) => {
       beginRouteCHostOwnerUserFocus(evtId);
-      void handleOpenEvent(evtId, true, undefined, {
-        forceScroll: true,
-        scrollBehavior: 'instant',
-      });
+      void handleOpenEvent(evtId);
     });
   }, [beginRouteCHostOwnerUserFocus, handleOpenEvent, room.roomId, routeCChatShell]);
 
@@ -3043,45 +2064,9 @@ export function RoomTimeline({
     room,
     useCallback(() => {
       if (liveTimelineLinked) {
-        setTimeline(getInitialTimeline(room, routeCDisplayTimelineBuildOptions));
+        setTimeline(getInitialTimeline(room));
       }
-    }, [room, liveTimelineLinked, routeCDisplayTimelineBuildOptions])
-  );
-
-  useTimelineHydrationRefresh(
-    room,
-    useCallback(() => {
-      if (eventId || displayItemsLength > 0) return;
-      const hydratedTimeline = getInitialTimeline(room, routeCDisplayTimelineBuildOptions);
-      const hydratedDisplayTimelineModel = buildRouteCDisplayTimelineModel({
-        linkedTimelines: hydratedTimeline.linkedTimelines,
-        ignoredUsersSet,
-        showHiddenEvents,
-        hideMembershipEvents,
-        hideNickAvatarEvents,
-        readUptoEventId: readUptoEventIdRef.current,
-        currentUserId: mx.getUserId(),
-      });
-      assertRouteCDisplayTimelineModelInvariant(hydratedDisplayTimelineModel);
-      if (hydratedDisplayTimelineModel.items.length === 0) return;
-
-      startInitialBottomSettle();
-      scrollToBottomRef.current.count += 1;
-      scrollToBottomRef.current.smooth = false;
-      setTimeline(hydratedTimeline);
-    }, [
-      eventId,
-      displayItemsLength,
-      room,
-      ignoredUsersSet,
-      showHiddenEvents,
-      hideMembershipEvents,
-      hideNickAvatarEvents,
-      mx,
-      routeCDisplayTimelineBuildOptions,
-      startInitialBottomSettle,
-      routeCDisplayTimelineBuildOptions,
-    ])
+    }, [room, liveTimelineLinked]),
   );
 
   // Stay at bottom when room editor resize
@@ -3099,30 +2084,12 @@ export function RoomTimeline({
         const scrollElement = getScrollElement();
         if (!editorBaseEntry || !scrollElement) return;
 
-        if (shouldFollowTimelineBottom()) {
-          scrollToTimelineBottom('instant');
+        if (atBottomRef.current) {
+          scrollToBottom(scrollElement);
         }
       };
-    }, [getScrollElement, roomInputRef, scrollToTimelineBottom, shouldFollowTimelineBottom]),
-    useCallback(() => roomInputRef.current, [roomInputRef])
-  );
-
-  useResizeObserver(
-    useMemo(() => {
-      let mounted = false;
-      return (entries) => {
-        if (!mounted) {
-          mounted = true;
-          return;
-        }
-        const scrollContentElement = scrollContentRef.current;
-        if (!scrollContentElement) return;
-        const contentEntry = getResizeObserverEntry(scrollContentElement, entries);
-        if (!contentEntry || !shouldFollowTimelineBottom()) return;
-        scrollToTimelineBottom('instant');
-      };
-    }, [scrollToTimelineBottom, shouldFollowTimelineBottom]),
-    useCallback(() => scrollContentRef.current, [])
+    }, [getScrollElement, roomInputRef]),
+    useCallback(() => roomInputRef.current, [roomInputRef]),
   );
 
   const tryAutoMarkAsRead = useCallback(() => {
@@ -3139,18 +2106,10 @@ export function RoomTimeline({
   }, [mx, room, hideActivity]);
 
   const debounceSetAtBottom = useDebounce(
-    useCallback(
-      (entry: IntersectionObserverEntry) => {
-        if (!entry.isIntersecting) {
-          setAtBottom(false);
-          if (!isTimelineAtOrNearBottom()) {
-            followingLatestIntentRef.current = false;
-          }
-        }
-      },
-      [isTimelineAtOrNearBottom]
-    ),
-    { wait: 1000 }
+    useCallback((entry: IntersectionObserverEntry) => {
+      if (!entry.isIntersecting) setAtBottom(false);
+    }, []),
+    { wait: 1000 },
   );
   useIntersectionObserver(
     useCallback(
@@ -3160,36 +2119,27 @@ export function RoomTimeline({
         const targetEntry = getIntersectionObserverEntry(target, entries);
         if (targetEntry) debounceSetAtBottom(targetEntry);
         if (targetEntry?.isIntersecting && atLiveEndRef.current) {
-          followingLatestIntentRef.current = true;
           setAtBottom(true);
           if (document.hasFocus()) {
             tryAutoMarkAsRead();
           }
         }
       },
-      [debounceSetAtBottom, tryAutoMarkAsRead]
+      [debounceSetAtBottom, tryAutoMarkAsRead],
     ),
     useCallback(
       () => ({
         root: getScrollElement(),
-        rootMargin: OYSTERUN_ROUTE_C_BOTTOM_ANCHOR_ROOT_MARGIN,
+        rootMargin: '100px',
       }),
-      [getScrollElement]
+      [getScrollElement],
     ),
-    useCallback(() => atBottomAnchorRef.current, [])
+    useCallback(() => atBottomAnchorRef.current, []),
   );
 
   useDocumentFocusChange(
     useCallback(
       (inFocus) => {
-        if (
-          inFocus &&
-          followingLatestIntentRef.current &&
-          backgroundBottomSettlePendingRef.current
-        ) {
-          backgroundBottomSettlePendingRef.current = false;
-          scrollToTimelineBottom('instant');
-        }
         if (inFocus && atBottomRef.current) {
           if (unreadInfo?.inLiveTimeline) {
             handleOpenEvent(unreadInfo.readUptoEventId, false, (scrolled) => {
@@ -3204,8 +2154,8 @@ export function RoomTimeline({
           tryAutoMarkAsRead();
         }
       },
-      [tryAutoMarkAsRead, unreadInfo, handleOpenEvent, scrollToTimelineBottom]
-    )
+      [tryAutoMarkAsRead, unreadInfo, handleOpenEvent],
+    ),
   );
 
   useEffect(() => {
@@ -3220,26 +2170,6 @@ export function RoomTimeline({
     };
   }, [resetOysterunLocalPathDisclosures]);
 
-  useEffect(() => {
-    const settleRouteCBackgroundBottomFollow = () => {
-      if (
-        document.visibilityState === 'visible' &&
-        followingLatestIntentRef.current &&
-        backgroundBottomSettlePendingRef.current
-      ) {
-        backgroundBottomSettlePendingRef.current = false;
-        scrollToTimelineBottom('instant');
-      }
-    };
-
-    document.addEventListener('visibilitychange', settleRouteCBackgroundBottomFollow);
-    window.addEventListener('focus', settleRouteCBackgroundBottomFollow);
-    return () => {
-      document.removeEventListener('visibilitychange', settleRouteCBackgroundBottomFollow);
-      window.removeEventListener('focus', settleRouteCBackgroundBottomFollow);
-    };
-  }, [scrollToTimelineBottom]);
-
   // Handle up arrow edit
   useKeyDown(
     window,
@@ -3253,7 +2183,7 @@ export function RoomTimeline({
           isEmptyEditor(editor)
         ) {
           const editableEvt = getLatestEditableEvt(room.getLiveTimeline(), (mEvt) =>
-            canEditEvent(mx, mEvt)
+            canEditEvent(mx, mEvt),
           );
           const editableEvtId = editableEvt?.getId();
           if (!editableEvtId) return;
@@ -3261,8 +2191,8 @@ export function RoomTimeline({
           evt.preventDefault();
         }
       },
-      [mx, room, editor]
-    )
+      [mx, room, editor],
+    ),
   );
 
   useEffect(() => {
@@ -3275,11 +2205,10 @@ export function RoomTimeline({
   // Scroll to bottom on initial timeline load
   useLayoutEffect(() => {
     const scrollEl = scrollRef.current;
-    if (scrollEl && !eventId) {
-      startInitialBottomSettle();
-      scrollToTimelineBottom('instant');
+    if (scrollEl) {
+      scrollToBottom(scrollEl);
     }
-  }, [eventId, scrollToTimelineBottom, startInitialBottomSettle]);
+  }, []);
 
   // if live timeline is linked and unreadInfo change
   // Scroll to last read message
@@ -3290,28 +2219,23 @@ export function RoomTimeline({
       const evtTimeline = getEventTimeline(room, readUptoEventId);
       const absoluteIndex =
         evtTimeline && getEventIdAbsoluteIndex(linkedTimelines, evtTimeline, readUptoEventId);
-      const displayIndex =
-        displayTimelineModel.displayIndexByEventId.get(readUptoEventId) ??
-        (typeof absoluteIndex === 'number'
-          ? displayTimelineModel.rawEventIndexToDisplayIndex.get(absoluteIndex)
-          : undefined);
-      if (typeof displayIndex === 'number') {
-        scrollToItem(displayIndex, {
+      if (absoluteIndex) {
+        scrollToItem(absoluteIndex, {
           behavior: 'instant',
           align: 'start',
           stopInView: true,
         });
       }
     }
-  }, [room, unreadInfo, displayTimelineModel, scrollToItem]);
+  }, [room, unreadInfo, scrollToItem]);
 
   // scroll to focused message
   useLayoutEffect(() => {
     if (focusItem && focusItem.scrollTo) {
       scrollToItem(focusItem.index, {
-        behavior: focusItem.scrollBehavior ?? 'instant',
+        behavior: 'instant',
         align: 'center',
-        stopInView: !focusItem.forceScroll,
+        stopInView: true,
       });
     }
 
@@ -3324,13 +2248,90 @@ export function RoomTimeline({
     }, 2000);
   }, [alive, focusItem, scrollToItem]);
 
+  // A live event can reduce the fixed raw window height when its former first row is removed.
+  // Resolve bottom-follow in one transaction-owned frame after that range and DOM commit, so no
+  // smooth scroll keeps an obsolete pre-commit destination on iOS WebKit.
+  useLayoutEffect(() => {
+    const transaction = routeCLiveBottomTransactionRef.current;
+    if (!transaction) return;
+    const scrollElement = scrollRef.current;
+    const currentMaxScrollTop = scrollElement
+      ? Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight)
+      : 0;
+    if (!liveTimelineLinked) {
+      routeCLiveBottomTransactionRef.current = undefined;
+      recordRouteCViewportGeometry('live_bottom_transaction_cancelled', undefined, {
+        phase: 'cancelled',
+        revision: transaction.revision,
+        matrixEventId: transaction.matrixEventId,
+        previousMaxScrollTop: transaction.previousMaxScrollTop,
+        currentMaxScrollTop,
+      });
+      return;
+    }
+    if (!rangeAtEnd || !scrollElement) return;
+    if (typeof routeCLiveBottomTransactionFrameRef.current === 'number') return;
+
+    routeCLiveBottomTransactionFrameRef.current = window.requestAnimationFrame(() => {
+      routeCLiveBottomTransactionFrameRef.current = undefined;
+      if (!alive()) return;
+      const activeTransaction = routeCLiveBottomTransactionRef.current;
+      if (!activeTransaction || activeTransaction.revision !== transaction.revision) return;
+      const state = routeCViewportGeometryStateRef.current;
+      const committedScrollElement = scrollRef.current;
+      if (!state.liveTimelineLinked) {
+        routeCLiveBottomTransactionRef.current = undefined;
+        recordRouteCViewportGeometry('live_bottom_transaction_cancelled', undefined, {
+          phase: 'cancelled',
+          revision: activeTransaction.revision,
+          matrixEventId: activeTransaction.matrixEventId,
+          previousMaxScrollTop: activeTransaction.previousMaxScrollTop,
+        });
+        return;
+      }
+      if (!state.rangeAtEnd || !committedScrollElement) return;
+      const committedMaxScrollTop = Math.max(
+        0,
+        committedScrollElement.scrollHeight - committedScrollElement.clientHeight,
+      );
+      const behavior = 'instant';
+      scrollToBottomRef.current.smooth = false;
+      scrollToBottom(committedScrollElement, behavior);
+      routeCLiveBottomTransactionRef.current = undefined;
+      recordRouteCViewportGeometry('live_bottom_transaction_committed', undefined, {
+        phase: 'committed',
+        revision: activeTransaction.revision,
+        matrixEventId: activeTransaction.matrixEventId,
+        previousMaxScrollTop: activeTransaction.previousMaxScrollTop,
+        currentMaxScrollTop: committedMaxScrollTop,
+        behavior,
+      });
+    });
+
+    return () => {
+      if (typeof routeCLiveBottomTransactionFrameRef.current !== 'number') return;
+      window.cancelAnimationFrame(routeCLiveBottomTransactionFrameRef.current);
+      routeCLiveBottomTransactionFrameRef.current = undefined;
+    };
+  }, [
+    alive,
+    eventsLength,
+    liveTimelineLinked,
+    rangeAtEnd,
+    recordRouteCViewportGeometry,
+    timeline.range.end,
+    timeline.range.start,
+  ]);
+
   // scroll to bottom of timeline
   const scrollToBottomCount = scrollToBottomRef.current.count;
   useLayoutEffect(() => {
     if (scrollToBottomCount > 0) {
-      scrollToTimelineBottom(scrollToBottomRef.current.smooth ? 'smooth' : 'instant');
+      const scrollEl = scrollRef.current;
+      if (scrollEl)
+        scrollToBottom(scrollEl, scrollToBottomRef.current.smooth ? 'smooth' : 'instant');
     }
-  }, [scrollToBottomCount, scrollToTimelineBottom]);
+  }, [scrollToBottomCount]);
 
   // Remove unreadInfo on mark as read
   useEffect(() => {
@@ -3358,10 +2359,6 @@ export function RoomTimeline({
   const handleJumpToLatest = () => {
     routeCHostOwnerFocusUntilRef.current = 0;
     setRouteCHostOwnerFocusedAnchorEventId(undefined);
-    followingLatestIntentRef.current = true;
-    backgroundBottomSettlePendingRef.current = false;
-    atBottomRef.current = true;
-    setAtBottom(true);
     if (eventId) {
       const routeCChatPath = routeCChatShell ? getOysterunHostSessionChatPath() : undefined;
       if (routeCChatPath) {
@@ -3370,8 +2367,7 @@ export function RoomTimeline({
         navigateRoom(room.roomId, undefined, { replace: true });
       }
     }
-    setTimeline(getInitialTimeline(room, routeCDisplayTimelineBuildOptions));
-    startInitialBottomSettle();
+    setTimeline(getInitialTimeline(room));
     scrollToBottomRef.current.count += 1;
     scrollToBottomRef.current.smooth = false;
   };
@@ -3386,23 +2382,6 @@ export function RoomTimeline({
   const handleMarkAsRead = () => {
     markAsRead(mx, room.roomId, hideActivity);
   };
-
-  const handleRouteCTouchStart = useCallback(() => {
-    routeCTouchActiveRef.current = true;
-  }, []);
-
-  const handleRouteCTouchEnd = useCallback(() => {
-    routeCTouchActiveRef.current = false;
-    remotePaginationTouchReleaseRequiredRef.current = false;
-    flushDeferredRemotePaginationCommit();
-    requestAnimationFrame(() => {
-      if (!alive()) return;
-      requestAnimationFrame(() => {
-        if (!alive()) return;
-        retrySuppressedPagination(true, true);
-      });
-    });
-  }, [alive, flushDeferredRemotePaginationCommit, retrySuppressedPagination]);
 
   const handleOysterunInlineLinkClick: MouseEventHandler<HTMLDivElement> = useCallback((evt) => {
     if (!(evt.target instanceof Element)) return;
@@ -3443,7 +2422,7 @@ export function RoomTimeline({
         evt.stopPropagation();
       }
     },
-    []
+    [],
   );
 
   const handleOpenReply: MouseEventHandler = useCallback(
@@ -3452,7 +2431,7 @@ export function RoomTimeline({
       if (!targetId) return;
       handleOpenEvent(targetId);
     },
-    [handleOpenEvent]
+    [handleOpenEvent],
   );
 
   const handleUserClick: MouseEventHandler<HTMLButtonElement> = useCallback(
@@ -3468,10 +2447,10 @@ export function RoomTimeline({
         room.roomId,
         space?.roomId,
         userId,
-        evt.currentTarget.getBoundingClientRect()
+        evt.currentTarget.getBoundingClientRect(),
       );
     },
-    [room, space, openUserRoomProfile]
+    [room, space, openUserRoomProfile],
   );
   const handleUsernameClick: MouseEventHandler<HTMLButtonElement> = useCallback(
     (evt) => {
@@ -3486,13 +2465,13 @@ export function RoomTimeline({
         createMentionElement(
           userId,
           name.startsWith('@') ? name : `@${name}`,
-          userId === mx.getUserId()
-        )
+          userId === mx.getUserId(),
+        ),
       );
       ReactEditor.focus(editor);
       moveCursor(editor);
     },
-    [mx, room, editor]
+    [mx, room, editor],
   );
 
   const handleReplyClick: MouseEventHandler<HTMLButtonElement> = useCallback(
@@ -3522,7 +2501,7 @@ export function RoomTimeline({
         setTimeout(() => ReactEditor.focus(editor), 100);
       }
     },
-    [room, setReplyDraft, editor]
+    [room, setReplyDraft, editor],
   );
 
   const handleReactionToggle = useCallback(
@@ -3543,10 +2522,10 @@ export function RoomTimeline({
       mx.sendEvent(
         room.roomId,
         MessageEvent.Reaction as any,
-        getReactionContent(targetEventId, key, rShortcode)
+        getReactionContent(targetEventId, key, rShortcode),
       );
     },
-    [mx, room]
+    [mx, room],
   );
   const handleEdit = useCallback(
     (editEvtId?: string) => {
@@ -3561,22 +2540,15 @@ export function RoomTimeline({
       setEditId(undefined);
       ReactEditor.focus(editor);
     },
-    [editor]
+    [editor],
   );
   const { t } = useTranslation();
 
   const renderMatrixEvent = useMatrixEventRenderer<
-    [string, MatrixEvent, number, EventTimelineSet, boolean, OysterunToolCompression | undefined]
+    [string, MatrixEvent, number, EventTimelineSet, boolean]
   >(
     {
-      [MessageEvent.RoomMessage]: (
-        mEventId,
-        mEvent,
-        item,
-        timelineSet,
-        collapse,
-        oysterunToolCompression
-      ) => {
+      [MessageEvent.RoomMessage]: (mEventId, mEvent, item, timelineSet, collapse) => {
         const reactionRelations = getEventReactions(timelineSet, mEventId);
         const reactions = reactionRelations && reactionRelations.getSortedAnnotationsByKey();
         const hasReactions = reactions && reactions.length > 0;
@@ -3602,7 +2574,7 @@ export function RoomTimeline({
             : undefined;
         const oysterunProviderControlOutcome = getOysterunProviderControlOutcomeForEvent(
           mEvent,
-          oysterunProviderControlOutcomesByRequestId
+          oysterunProviderControlOutcomesByRequestId,
         );
 
         return (
@@ -3684,7 +2656,6 @@ export function RoomTimeline({
                 linkifyOpts={linkifyOpts}
                 outlineAttachment={messageLayout === MessageLayout.Bubble}
                 oysterunControlOutcome={oysterunProviderControlOutcome}
-                oysterunToolCompression={oysterunToolCompression}
                 oysterunSourceEventId={mEventId.startsWith('$') ? mEventId : undefined}
               />
             )}
@@ -3787,7 +2758,7 @@ export function RoomTimeline({
                     getMemberDisplayName(room, senderId) ?? getMxIdLocalPart(senderId) ?? senderId;
                   const oysterunProviderControlOutcome = getOysterunProviderControlOutcomeForEvent(
                     mEvent,
-                    oysterunProviderControlOutcomesByRequestId
+                    oysterunProviderControlOutcomesByRequestId,
                   );
                   return (
                     <RenderMessageContent
@@ -4212,91 +3183,104 @@ export function RoomTimeline({
           />
         </Event>
       );
-    }
+    },
   );
 
-  const renderDisplayTimelineItem = (displayIndex: number) => {
-    const displayItem = displayItems[displayIndex];
-    if (!displayItem) {
-      throw new Error(`Route C display item ${displayIndex} is missing from the display model`);
+  let previousEvent: MatrixEvent | undefined;
+  let previousEventRendered = false;
+  let newMessagesDivider = false;
+  let dayDivider = false;
+  const renderRawTimelineEvent = (rawEventIndex: number) => {
+    const [eventTimeline, baseIndex] = getTimelineAndBaseIndex(
+      timeline.linkedTimelines,
+      rawEventIndex,
+    );
+    if (!eventTimeline) return null;
+    const timelineSet = eventTimeline.getTimelineSet();
+    const mEvent = getTimelineEvent(
+      eventTimeline,
+      getTimelineRelativeIndex(rawEventIndex, baseIndex),
+    );
+    const mEventId = mEvent?.getId();
+    if (!mEvent || !mEventId) return null;
+
+    const eventSender = mEvent.getSender();
+    if (eventSender && ignoredUsersSet.has(eventSender)) return null;
+    if (mEvent.isRedacted() && !showHiddenEvents) return null;
+    if (routeCChatShell && isOysterunProviderCompletionMarkerContent(mEvent.getContent())) {
+      return null;
     }
 
-    if (displayItem.kind === 'new_messages_divider') {
-      return (
-        <MessageBase
-          key={displayItem.id}
-          data-message-item={displayItem.displayIndex}
-          space={messageSpacing}
-        >
+    if (!newMessagesDivider && readUptoEventIdRef.current) {
+      newMessagesDivider = previousEvent?.getId() === readUptoEventIdRef.current;
+    }
+    if (!dayDivider) {
+      dayDivider = previousEvent ? !inSameDay(previousEvent.getTs(), mEvent.getTs()) : false;
+    }
+
+    const collapsed =
+      previousEventRendered &&
+      !dayDivider &&
+      (!newMessagesDivider || eventSender === mx.getUserId()) &&
+      previousEvent !== undefined &&
+      previousEvent.getSender() === eventSender &&
+      previousEvent.getType() === mEvent.getType() &&
+      minuteDifference(previousEvent.getTs(), mEvent.getTs()) < 2;
+
+    const eventJSX = reactionOrEditEvent(mEvent)
+      ? null
+      : renderMatrixEvent(
+          mEvent.getType(),
+          typeof mEvent.getStateKey() === 'string',
+          mEventId,
+          mEvent,
+          rawEventIndex,
+          timelineSet,
+          collapsed,
+        );
+    previousEvent = mEvent;
+    previousEventRendered = Boolean(eventJSX);
+
+    const newMessagesDividerJSX =
+      newMessagesDivider && eventJSX && eventSender !== mx.getUserId() ? (
+        <MessageBase space={messageSpacing}>
           <TimelineDivider style={{ color: color.Success.Main }} variant="Inherit">
             <Badge as="span" size="500" variant="Success" fill="Solid" radii="300">
               <Text size="L400">New Messages</Text>
             </Badge>
           </TimelineDivider>
         </MessageBase>
-      );
-    }
-
-    if (displayItem.kind === 'day_divider') {
-      return (
-        <MessageBase
-          key={displayItem.id}
-          data-message-item={displayItem.displayIndex}
-          space={messageSpacing}
-        >
+      ) : null;
+    const dayDividerJSX =
+      dayDivider && eventJSX ? (
+        <MessageBase space={messageSpacing}>
           <TimelineDivider variant="Surface">
             <Badge as="span" size="500" variant="Secondary" fill="None" radii="300">
               <Text size="L400">
                 {(() => {
-                  if (today(displayItem.ts)) return 'Today';
-                  if (yesterday(displayItem.ts)) return 'Yesterday';
-                  return timeDayMonthYear(displayItem.ts);
+                  if (today(mEvent.getTs())) return 'Today';
+                  if (yesterday(mEvent.getTs())) return 'Yesterday';
+                  return timeDayMonthYear(mEvent.getTs());
                 })()}
               </Text>
             </Badge>
           </TimelineDivider>
         </MessageBase>
-      );
-    }
+      ) : null;
 
-    if (!isRouteCDisplayTimelineEventItem(displayItem)) {
-      throw new Error(`Route C display item ${displayIndex} is not renderable as a matrix event`);
-    }
-
-    if (displayItem.kind === 'compressed_tool_placeholder') {
+    if (eventJSX && (newMessagesDividerJSX || dayDividerJSX)) {
+      if (newMessagesDividerJSX) newMessagesDivider = false;
+      if (dayDividerJSX) dayDivider = false;
       return (
-        <div
-          key={displayItem.id}
-          data-message-item={displayItem.displayIndex}
-          data-message-id={displayItem.mEventId}
-          data-oysterun-routec-compressed-tool-placeholder="true"
-          data-oysterun-clean-session-compressed-tool-placeholder="true"
-          aria-hidden="true"
-          tabIndex={-1}
-          style={{
-            visibility: 'hidden',
-            height: OYSTERUN_ROUTE_C_COMPRESSED_TOOL_PLACEHOLDER_HEIGHT_PX,
-            minHeight: OYSTERUN_ROUTE_C_COMPRESSED_TOOL_PLACEHOLDER_HEIGHT_PX,
-            maxHeight: OYSTERUN_ROUTE_C_COMPRESSED_TOOL_PLACEHOLDER_HEIGHT_PX,
-            margin: 0,
-            padding: 0,
-            overflow: 'hidden',
-            pointerEvents: 'none',
-          }}
-        />
+        <React.Fragment key={mEventId}>
+          {newMessagesDividerJSX}
+          {dayDividerJSX}
+          {eventJSX}
+        </React.Fragment>
       );
     }
 
-    return renderMatrixEvent(
-      displayItem.mEvent.getType(),
-      typeof displayItem.mEvent.getStateKey() === 'string',
-      displayItem.mEventId,
-      displayItem.mEvent,
-      displayItem.displayIndex,
-      displayItem.timelineSet,
-      displayItem.collapse,
-      displayItem.oysterunToolCompression
-    );
+    return eventJSX;
   };
 
   const routeCHostOwnerPreviousEventId =
@@ -4306,23 +3290,23 @@ export function RoomTimeline({
   const routeCHostOwnerNeighborProof = routeCHostOwnerNeighborResponse?.proof;
   const routeCHostOwnerPreviousWindowExhausted = getRouteCHostOwnerNeighborWindowExhausted(
     routeCHostOwnerNeighborResponse,
-    'previous'
+    'previous',
   );
   const routeCHostOwnerNextWindowExhausted = getRouteCHostOwnerNeighborWindowExhausted(
     routeCHostOwnerNeighborResponse,
-    'next'
+    'next',
   );
   const routeCHostOwnerPreviousDisabledReason = getRouteCHostOwnerNeighborDisabledReason(
     routeCHostOwnerNeighborResponse,
     'previous',
     routeCHostOwnerNeighborState.loading,
-    routeCHostOwnerNeighborState.disabledReason
+    routeCHostOwnerNeighborState.disabledReason,
   );
   const routeCHostOwnerNextDisabledReason = getRouteCHostOwnerNeighborDisabledReason(
     routeCHostOwnerNeighborResponse,
     'next',
     routeCHostOwnerNeighborState.loading,
-    routeCHostOwnerNeighborState.disabledReason
+    routeCHostOwnerNeighborState.disabledReason,
   );
   const routeCHostOwnerPreviousTitle = getRouteCHostOwnerNeighborTitle({
     direction: 'previous',
@@ -4332,14 +3316,14 @@ export function RoomTimeline({
     direction: 'next',
     disabledReason: routeCHostOwnerNextDisabledReason,
   });
-  const routeCHostOwnerNeighborControlsVisible = routeCChatShell && displayItemsLength > 0;
+  const routeCHostOwnerNeighborControlsVisible = routeCChatShell && eventsLength > 0;
   const routeCHostOwnerLookupState = routeCHostOwnerNeighborState.loading
     ? 'loading'
     : routeCHostOwnerNeighborState.error
-    ? 'error'
-    : routeCHostOwnerNeighborState.response
-    ? 'ready'
-    : 'idle';
+      ? 'error'
+      : routeCHostOwnerNeighborState.response
+        ? 'ready'
+        : 'idle';
 
   return (
     <Box
@@ -4372,29 +3356,20 @@ export function RoomTimeline({
       )}
       <Scroll
         ref={scrollRef}
-        visibility={mobileScrollbarVisible ? 'Always' : 'Hover'}
-        size={mobileScrollbarVisible ? '300' : undefined}
+        visibility="Hover"
         direction="Vertical"
         data-testid="oysterun-routec-timeline-scroll"
         data-oysterun-clean-session-testid="oysterun-clean-session-timeline-scroll"
-        data-oysterun-routec-mobile-scrollbar-visible={String(mobileScrollbarVisible)}
-        data-oysterun-clean-session-mobile-scrollbar-visible={String(mobileScrollbarVisible)}
         data-oysterun-routec-bottom-proof-surface="scroll_container"
         data-oysterun-clean-session-bottom-proof-surface="scroll_container"
         onScroll={handleTimelineScroll}
-        onTouchStart={handleRouteCTouchStart}
-        onTouchEnd={handleRouteCTouchEnd}
-        onTouchCancel={handleRouteCTouchEnd}
+        onTouchStart={handleRouteCIOSRemotePaginationTouchStart}
+        onTouchEnd={handleRouteCIOSRemotePaginationTouchEnd}
+        onTouchCancel={handleRouteCIOSRemotePaginationTouchEnd}
         data-oysterun-routec-bottom-pinned={String(atBottom)}
         data-oysterun-clean-session-bottom-pinned={String(atBottom)}
         data-oysterun-routec-at-bottom={String(atBottom)}
         data-oysterun-clean-session-at-bottom={String(atBottom)}
-        data-oysterun-routec-ios-scroll-paint-nudge-enabled={String(
-          routeCIOSScrollPaintNudgeEnabled
-        )}
-        data-oysterun-clean-session-ios-scroll-paint-nudge-enabled={String(
-          routeCIOSScrollPaintNudgeEnabled
-        )}
       >
         <Box
           ref={scrollContentRef}
@@ -4409,17 +3384,20 @@ export function RoomTimeline({
           data-oysterun-clean-session-live-timeline-linked={String(liveTimelineLinked)}
           data-oysterun-routec-range-at-end={String(rangeAtEnd)}
           data-oysterun-clean-session-range-at-end={String(rangeAtEnd)}
-          data-oysterun-routec-display-range={`${displayRange.start}-${displayRange.end}`}
-          data-oysterun-clean-session-display-range={`${displayRange.start}-${displayRange.end}`}
-          data-oysterun-routec-display-items-length={String(displayItemsLength)}
-          data-oysterun-clean-session-display-items-length={String(displayItemsLength)}
+          data-oysterun-routec-display-range={`${timeline.range.start}-${timeline.range.end}`}
+          data-oysterun-clean-session-display-range={`${timeline.range.start}-${timeline.range.end}`}
+          data-oysterun-routec-display-items-length={String(eventsLength)}
+          data-oysterun-clean-session-display-items-length={String(eventsLength)}
+          data-oysterun-routec-raw-event-range={`${timeline.range.start}-${timeline.range.end}`}
+          data-oysterun-routec-raw-event-count={String(eventsLength)}
+          data-oysterun-routec-product-visible-event-count={String(routeCProductVisibleEventCount)}
           onClick={handleOysterunInlineLinkClick}
           onKeyDown={handleOysterunInlineLinkKeyDown}
         >
           {!routeCChatShell &&
             !canPaginateBack &&
             rangeAtStart &&
-            visibleDisplayItems.length > 0 && (
+            visibleEventIndexes.length > 0 && (
               <div
                 style={{
                   padding: `${config.space.S700} ${config.space.S400} ${config.space.S600} ${
@@ -4432,74 +3410,75 @@ export function RoomTimeline({
             )}
           {shouldShowRouteCEmptyComposerGuidance && (
             <RouteCEmptyComposerGuidance
-              displayItemsLength={displayItemsLength}
-              displayRange={displayRange}
+              rawEventCount={eventsLength}
+              rawEventRange={timeline.range}
+              productVisibleEventCount={routeCProductVisibleEventCount}
             />
           )}
           {(canPaginateBack || !rangeAtStart) &&
             (messageLayout === MessageLayout.Compact ? (
               <>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase ref={observeBackAnchor}>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
               </>
             ) : (
               <>
                 <MessageBase>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase ref={observeBackAnchor}>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
               </>
             ))}
 
-          {visibleDisplayItems.map(renderDisplayTimelineItem)}
+          {visibleEventIndexes.map(renderRawTimelineEvent)}
 
           {(!liveTimelineLinked || !rangeAtEnd) &&
             (messageLayout === MessageLayout.Compact ? (
               <>
                 <MessageBase ref={observeFrontAnchor}>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <CompactPlaceholder key={visibleDisplayItems.length} />
+                  <CompactPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
               </>
             ) : (
               <>
                 <MessageBase ref={observeFrontAnchor}>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
                 <MessageBase>
-                  <DefaultPlaceholder key={visibleDisplayItems.length} />
+                  <DefaultPlaceholder key={visibleEventIndexes.length} />
                 </MessageBase>
               </>
             ))}
@@ -4553,10 +3532,10 @@ export function RoomTimeline({
             routeCHostOwnerNeighborProof?.next_scanned_event_count ?? ''
           }
           data-oysterun-routec-host-owner-neighbor-previous-window-exhausted={String(
-            routeCHostOwnerPreviousWindowExhausted
+            routeCHostOwnerPreviousWindowExhausted,
           )}
           data-oysterun-routec-host-owner-neighbor-next-window-exhausted={String(
-            routeCHostOwnerNextWindowExhausted
+            routeCHostOwnerNextWindowExhausted,
           )}
           data-oysterun-routec-host-owner-neighbor-previous-disabled-reason={
             routeCHostOwnerPreviousDisabledReason
@@ -4579,7 +3558,7 @@ export function RoomTimeline({
               routeCHostOwnerPreviousEventId
             }
             data-oysterun-routec-host-owner-neighbor-window-exhausted={String(
-              routeCHostOwnerPreviousWindowExhausted
+              routeCHostOwnerPreviousWindowExhausted,
             )}
             data-oysterun-routec-host-owner-neighbor-disabled-reason={
               routeCHostOwnerPreviousDisabledReason
@@ -4613,7 +3592,7 @@ export function RoomTimeline({
             data-oysterun-routec-host-owner-neighbor-control="next"
             data-oysterun-routec-host-owner-neighbor-target-event-id={routeCHostOwnerNextEventId}
             data-oysterun-routec-host-owner-neighbor-window-exhausted={String(
-              routeCHostOwnerNextWindowExhausted
+              routeCHostOwnerNextWindowExhausted,
             )}
             data-oysterun-routec-host-owner-neighbor-disabled-reason={
               routeCHostOwnerNextDisabledReason

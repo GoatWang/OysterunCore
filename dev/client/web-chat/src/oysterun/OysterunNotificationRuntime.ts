@@ -1,6 +1,9 @@
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
-import { registerOysterunPushToken } from './OysterunHostClient';
+import {
+  recordOysterunRouteCNavigationDiagnostic,
+  registerOysterunPushToken,
+} from './OysterunHostClient';
 
 const OYSTERUN_IOS_APNS_REGISTERED_KEY = 'oysterun-ios-apns-remote-registered-v1';
 const OYSTERUN_IOS_APNS_TOKEN_KEY = 'oysterun-ios-apns-token-v1';
@@ -47,6 +50,35 @@ function cachedOysterunIOSApnsToken(): string | null {
 }
 
 let oysterunPushWired = false;
+let oysterunPushActionBound = false;
+
+export async function bindOysterunIOSRemotePushNotificationActions(): Promise<void> {
+  if (oysterunPushActionBound || !isOysterunCapacitorIOSRuntime()) return;
+  oysterunPushActionBound = true;
+  try {
+    await PushNotifications.addListener('pushNotificationActionPerformed', (event) => {
+      const data = event?.notification?.data || {};
+      const url =
+        typeof data.url === 'string'
+          ? data.url
+          : typeof data.oysterun_route === 'string'
+            ? data.oysterun_route
+            : '';
+      if (url && url.startsWith('/app')) {
+        recordOysterunRouteCNavigationDiagnostic('notification_navigation', {
+          navigation_source: 'web_chat_capacitor_remote_push_action',
+          navigation_method: 'location_replace',
+          target: url,
+        });
+        window.location.replace(url);
+      }
+    });
+  } catch (err) {
+    oysterunPushActionBound = false;
+    // eslint-disable-next-line no-console
+    console.warn('[oysterun-push] action listener registration failed', err);
+  }
+}
 
 /**
  * Wire iOS remote push: request permission, register for an APNs token, and

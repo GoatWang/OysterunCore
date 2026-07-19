@@ -693,6 +693,9 @@ export function buildOysterunSemanticMatrixContent({
       tool_event_count_label: normalizeOptionalString(
         correlation.tool_event_count_label
       ),
+      tool_storage_generation: normalizeOptionalString(
+        correlation.tool_storage_generation
+      ),
       detail_available: normalizeOptionalBoolean(correlation.detail_available),
       search_indexed: normalizeOptionalBoolean(correlation.search_indexed),
       committed_transcript_truth: "matrix_room_timeline",

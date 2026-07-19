@@ -125,7 +125,13 @@ export function readUpdateOperationState({ configDir = getConfigDir() } = {}) {
     running: state.running === true,
     requested_at: normalizeString(state.requested_at),
     updated_at: normalizeString(state.updated_at),
+    handoff_started_at: normalizeString(state.handoff_started_at),
+    execute_not_before: normalizeString(state.execute_not_before),
+    handoff_seconds: Number.isInteger(state.handoff_seconds)
+      ? state.handoff_seconds
+      : null,
     source: normalizeString(state.source),
+    channel: normalizeString(state.channel),
     current_version: normalizeString(state.current_version),
     target_version: normalizeString(state.target_version),
     newest_version: normalizeString(state.newest_version),
@@ -150,7 +156,13 @@ export function writeUpdateOperationState(
     running: state.running === true,
     requested_at: normalizeString(state.requested_at) || now,
     updated_at: now,
+    handoff_started_at: normalizeString(state.handoff_started_at),
+    execute_not_before: normalizeString(state.execute_not_before),
+    handoff_seconds: Number.isInteger(state.handoff_seconds)
+      ? state.handoff_seconds
+      : null,
     source: normalizeString(state.source),
+    channel: normalizeString(state.channel),
     current_version: normalizeString(state.current_version),
     target_version: normalizeString(state.target_version),
     newest_version: normalizeString(state.newest_version),

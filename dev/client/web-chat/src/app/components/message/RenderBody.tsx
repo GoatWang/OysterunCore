@@ -16,6 +16,7 @@ import {
   getOysterunHostSessionFilePreviewPath,
   normalizeOysterunRouteCSiteBrowserTarget,
 } from '../../../oysterun/OysterunHostClient';
+import { normalizeOysterunInternalAppRouteTarget } from '../../../oysterun/OysterunInternalAppRoute';
 
 export type OysterunLinkAnnotation = {
   kind?: unknown;
@@ -418,6 +419,29 @@ const buildOysterunSiteBrowserAnchorProps = (
   };
 };
 
+const buildOysterunInternalAppRouteAnchorProps = (
+  target: unknown,
+  source = 'html_anchor'
+) => {
+  if (typeof window === 'undefined') return undefined;
+  const routeTarget = normalizeOysterunInternalAppRouteTarget(
+    target,
+    window.location.origin
+  );
+  if (!routeTarget || typeof target !== 'string') return undefined;
+  return {
+    href: routeTarget,
+    target: undefined,
+    rel: undefined,
+    'data-oysterun-inline-link-kind': 'internal_app_route',
+    'data-oysterun-inline-link-source': source,
+    'data-oysterun-inline-link-target': routeTarget,
+    'data-oysterun-inline-link-original-target': target,
+    'data-oysterun-inline-link-route-surface': 'internal_app',
+    'data-oysterun-inline-link-return-to': undefined,
+  };
+};
+
 const readOysterunRenderOrigin = (): string | undefined => {
   if (typeof window === 'undefined') return undefined;
   return window.location?.origin || undefined;
@@ -680,7 +704,7 @@ const recoverOysterunAnnotationBridgeReactNode = (
   return React.cloneElement(node, undefined, recoveredChildren);
 };
 
-const withOysterunSiteBrowserLinks = (
+const withOysterunInternalLinks = (
   htmlReactParserOptions: HTMLReactParserOptions,
   oysterunAnnotationBridge?: OysterunAnnotationBridge
 ): HTMLReactParserOptions => {
@@ -700,6 +724,17 @@ const withOysterunSiteBrowserLinks = (
           const props = attributesToProps(anchorNode.attribs);
           return (
             <a {...props} {...browserAnchorProps}>
+              {domToReact(anchorNode.children, wrappedOptions)}
+            </a>
+          );
+        }
+        const internalAppRouteProps = buildOysterunInternalAppRouteAnchorProps(
+          anchorNode.attribs?.href
+        );
+        if (internalAppRouteProps) {
+          const props = attributesToProps(anchorNode.attribs);
+          return (
+            <a {...props} {...internalAppRouteProps}>
               {domToReact(anchorNode.children, wrappedOptions)}
             </a>
           );
@@ -769,6 +804,20 @@ const normalizeOysterunRenderedLinks = (
         {
           ...element.props,
           ...browserAnchorProps,
+        },
+        normalizedChildren
+      );
+    }
+    const internalAppRouteProps = buildOysterunInternalAppRouteAnchorProps(
+      href,
+      'rendered_anchor'
+    );
+    if (internalAppRouteProps) {
+      return React.cloneElement(
+        element,
+        {
+          ...element.props,
+          ...internalAppRouteProps,
         },
         normalizedChildren
       );
@@ -865,7 +914,7 @@ const renderOysterunAnnotationMarkdownBody = (
     }
     const parsedBody = parse(
       sanitizeCustomHtml(markdownBody),
-      withOysterunSiteBrowserLinks(htmlReactParserOptions, bridge)
+      withOysterunInternalLinks(htmlReactParserOptions, bridge)
     );
     return (
       <Linkify options={linkifyOpts}>
@@ -1038,7 +1087,7 @@ function RenderBodyInner({
 }: RenderBodyMemoProps) {
   if (body === '') return <MessageEmptyContent />;
   const htmlReactParserOptionsWithSiteLinks =
-    withOysterunSiteBrowserLinks(htmlReactParserOptions);
+    withOysterunInternalLinks(htmlReactParserOptions);
   const linkifyOptsWithSiteLinks = withOysterunSiteBrowserLinkifyOptions(linkifyOpts);
   const normalizedOysterunLinkAnnotations = normalizeOysterunLinkAnnotations(
     body,

@@ -25,7 +25,7 @@
 /* Begin PBXFileReference section */
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
 		50379B222058CBB4000EE86E /* capacitor.config.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = capacitor.config.json; sourceTree = "<group>"; };
-		504EC3041FED79650016851F /* OysterunCoreDev.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OysterunCoreDev.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		504EC3041FED79650016851F /* OysterunCoreBeta.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OysterunCoreBeta.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		504EC3071FED79650016851F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		504EC30C1FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		504EC30E1FED79650016851F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -69,7 +69,7 @@
 		504EC3051FED79650016851F /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				504EC3041FED79650016851F /* OysterunCoreDev.app */,
+				504EC3041FED79650016851F /* OysterunCoreBeta.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -115,7 +115,7 @@
 				A05D02012F5D020100000002 /* CapacitorBrowser */,
 			);
 			productName = App;
-			productReference = 504EC3041FED79650016851F /* OysterunCoreDev.app */;
+			productReference = 504EC3041FED79650016851F /* OysterunCoreBeta.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -331,7 +331,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
 				OYSTERUN_APP_DISPLAY_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(OYSTERUN_CAPACITOR_APP_ID)";
@@ -357,7 +357,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				OYSTERUN_APP_DISPLAY_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(OYSTERUN_CAPACITOR_APP_ID)";
 				PRODUCT_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";
@@ -491,7 +491,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
 				OYSTERUN_APP_DISPLAY_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(OYSTERUN_CAPACITOR_APP_ID)";
@@ -517,7 +517,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.4;
+				MARKETING_VERSION = 1.5;
 				OYSTERUN_APP_DISPLAY_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = "$(OYSTERUN_CAPACITOR_APP_ID)";
 				PRODUCT_NAME = "$(OYSTERUN_CAPACITOR_APP_NAME)";

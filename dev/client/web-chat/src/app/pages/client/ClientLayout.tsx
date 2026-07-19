@@ -2,6 +2,7 @@ import React, { ReactNode } from 'react';
 import { Box } from 'folds';
 import { useMatrixClient } from '../../hooks/useMatrixClient';
 import { getOysterunRouteCRoomEntryBindingProof } from '../../../oysterun/OysterunHostClient';
+import { isRouteCRoomEntryTimelineUsable } from './RouteCRoomEntry';
 
 type ClientLayoutProps = {
   nav?: ReactNode;
@@ -14,13 +15,17 @@ export function ClientLayout({ nav, children }: ClientLayoutProps) {
   const hostSessionId = roomEntryBinding.host_session_id;
   const boundMatrixRoom = matrixRoomId ? mx.getRoom(matrixRoomId) : undefined;
   const roomEntryReady = Boolean(
-    hostSessionId && matrixRoomId && boundMatrixRoom && roomEntryBinding.matrix_room_ready
+    hostSessionId &&
+      matrixRoomId &&
+      boundMatrixRoom &&
+      roomEntryBinding.matrix_room_ready &&
+      isRouteCRoomEntryTimelineUsable(boundMatrixRoom, matrixRoomId)
   );
   const roomEntryState = !matrixRoomId
     ? 'bootstrap_pending'
     : roomEntryReady
-      ? 'bound_room_ready'
-      : 'bound_room_missing_after_sync';
+    ? 'bound_room_ready'
+    : 'bound_room_missing_after_sync';
   const routeCChatShell = Boolean(hostSessionId);
 
   return (

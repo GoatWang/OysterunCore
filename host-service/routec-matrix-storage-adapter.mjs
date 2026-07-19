@@ -4236,7 +4236,7 @@ function clientTransferBudgetProof({
     omitted_end_seq: timeline.omittedEndSeq,
     oldest_returned_seq: timeline.oldestReturnedSeq,
     newest_returned_seq: timeline.newestReturnedSeq,
-    prev_batch_seq: timeline.prevBatchSeq,
+    prev_batch_seq: clientEvents.length > 0 ? timeline.prevBatchSeq : null,
     next_batch_seq: nextBatchSeq,
     projected_client_transfer_event_bytes:
       transferBytes.projected_client_transfer_event_bytes,
@@ -4418,7 +4418,9 @@ function buildSyncBody({
   const stateEvents = roomStateEvents(binding, room);
   const nextStreamSeq = readRouteCMatrixSQLiteNextStreamSeq(db);
   const nextBatch = routeCCheckpointToken(nextStreamSeq);
-  const prevBatch = routeCCheckpointToken(timeline.prevBatchSeq);
+  const prevBatch = clientTimelineEvents.length > 0
+    ? routeCCheckpointToken(timeline.prevBatchSeq)
+    : null;
   routeCMatrixSyncLastServedNextSeqByKey.set(
     routeCMatrixSyncWaiterKey(binding),
     nextStreamSeq
@@ -4440,7 +4442,7 @@ function buildSyncBody({
           timeline: {
             events: clientTimelineEvents,
             limited: timeline.limited,
-            prev_batch: prevBatch,
+            ...(prevBatch ? { prev_batch: prevBatch } : {}),
           },
           state: {
             events: stateEvents,
@@ -4487,7 +4489,10 @@ function buildSyncBody({
       next_batch: nextBatch,
       next_batch_seq: nextStreamSeq,
       prev_batch: prevBatch,
-      prev_batch_seq: timeline.prevBatchSeq,
+      prev_batch_seq: prevBatch ? timeline.prevBatchSeq : null,
+      timeline_persistence_anchor_required: clientTimelineEvents.length > 0,
+      timeline_persistence_anchor_contract:
+        "non_empty_timeline_requires_prev_batch_independent_of_limited",
       sync_mode: timeline.syncMode,
       timeline_limit: timelineLimit,
       returned_event_count: timeline.events.length,

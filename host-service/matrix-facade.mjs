@@ -77,6 +77,7 @@ import {
 } from "./routec-link-annotation-policy.mjs";
 import { getSessionHistory } from "./session-history.mjs";
 import { readConfig } from "./config.mjs";
+import { areRouteCViewportGeometryDiagnosticsEnabled } from "./routec-viewport-geometry-diagnostics.mjs";
 import { projectToolEventForClientTransfer } from "./tool-event-transfer-projection.mjs";
 import {
   COMPLETE_MESSAGE_PROVIDER_COMPLETION_MARKER,
@@ -4882,6 +4883,11 @@ export function createRouteCMatrixFacade({
           ready: binding.matrix_room_ready,
         },
         notification_settings,
+        routec_viewport_geometry_diagnostics: {
+          enabled: areRouteCViewportGeometryDiagnosticsEnabled(),
+          schema_version: "routec.viewport_geometry_diagnostic.v1",
+          product_behavior_mutated: false,
+        },
         matrix_storage: storageProof,
         routec_host_owned_matrix_storage: true,
         artifact_root: placeholders.artifact_root,
@@ -5070,6 +5076,11 @@ export function createRouteCMatrixFacade({
           ready: binding.matrix_room_ready,
         },
         notification_settings,
+        routec_viewport_geometry_diagnostics: {
+          enabled: areRouteCViewportGeometryDiagnosticsEnabled(),
+          schema_version: "routec.viewport_geometry_diagnostic.v1",
+          product_behavior_mutated: false,
+        },
         matrix_storage: storageProof,
         routec_host_owned_matrix_storage: true,
         artifact_root: placeholders.artifact_root,
@@ -5995,6 +6006,9 @@ export function createRouteCMatrixFacade({
           tool_event_count_label:
             normalizeRouteCSemanticString(event.tool_event_count_label) ||
             normalizeRouteCSemanticString(delivery.tool_event_count_label),
+          tool_storage_generation:
+            normalizeRouteCSemanticString(event.tool_storage_generation) ||
+            normalizeRouteCSemanticString(delivery.tool_storage_generation),
           detail_available:
             event.detail_available === true ||
             delivery.detail_available === true,

@@ -216,6 +216,46 @@ const PROVIDERS = {
     },
     nativeConfig: {},
   },
+  "debug-routec-structural-replay": {
+    id: "debug-routec-structural-replay",
+    label: "Route C Structural Replay",
+    runtimeSupported: true,
+    coderSessionSupported: true,
+    commandRequired: false,
+    auth: {
+      supported: false,
+      startLoginSupported: false,
+    },
+    capabilities: {
+      interactiveSession: true,
+      resume: true,
+      fork: false,
+      permissionResponses: false,
+      historyImport: false,
+      interrupt: true,
+      workspacePolicy: true,
+      nativeArgs: false,
+      nativeCommands: false,
+      configOverrides: false,
+      search: false,
+      imageInput: false,
+      machineReadableStream: true,
+    },
+    controls: {
+      model: true,
+      reasoningEffort: false,
+      approvalPolicy: false,
+      sandboxMode: false,
+      dangerousMode: false,
+      additionalPaths: true,
+      searchEnabled: false,
+      imageInputEnabled: false,
+      nativeArgs: false,
+      nativeCommands: false,
+      configOverrides: false,
+    },
+    nativeConfig: {},
+  },
 };
 
 const PRODUCT_PROVIDER_IDS = Object.freeze(["claude", "codex"]);
@@ -225,6 +265,9 @@ const DEBUG_LARGE_TOOL_SPILLOVER_PROVIDER_IDS = Object.freeze([
 ]);
 const DEBUG_P135_CODEX_REPLAY_PROVIDER_IDS = Object.freeze([
   "debug-p135-codex-replay",
+]);
+const DEBUG_ROUTEC_STRUCTURAL_REPLAY_PROVIDER_IDS = Object.freeze([
+  "debug-routec-structural-replay",
 ]);
 
 const PROVIDER_COMMAND_CONFIG_KEYS = Object.freeze({
@@ -247,11 +290,17 @@ function getCatalogDefaultModel(providerId, models) {
 }
 
 function getProviderModelCatalogForRegistry(providerId, options = {}) {
-  if (providerId === "debug-p135-codex-replay") {
+  if (
+    providerId === "debug-p135-codex-replay" ||
+    providerId === "debug-routec-structural-replay"
+  ) {
     return {
       models: getProviderModelCatalogSeed(providerId),
       status: {
-        source: "host_debug_p135_codex_replay_seed",
+        source:
+          providerId === "debug-routec-structural-replay"
+            ? "host_debug_routec_structural_replay_seed"
+            : "host_debug_p135_codex_replay_seed",
         params_path: null,
         params_exists: false,
         available: true,
@@ -353,6 +402,10 @@ export function isDebugP135CodexReplayProviderEnabled(config = {}) {
   return config?.debug_p135_codex_replay_provider_enabled === true;
 }
 
+export function isDebugRouteCStructuralReplayProviderEnabled(config = {}) {
+  return config?.debug_routec_structural_replay_provider_enabled === true;
+}
+
 function shouldIncludeDebugFixtureProvider(options = {}) {
   if (options?.includeDebugFixtureProvider === true) return true;
   if (
@@ -388,6 +441,14 @@ function shouldIncludeDebugP135CodexReplayProvider(options = {}) {
   return isDebugP135CodexReplayProviderEnabled(readDebugConfig());
 }
 
+function shouldIncludeDebugRouteCStructuralReplayProvider(options = {}) {
+  if (options?.includeDebugRouteCStructuralReplayProvider === true) return true;
+  if (Object.prototype.hasOwnProperty.call(options || {}, "config")) {
+    return isDebugRouteCStructuralReplayProviderEnabled(options.config || {});
+  }
+  return isDebugRouteCStructuralReplayProviderEnabled(readDebugConfig());
+}
+
 function getAvailableProviderIds(options = {}) {
   const ids = [...PRODUCT_PROVIDER_IDS];
   if (shouldIncludeDebugFixtureProvider(options)) {
@@ -398,6 +459,9 @@ function getAvailableProviderIds(options = {}) {
   }
   if (shouldIncludeDebugP135CodexReplayProvider(options)) {
     ids.push(...DEBUG_P135_CODEX_REPLAY_PROVIDER_IDS);
+  }
+  if (shouldIncludeDebugRouteCStructuralReplayProvider(options)) {
+    ids.push(...DEBUG_ROUTEC_STRUCTURAL_REPLAY_PROVIDER_IDS);
   }
   return ids;
 }

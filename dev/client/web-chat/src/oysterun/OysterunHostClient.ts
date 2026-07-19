@@ -1,6 +1,7 @@
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import type { Session } from '../app/state/sessions';
+import { assertOysterunToolEventDetailResponseContract } from './OysterunToolDetailResponseContract';
 
 export type OysterunMatrixBootstrapResponse = {
   route: 'oysterun_matrix_bootstrap' | 'oysterun_host_scoped_cinny_session_bootstrap';
@@ -23,6 +24,11 @@ export type OysterunMatrixBootstrapResponse = {
     ready: boolean;
   };
   notification_settings?: OysterunSessionNotificationSettings | null;
+  routec_viewport_geometry_diagnostics?: {
+    enabled: boolean;
+    schema_version: 'routec.viewport_geometry_diagnostic.v1';
+    product_behavior_mutated: false;
+  };
   artifact_root: string;
   raw_synapse_token_exposed: false;
   session_route_source?: string;
@@ -65,9 +71,7 @@ export type OysterunRouteCPathMemorySnapshot = {
 };
 
 export type OysterunRouteCActiveRoomTimelineFocusSource =
-  | 'message_search_open'
-  | 'pinned_message_open'
-  | 'host_owner_neighbor_navigation';
+  'message_search_open' | 'pinned_message_open' | 'host_owner_neighbor_navigation';
 
 export type OysterunRouteCActiveRoomTimelineFocusDetail = {
   hostSessionId: string;
@@ -94,6 +98,45 @@ export type OysterunHostSessionStatus = {
   alive: boolean;
   ready: boolean;
   notification_settings?: OysterunSessionNotificationSettings | null;
+};
+
+export type OysterunRouteCViewportGeometryDiagnosticSample = {
+  trigger: string;
+  matrix_event_id?: string;
+  matrix_event_type?: string;
+  matrix_event_sender?: string;
+  client_recorded_at_ms?: number;
+  scroll_top?: number;
+  scroll_height?: number;
+  client_height?: number;
+  max_scroll_top?: number;
+  distance_from_bottom?: number;
+  scroll_content_height?: number;
+  bottom_anchor_top?: number;
+  bottom_anchor_bottom?: number;
+  bottom_anchor_distance_from_viewport_bottom?: number;
+  timeline_range_start?: number;
+  timeline_range_end?: number;
+  timeline_event_count?: number;
+  visible_rendered_count?: number;
+  viewport_first_event_id?: string;
+  viewport_center_event_id?: string;
+  viewport_last_event_id?: string;
+  scroll_to_bottom_request_count?: number;
+  live_bottom_transaction_phase?: 'queued' | 'committed' | 'cancelled';
+  live_bottom_transaction_revision?: number;
+  live_bottom_transaction_event_id?: string;
+  live_bottom_previous_max_scroll_top?: number;
+  live_bottom_current_max_scroll_top?: number;
+  live_bottom_transaction_behavior?: 'instant' | 'smooth';
+  at_bottom?: boolean;
+  live_timeline_linked?: boolean;
+  range_at_end?: boolean;
+  range_at_start?: boolean;
+  scroll_to_bottom_smooth?: boolean;
+  backward_placeholder_present?: boolean;
+  forward_placeholder_present?: boolean;
+  document_has_focus?: boolean;
 };
 
 export type OysterunRouteCAgentCommand = {
@@ -132,9 +175,7 @@ export type OysterunSessionNotificationSettings = {
   is_default?: boolean;
   updated_at?: string | null;
   storage_owner?:
-    | 'agent_config_notifications_enabled'
-    | 'host_config_session_notification_settings'
-    | string;
+    'agent_config_notifications_enabled' | 'host_config_session_notification_settings' | string;
   policy_source?: 'notifications.enabled' | string;
   compatibility_endpoint?: boolean;
   matrix_timeline_owner?: false;
@@ -210,8 +251,8 @@ export type OysterunBrowsePage = {
 
 export type OysterunLargeToolOutputItem = {
   schema_version: 'routec.large_tool_event.v1';
+  storage_generation?: 'sqlite_continuation_v1';
   tool_event_index: number;
-  jsonl_page_index: number;
   semantic_type: string;
   provider_turn_id?: string | null;
   provider_turn_id_kind?: string | null;
@@ -310,12 +351,16 @@ export type OysterunToolEventDetailResponse = {
   debug_tool_detail_source_ui_enabled?: boolean;
   resolver_path_fields_exposed?: false;
   tool_payload_local_paths_preserved?: true;
+  tool_storage_generation: 'sqlite_continuation_v1';
+  continuation_storage_kind: 'host_tool_event_continuation_sqlite';
+  matrix_retained_plus_sqlite_continuation: true;
 };
 
 export type OysterunToolEventDetailRequest = {
   sessionId: string;
   matrixRoomId: string;
   matrixEventId: string;
+  toolStorageGeneration: 'sqlite_continuation_v1';
   page?: number;
 };
 
@@ -383,6 +428,7 @@ export type OysterunHostOwnerMessageNeighborsRequest = {
 
 export type OysterunLargeToolOutputResponse = {
   status: 'ok' | 'unavailable' | 'ambiguous' | 'forbidden';
+  storage_kind?: 'host_tool_event_continuation_sqlite' | 'host_tool_event_legacy_jsonl_read_only';
   has_continuation: boolean;
   continuation_state: string;
   page: number;
@@ -390,26 +436,33 @@ export type OysterunLargeToolOutputResponse = {
   page_count?: number;
   matrix_retained_tool_event_count?: number;
   total_tool_event_count?: number;
-  total_jsonl_tool_event_count?: number;
+  total_sqlite_tool_event_count?: number;
+  total_legacy_tool_event_count?: number;
   notice_sent?: boolean;
   notice_matrix_event_id?: string | null;
-  tool_event_count_label?: '10' | string;
+  tool_event_count_label?: '1' | string;
   large_tool_ref?: string | null;
   items: OysterunLargeToolOutputItem[];
-  jsonl_loaded?: boolean;
+  sqlite_loaded?: boolean;
+  legacy_jsonl_loaded?: boolean;
+  legacy_migration_pending?: boolean;
   detail_page_1_matrix_retained?: boolean;
   explicit_detail_navigation_required?: boolean;
   matrix_large_ref_written?: false;
   matrix_large_tool_ref_written?: false;
   debug_tool_detail_source_ui_enabled?: boolean;
   resolver_path_fields_exposed?: false;
+  sqlite_path_exposed?: false;
   tool_payload_local_paths_preserved?: true;
-  matrix_chat_search_includes_jsonl?: false;
+  matrix_chat_search_includes_continuation?: false;
+  host_local_tool_event_continuation_sqlite?: boolean;
+  legacy_jsonl_read_only_migration_fallback?: boolean;
 };
 
 export type OysterunLargeToolOutputRequest = {
   sessionId: string;
   matrixRoomId: string;
+  toolStorageGeneration: 'sqlite_continuation_v1';
   page?: number;
   retainedEventId?: string;
   providerTurnId?: string;
@@ -575,7 +628,7 @@ export function notifyOysterunRouteCOptimisticProviderResponding(
   detail: Omit<OysterunRouteCOptimisticProviderRespondingEvent, 'sessionId' | 'createdAt'> & {
     sessionId?: string | null;
     createdAt?: number;
-  }
+  },
 ): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
@@ -587,13 +640,13 @@ export function notifyOysterunRouteCOptimisticProviderResponding(
           sessionId: detail.sessionId ?? getOysterunHostSessionId() ?? null,
           createdAt: detail.createdAt ?? Date.now(),
         },
-      }
-    )
+      },
+    ),
   );
 }
 
 export function subscribeOysterunRouteCOptimisticProviderResponding(
-  listener: (detail: OysterunRouteCOptimisticProviderRespondingEvent) => void
+  listener: (detail: OysterunRouteCOptimisticProviderRespondingEvent) => void,
 ): () => void {
   if (typeof window === 'undefined') return () => undefined;
   const handler = (event: Event) => {
@@ -613,9 +666,7 @@ export type OysterunRouteCRoomEntryBindingProof = {
   matrix_room_id?: string;
   matrix_room_ready: boolean;
   binding_source:
-    | 'host_scoped_bootstrap'
-    | 'host_session_route_without_bootstrap'
-    | 'missing_host_session_route';
+    'host_scoped_bootstrap' | 'host_session_route_without_bootstrap' | 'missing_host_session_route';
   direct_api_substitute_used: false;
   stale_text_selector_required: false;
   screenshot_identity_required: false;
@@ -695,7 +746,7 @@ declare global {
       nativePromise?: (
         pluginName: string,
         methodName: string,
-        options: Record<string, unknown>
+        options: Record<string, unknown>,
       ) => Promise<unknown>;
       isNativePlatform?: () => boolean;
       getPlatform?: () => string;
@@ -710,6 +761,8 @@ const HOST_SCOPED_CINNY_SESSION_BOOTSTRAP_PATH =
   '/routec/matrix/host-scoped-cinny-session-bootstrap';
 const HOST_SESSION_SEND_PATH = '/session/send';
 const HOST_SESSION_SNAPSHOT_PATH = '/session/snapshot';
+const HOST_SESSION_VIEWPORT_GEOMETRY_DIAGNOSTIC_PATH =
+  '/session/routec-viewport-geometry-diagnostic';
 const HOST_SESSION_INTERRUPT_PATH = '/session/interrupt';
 const HOST_SESSION_RESTART_PATH = '/session/restart';
 const HOST_SESSION_TERMINAL_COMMAND_PATH = '/session/terminal-command';
@@ -747,7 +800,7 @@ function isOysterunLocalDebugOrigin(): boolean {
 
 export function isOysterunRouteCMatrixRecoveryDebugTriggerEnabled(): boolean {
   const debugValue = new URLSearchParams(window.location.search).get(
-    ROUTEC_MATRIX_RECOVERY_DEBUG_QUERY_PARAM
+    ROUTEC_MATRIX_RECOVERY_DEBUG_QUERY_PARAM,
   );
   return (
     isOysterunLocalDebugOrigin() &&
@@ -756,8 +809,7 @@ export function isOysterunRouteCMatrixRecoveryDebugTriggerEnabled(): boolean {
 }
 
 export type OysterunRouteCMatrixRecoveryDebugTriggerKind =
-  | 'debug_visible_notification_resume_fallback'
-  | 'debug_visible_matrix_facade_recovery';
+  'debug_visible_notification_resume_fallback' | 'debug_visible_matrix_facade_recovery';
 
 export type OysterunRouteCMatrixRecoveryDebugDetail = {
   reason: OysterunRouteCMatrixRecoveryDebugTriggerKind;
@@ -778,7 +830,7 @@ export type OysterunRouteCMatrixRecoveryDebugDetail = {
 };
 
 export function buildOysterunRouteCMatrixRecoveryDebugDetail(
-  reason: OysterunRouteCMatrixRecoveryDebugTriggerKind
+  reason: OysterunRouteCMatrixRecoveryDebugTriggerKind,
 ): OysterunRouteCMatrixRecoveryDebugDetail {
   return {
     reason,
@@ -800,7 +852,7 @@ export function buildOysterunRouteCMatrixRecoveryDebugDetail(
 }
 
 export function isOysterunRouteCMatrixRecoveryDebugDetail(
-  detail: unknown
+  detail: unknown,
 ): detail is OysterunRouteCMatrixRecoveryDebugDetail {
   const candidate = detail as Partial<OysterunRouteCMatrixRecoveryDebugDetail> | undefined;
   return (
@@ -819,7 +871,7 @@ export function isOysterunRouteCMatrixRecoveryDebugDetail(
 }
 
 export function recordOysterunRouteCMatrixRecoveryTriggerProof(
-  proof: Record<string, unknown>
+  proof: Record<string, unknown>,
 ): void {
   recordOysterunProof('matrixClientRecoveryTrigger', {
     schema_version: 'routec.matrix_recovery_debug_trigger.v1',
@@ -859,7 +911,7 @@ function consumeOysterunDashboardTokenFromHash(): string | undefined {
   window.history.replaceState(
     window.history.state,
     '',
-    `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`
+    `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`,
   );
   return token;
 }
@@ -885,10 +937,10 @@ function isOysterunCapacitorIOSRuntime(): boolean {
   const capacitor = window.Capacitor;
   return Boolean(
     capacitor &&
-      typeof capacitor.isNativePlatform === 'function' &&
-      capacitor.isNativePlatform() &&
-      typeof capacitor.getPlatform === 'function' &&
-      capacitor.getPlatform() === 'ios'
+    typeof capacitor.isNativePlatform === 'function' &&
+    capacitor.isNativePlatform() &&
+    typeof capacitor.getPlatform === 'function' &&
+    capacitor.getPlatform() === 'ios',
   );
 }
 
@@ -983,7 +1035,7 @@ export function getOysterunSemanticRowProofIdentityFields(): readonly string[] {
 
 function requiredSemanticRowProofIdentityValue(
   proof: Record<string, unknown>,
-  field: typeof OYSTERUN_SEMANTIC_ROW_PROOF_IDENTITY_FIELDS[number]
+  field: (typeof OYSTERUN_SEMANTIC_ROW_PROOF_IDENTITY_FIELDS)[number],
 ): string {
   const value = proof[field];
   if (field === 'countable_semantic_row') {
@@ -995,7 +1047,7 @@ function requiredSemanticRowProofIdentityValue(
   if (typeof value === 'string' && value.trim()) {
     if (field === 'source_user_event_id_hash_kind' && value !== OYSTERUN_RAW_EVENT_ID_HASH_KIND) {
       throw new Error(
-        'Oysterun semantic renderer proof requires raw_event_id_sha256 source binding.'
+        'Oysterun semantic renderer proof requires raw_event_id_sha256 source binding.',
       );
     }
     if (field === 'proof_scope' && value !== 'semantic-detail-readout') {
@@ -1011,7 +1063,7 @@ function requiredSemanticRowProofIdentityValue(
 
 function optionalSemanticRowProofIdentityValue(
   proof: Record<string, unknown>,
-  field: typeof OYSTERUN_SEMANTIC_ROW_PROOF_OPTIONAL_IDENTITY_FIELDS[number]
+  field: (typeof OYSTERUN_SEMANTIC_ROW_PROOF_OPTIONAL_IDENTITY_FIELDS)[number],
 ): string {
   const value = proof[field];
   if (value === undefined || value === null || value === '') return '';
@@ -1029,7 +1081,7 @@ function optionalSemanticRowProofIdentityValue(
   if (typeof value === 'string') {
     if (field === 'target_user_event_id_hash_kind' && value !== OYSTERUN_RAW_EVENT_ID_HASH_KIND) {
       throw new Error(
-        'Oysterun semantic renderer proof requires raw_event_id_sha256 target binding when present.'
+        'Oysterun semantic renderer proof requires raw_event_id_sha256 target binding when present.',
       );
     }
     return value.trim();
@@ -1042,10 +1094,10 @@ function optionalSemanticRowProofIdentityValue(
 export function buildOysterunSemanticRowProofIdentityKey(proof: Record<string, unknown>): string {
   return [
     ...OYSTERUN_SEMANTIC_ROW_PROOF_IDENTITY_FIELDS.map((field) =>
-      requiredSemanticRowProofIdentityValue(proof, field)
+      requiredSemanticRowProofIdentityValue(proof, field),
     ),
     ...OYSTERUN_SEMANTIC_ROW_PROOF_OPTIONAL_IDENTITY_FIELDS.map((field) =>
-      optionalSemanticRowProofIdentityValue(proof, field)
+      optionalSemanticRowProofIdentityValue(proof, field),
     ),
   ].join(OYSTERUN_SEMANTIC_ROW_PROOF_KEY_SEPARATOR);
 }
@@ -1114,7 +1166,7 @@ function collectSemanticRowIdentityIssues(proof: Record<string, unknown>): {
 }
 
 export function classifyOysterunSemanticRowReadout(
-  proof: Record<string, unknown>
+  proof: Record<string, unknown>,
 ): OysterunSemanticReadoutProofClassification {
   const { missing_identity_fields, invalid_identity_fields } =
     collectSemanticRowIdentityIssues(proof);
@@ -1181,7 +1233,7 @@ function semanticDiagnosticIdentityValue(value: unknown): string {
 
 function buildOysterunSemanticDiagnosticIdentityKey(proof: Record<string, unknown>): string {
   return OYSTERUN_SEMANTIC_DIAGNOSTIC_IDENTITY_FIELDS.map((field) =>
-    semanticDiagnosticIdentityValue(proof[field])
+    semanticDiagnosticIdentityValue(proof[field]),
   ).join(OYSTERUN_SEMANTIC_ROW_PROOF_KEY_SEPARATOR);
 }
 
@@ -1199,7 +1251,7 @@ export function recordOysterunSemanticDiagnostic(proof: Record<string, unknown>)
   const identityKey = buildOysterunSemanticDiagnosticIdentityKey(diagnostic);
   const list = proofs.semanticDiagnostics ?? [];
   const existingIndex = list.findIndex(
-    (item) => buildOysterunSemanticDiagnosticIdentityKey(item) === identityKey
+    (item) => buildOysterunSemanticDiagnosticIdentityKey(item) === identityKey,
   );
   if (existingIndex >= 0) {
     const existing = list[existingIndex];
@@ -1215,8 +1267,8 @@ export function recordOysterunSemanticDiagnostic(proof: Record<string, unknown>)
         typeof existing.first_observed_at === 'string'
           ? existing.first_observed_at
           : typeof existing.at === 'string'
-          ? existing.at
-          : now,
+            ? existing.at
+            : now,
       last_observed_at: now,
       proof_observation_count: existingObservationCount + 1,
     };
@@ -1234,14 +1286,14 @@ export function recordOysterunSemanticDiagnostic(proof: Record<string, unknown>)
 function buildOysterunCleanSessionAppPath(
   sessionId: string,
   page: 'chat' | 'profile' | 'loop' | 'explorer' | 'file-preview',
-  params?: URLSearchParams
+  params?: URLSearchParams,
 ): string {
   const normalizedSessionId = sessionId.trim();
   if (!normalizedSessionId) {
     throw new Error('Oysterun clean session route requires a Host session id.');
   }
   const cleanPath = `${OYSTERUN_CLEAN_SESSION_APP_PREFIX}/${encodeURIComponent(
-    normalizedSessionId
+    normalizedSessionId,
   )}/${page}`;
   const query = params?.toString();
   return `${cleanPath}${query ? `?${query}` : ''}`;
@@ -1258,7 +1310,7 @@ function buildOysterunCleanSessionChatFocusPath(sessionId: string, eventId: stri
 }
 
 function readCleanSessionRouteFromPathname(
-  pathname = window.location.pathname
+  pathname = window.location.pathname,
 ): HostSessionRoute | undefined {
   const parts = pathname.split('/').filter(Boolean);
   if (parts.length === 4 && parts[0] === 'app' && parts[1] === 'sessions' && parts[3] === 'chat') {
@@ -1327,7 +1379,7 @@ function getOysterunActiveTimelineFocusHostSessionId(): string | undefined {
 }
 
 function isOysterunActiveRoomTimelineFocusDetail(
-  value: unknown
+  value: unknown,
 ): value is OysterunRouteCActiveRoomTimelineFocusDetail {
   const detail = value as Partial<OysterunRouteCActiveRoomTimelineFocusDetail> | undefined;
   return (
@@ -1379,15 +1431,15 @@ export function requestOysterunActiveRoomTimelineFocus({
   window.dispatchEvent(
     new CustomEvent<OysterunRouteCActiveRoomTimelineFocusDetail>(
       OYSTERUN_ROUTE_C_ACTIVE_ROOM_TIMELINE_FOCUS_EVENT,
-      { detail }
-    )
+      { detail },
+    ),
   );
   return detail.handled === true;
 }
 
 export function subscribeOysterunActiveRoomTimelineFocus(
   roomId: string,
-  onFocus: (eventId: string, detail: OysterunRouteCActiveRoomTimelineFocusDetail) => void
+  onFocus: (eventId: string, detail: OysterunRouteCActiveRoomTimelineFocusDetail) => void,
 ): () => void {
   if (typeof window === 'undefined') return () => undefined;
   const normalizedRoomId = roomId.trim();
@@ -1412,8 +1464,8 @@ export function getOysterunRouteCPathMemory(): OysterunRouteCPathMemorySnapshot 
   const sessionId = getOysterunRouteCPathMemorySessionId();
   const memory = readOysterunRouteCPathMemoryStorage();
   return {
-    explorerPath: sessionId ? memory.explorer_paths?.[sessionId] ?? '' : '',
-    previewPath: sessionId ? memory.preview_paths?.[sessionId] ?? '' : '',
+    explorerPath: sessionId ? (memory.explorer_paths?.[sessionId] ?? '') : '',
+    previewPath: sessionId ? (memory.preview_paths?.[sessionId] ?? '') : '',
   };
 }
 
@@ -1430,7 +1482,7 @@ export function getOysterunHostSessionRouteSearch(): string | undefined {
   const params = new URLSearchParams();
   params.set(
     route.source === 'query_host_session_id' ? 'host_session_id' : 'session_id',
-    route.sessionId
+    route.sessionId,
   );
   return `?${params.toString()}`;
 }
@@ -1498,7 +1550,7 @@ export type OysterunBrowserHandoffLaunch = {
 };
 
 export async function createOysterunHostBrowserHandoffLaunch(
-  target: string
+  target: string,
 ): Promise<OysterunBrowserHandoffLaunch> {
   const normalizedTarget = normalizeOysterunRouteCSiteBrowserTarget(target);
   if (!normalizedTarget) {
@@ -1528,7 +1580,7 @@ export async function createOysterunHostBrowserHandoffLaunch(
 }
 
 export function getOysterunHostSessionBrowserPathOrTargetFallback(
-  target: string
+  target: string,
 ): string | undefined {
   return getOysterunHostSessionBrowserPath(target) ?? getOysterunHostBrowserPath(target);
 }
@@ -1589,6 +1641,11 @@ export function navigateOysterunHostSessionsPage(): void {
   if (target.origin !== window.location.origin) {
     throw new Error('Route C previous page navigation must stay on the current Host origin.');
   }
+  recordOysterunRouteCNavigationDiagnostic('previous_page_navigation', {
+    navigation_source: 'web_chat_routec_previous_page',
+    navigation_method: 'location_assign',
+    target: `${target.pathname}${target.search}`,
+  });
   window.location.assign(`${target.pathname}${target.search}`);
 }
 
@@ -1671,7 +1728,7 @@ export async function listOysterunRouteCAgentCommands(): Promise<OysterunRouteCA
     `/agent/commands?${params.toString()}`,
     {
       method: 'GET',
-    }
+    },
   );
   if (response.agent_id !== agentId) {
     throw new Error('Route C slash command discovery returned mismatched agent_id.');
@@ -1683,7 +1740,7 @@ export async function listOysterunRouteCAgentCommands(): Promise<OysterunRouteCA
 }
 
 export async function getOysterunRouteCProviderSkillStatus(
-  provider?: string | null
+  provider?: string | null,
 ): Promise<OysterunRouteCProviderSkillStatusResponse> {
   const status = await getOysterunRouteCHostSessionStatus();
   const agentId = status.agent_id.trim();
@@ -1698,7 +1755,7 @@ export async function getOysterunRouteCProviderSkillStatus(
     `/agent/provider-skill-status?${params.toString()}`,
     {
       method: 'GET',
-    }
+    },
   );
   if (response.agent_id !== agentId) {
     throw new Error('Route C provider skill status returned mismatched agent_id.');
@@ -1707,9 +1764,29 @@ export async function getOysterunRouteCProviderSkillStatus(
 }
 
 export function getOysterunBootstrappedSessionNotificationSettings():
-  | OysterunSessionNotificationSettings
-  | undefined {
+  OysterunSessionNotificationSettings | undefined {
   return cachedBootstrap?.notification_settings ?? undefined;
+}
+
+export function isOysterunRouteCViewportGeometryDiagnosticsEnabled(): boolean {
+  return cachedBootstrap?.routec_viewport_geometry_diagnostics?.enabled === true;
+}
+
+export async function recordOysterunRouteCViewportGeometryDiagnostic(
+  sample: OysterunRouteCViewportGeometryDiagnosticSample,
+): Promise<void> {
+  if (!isOysterunRouteCViewportGeometryDiagnosticsEnabled()) return;
+  const hostSessionId = cachedBootstrap?.binding.host_session_id;
+  const matrixRoomId = cachedBootstrap?.binding.matrix_room_id;
+  if (!hostSessionId || !matrixRoomId) return;
+  await hostJson<{ diagnostic_written: boolean }>(HOST_SESSION_VIEWPORT_GEOMETRY_DIAGNOSTIC_PATH, {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: hostSessionId,
+      matrix_room_id: matrixRoomId,
+      sample,
+    }),
+  });
 }
 
 export async function getOysterunSessionNotificationSettings({
@@ -1781,7 +1858,7 @@ function buildOysterunRouteCAgentSitePrefix(agentId: string): string {
 
 function normalizeOysterunRouteCWebsiteEntryPath(
   agentId: string,
-  website: OysterunAgentWebsiteMetadata
+  website: OysterunAgentWebsiteMetadata,
 ): string | undefined {
   const rawEntryPath = (website.canonical_entry_path || website.entry_path).trim();
   if (!rawEntryPath.startsWith('/sites/')) return undefined;
@@ -1847,6 +1924,7 @@ export async function listOysterunRouteCBrowseEntries({
 export async function getOysterunLargeToolOutput({
   sessionId,
   matrixRoomId,
+  toolStorageGeneration,
   page = 1,
   retainedEventId,
   providerTurnId,
@@ -1856,6 +1934,7 @@ export async function getOysterunLargeToolOutput({
   const params = new URLSearchParams();
   params.set('session_id', sessionId);
   params.set('matrix_room_id', matrixRoomId);
+  params.set('tool_storage_generation', toolStorageGeneration);
   params.set('page', String(page));
   if (retainedEventId) params.set('retained_event_id', retainedEventId);
   if (providerTurnId) params.set('provider_turn_id', providerTurnId);
@@ -1865,7 +1944,7 @@ export async function getOysterunLargeToolOutput({
     `/session/large-tool-output?${params.toString()}`,
     {
       method: 'GET',
-    }
+    },
   );
 }
 
@@ -1873,18 +1952,27 @@ export async function getOysterunToolEventDetail({
   sessionId,
   matrixRoomId,
   matrixEventId,
+  toolStorageGeneration,
   page = 1,
 }: OysterunToolEventDetailRequest): Promise<OysterunToolEventDetailResponse> {
   const params = new URLSearchParams();
   params.set('session_id', sessionId);
   params.set('matrix_room_id', matrixRoomId);
   params.set('matrix_event_id', matrixEventId);
+  params.set('tool_storage_generation', toolStorageGeneration);
   params.set('page', String(page));
-  return hostJson<OysterunToolEventDetailResponse>(
+  const payload = await hostJson<unknown>(
     `/session/tool-event-detail?${params.toString()}`,
     {
       method: 'GET',
-    }
+    },
+  );
+  return assertOysterunToolEventDetailResponseContract<OysterunToolEventDetailResponse>(
+    payload,
+    {
+      toolStorageGeneration,
+      page,
+    },
   );
 }
 
@@ -1893,7 +1981,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isOysterunHostOwnerMessageNeighborEvent(
-  value: unknown
+  value: unknown,
 ): value is OysterunHostOwnerMessageNeighborEvent {
   if (!isRecord(value)) return false;
   return (
@@ -1905,7 +1993,7 @@ function isOysterunHostOwnerMessageNeighborEvent(
 }
 
 function assertOysterunHostOwnerMessageNeighborsResponse(
-  value: unknown
+  value: unknown,
 ): OysterunHostOwnerMessageNeighborsResponse {
   if (!isRecord(value)) {
     throw new Error('Route C Host Owner neighbor response must be an object.');
@@ -1983,7 +2071,7 @@ export async function getOysterunHostOwnerMessageNeighbors({
   }
   if (!normalizedAnchorEventId && anchorPosition !== 'latest') {
     throw new Error(
-      'Route C Host Owner neighbor navigation requires an anchor event id or latest anchor.'
+      'Route C Host Owner neighbor navigation requires an anchor event id or latest anchor.',
     );
   }
 
@@ -1999,7 +2087,7 @@ export async function getOysterunHostOwnerMessageNeighbors({
     `/session/host-owner-message-neighbors?${params.toString()}`,
     {
       method: 'GET',
-    }
+    },
   );
   return assertOysterunHostOwnerMessageNeighborsResponse(payload);
 }
@@ -2013,7 +2101,7 @@ async function hostJson<T>(path: string, init: RequestInit): Promise<T> {
   const payload = await response.json();
   if (!response.ok) {
     const error = new Error(
-      `Route C Host request failed ${response.status}: ${payload.error ?? payload.errcode ?? path}`
+      `Route C Host request failed ${response.status}: ${payload.error ?? payload.errcode ?? path}`,
     ) as Error & { status?: number; data?: unknown; path?: string };
     error.status = response.status;
     error.data = payload;
@@ -2098,7 +2186,7 @@ async function resolveOysterunCloudBundleId({
   if (nativeBundleId) return nativeBundleId;
   if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios') {
     throw new Error(
-      'Oysterun iOS bundle id is unavailable; App Attest registration requires App.getInfo().id from the native @capacitor/app plugin.'
+      'Oysterun iOS bundle id is unavailable; App Attest registration requires App.getInfo().id from the native @capacitor/app plugin.',
     );
   }
   const explicitTopic = normalizeOysterunCloudBundleId(body.topic);
@@ -2115,20 +2203,20 @@ function normalizeOysterunCloudStage(cloudApiStage?: string | null): string {
 
 function getOysterunCloudInstallationIdentityKey(
   cloudApiUrl: string,
-  cloudApiStage?: string | null
+  cloudApiStage?: string | null,
 ): string {
   return `${OYSTERUN_CLOUD_INSTALLATION_IDENTITY_KEY_PREFIX}:${normalizeOysterunCloudStage(
-    cloudApiStage
+    cloudApiStage,
   )}:${cloudApiUrl}`;
 }
 
 function loadOysterunCloudInstallationIdentity(
   cloudApiUrl: string,
-  cloudApiStage?: string | null
+  cloudApiStage?: string | null,
 ): OysterunCloudInstallationIdentity | null {
   try {
     const raw = window.localStorage.getItem(
-      getOysterunCloudInstallationIdentityKey(cloudApiUrl, cloudApiStage)
+      getOysterunCloudInstallationIdentityKey(cloudApiUrl, cloudApiStage),
     );
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<OysterunCloudInstallationIdentity>;
@@ -2152,12 +2240,12 @@ function loadOysterunCloudInstallationIdentity(
 function saveOysterunCloudInstallationIdentity(
   cloudApiUrl: string,
   cloudApiStage: string | null | undefined,
-  identity: OysterunCloudInstallationIdentity
+  identity: OysterunCloudInstallationIdentity,
 ): void {
   try {
     window.localStorage.setItem(
       getOysterunCloudInstallationIdentityKey(cloudApiUrl, cloudApiStage),
-      JSON.stringify(identity)
+      JSON.stringify(identity),
     );
   } catch {
     /* local identity persistence is best-effort */
@@ -2165,7 +2253,7 @@ function saveOysterunCloudInstallationIdentity(
 }
 
 function parseOysterunCloudInstallationIdentity(
-  raw: string | null | undefined
+  raw: string | null | undefined,
 ): OysterunCloudInstallationIdentity | null {
   if (!raw) return null;
   try {
@@ -2191,8 +2279,7 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
   const capacitor = window.Capacitor;
   if (!capacitor) return null;
   const plugin = capacitor.Plugins?.OysterunAppAttest as
-    | Partial<OysterunAppAttestPlugin>
-    | undefined;
+    Partial<OysterunAppAttestPlugin> | undefined;
   if (
     plugin &&
     typeof plugin.attest === 'function' &&
@@ -2211,7 +2298,7 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
         capacitor.nativePromise?.(
           'OysterunAppAttest',
           'attest',
-          options
+          options,
         ) as Promise<OysterunAppAttestProof>,
       loadIdentity: (options) =>
         capacitor.nativePromise?.('OysterunAppAttest', 'loadIdentity', options) as Promise<{
@@ -2223,7 +2310,7 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
         capacitor.nativePromise?.(
           'OysterunAppAttest',
           'clearIdentity',
-          options
+          options,
         ) as Promise<unknown>,
     };
   }
@@ -2232,7 +2319,7 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
 
 async function loadOysterunCloudInstallationIdentityFromNative(
   cloudApiUrl: string,
-  cloudApiStage?: string | null
+  cloudApiStage?: string | null,
 ): Promise<OysterunCloudInstallationIdentity | null> {
   const plugin = getOysterunAppAttestPlugin();
   if (!plugin) return null;
@@ -2244,7 +2331,7 @@ async function loadOysterunCloudInstallationIdentityFromNative(
 async function saveOysterunCloudInstallationIdentityToNative(
   cloudApiUrl: string,
   cloudApiStage: string | null | undefined,
-  identity: OysterunCloudInstallationIdentity
+  identity: OysterunCloudInstallationIdentity,
 ): Promise<boolean> {
   const plugin = getOysterunAppAttestPlugin();
   if (!plugin) return false;
@@ -2257,7 +2344,7 @@ async function cloudJson<T>(
   cloudApiUrl: string,
   cloudApiStage: string | null | undefined,
   path: string,
-  init: RequestInit
+  init: RequestInit,
 ): Promise<T> {
   const base = cloudApiUrl.replace(/\/+$/, '');
   const url = new URL(path, `${base}/`);
@@ -2275,7 +2362,7 @@ async function cloudJson<T>(
   const payload = await response.json();
   if (!response.ok) {
     const error = new Error(
-      `Oysterun Cloud request failed ${response.status}: ${payload.detail ?? payload.error ?? path}`
+      `Oysterun Cloud request failed ${response.status}: ${payload.detail ?? payload.error ?? path}`,
     ) as Error & { status?: number; data?: unknown; path?: string };
     error.status = response.status;
     error.data = payload;
@@ -2303,7 +2390,7 @@ async function ensureOysterunCloudInstallationIdentity({
 }): Promise<OysterunCloudInstallationIdentity> {
   const nativeIdentity = await loadOysterunCloudInstallationIdentityFromNative(
     cloudApiUrl,
-    cloudApiStage
+    cloudApiStage,
   );
   if (nativeIdentity) return nativeIdentity;
   if (!getOysterunAppAttestPlugin()) {
@@ -2317,7 +2404,7 @@ async function ensureOysterunCloudInstallationIdentity({
     {
       method: 'POST',
       body: JSON.stringify({}),
-    }
+    },
   );
   const appAttestPlugin = getOysterunAppAttestPlugin();
   if (!appAttestPlugin) {
@@ -2339,12 +2426,12 @@ async function ensureOysterunCloudInstallationIdentity({
         app_attest_key_id: appAttest.app_attest_key_id,
         attestation_object: appAttest.attestation_object,
       }),
-    }
+    },
   );
   const savedNative = await saveOysterunCloudInstallationIdentityToNative(
     cloudApiUrl,
     cloudApiStage,
-    identity
+    identity,
   );
   if (!savedNative) {
     saveOysterunCloudInstallationIdentity(cloudApiUrl, cloudApiStage, identity);
@@ -2378,7 +2465,7 @@ export async function registerOysterunPushToken(body: OysterunPushRegisterBody):
         host_id: bootstrap.host_id,
         notification_registration_token: bootstrap.notification_registration_token,
       }),
-    }
+    },
   );
   return cloudJson(bootstrap.cloud_api_url, bootstrap.cloud_api_stage, '/api/push/register', {
     method: 'POST',
@@ -2396,7 +2483,7 @@ export async function registerOysterunPushToken(body: OysterunPushRegisterBody):
 
 export function recordOysterunProof(
   bucket: keyof OysterunProofBucket,
-  proof: Record<string, unknown>
+  proof: Record<string, unknown>,
 ) {
   const proofs = proofBucket();
   if (bucket === 'sendReconciliation') {
@@ -2413,7 +2500,7 @@ export function recordOysterunProof(
     const identityKey = buildOysterunSemanticRowProofIdentityKey(proof);
     const list = proofs.semanticRows ?? [];
     const existingIndex = list.findIndex(
-      (item) => buildOysterunSemanticRowProofIdentityKey(item) === identityKey
+      (item) => buildOysterunSemanticRowProofIdentityKey(item) === identityKey,
     );
     if (existingIndex >= 0) {
       const existing = list[existingIndex];
@@ -2429,8 +2516,8 @@ export function recordOysterunProof(
           typeof existing.first_observed_at === 'string'
             ? existing.first_observed_at
             : typeof existing.at === 'string'
-            ? existing.at
-            : now,
+              ? existing.at
+              : now,
         last_observed_at: now,
         at: now,
         proof_observation_count: existingObservationCount + 1,
@@ -2523,7 +2610,7 @@ export async function bootstrapOysterunMatrixSession(): Promise<OysterunMatrixBo
         session_id: sessionRoute.sessionId,
         session_route_source: sessionRoute.source,
       }),
-    }
+    },
   );
   if (cachedBootstrap.raw_synapse_token_exposed !== false) {
     throw new Error('Route C bootstrap violated raw Synapse token exposure contract.');
@@ -2584,6 +2671,51 @@ export function clearOysterunMatrixBootstrapCache(reason = 'matrix_facade_token_
   });
 }
 
+function sanitizeOysterunNavigationDiagnosticTarget(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const target = new URL(value, window.location.origin);
+    target.searchParams.delete('token');
+    target.searchParams.delete('oysterun_token');
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+export function recordOysterunRouteCNavigationDiagnostic(
+  stage: string,
+  detail: Record<string, unknown> = {},
+): void {
+  const navigationEntry = performance.getEntriesByType('navigation').at(-1) as
+    | PerformanceNavigationTiming
+    | undefined;
+  const safeTarget = sanitizeOysterunNavigationDiagnosticTarget(detail.target);
+  const safeCurrentLocation = sanitizeOysterunNavigationDiagnosticTarget(window.location.href);
+  const safeCurrentUrl = safeCurrentLocation
+    ? new URL(safeCurrentLocation, window.location.origin)
+    : null;
+  const safeDetail = { ...detail };
+  delete safeDetail.target;
+  void hostJson<{ status: string }>(ROUTEC_CLIENT_AUTH_LOSS_DIAGNOSTIC_PATH, {
+    method: 'POST',
+    keepalive: true,
+    body: JSON.stringify({
+      event: 'routec_navigation_history_stage',
+      stage,
+      pathname: safeCurrentUrl?.pathname ?? window.location.pathname,
+      search: safeCurrentUrl?.search ?? '',
+      visibility_state: document.visibilityState,
+      capacitor_ios_runtime: isOysterunCapacitorIOSRuntime(),
+      history_length: window.history.length,
+      navigation_type: navigationEntry?.type ?? null,
+      target: safeTarget,
+      ...safeDetail,
+      raw_secret_material_exposed: false,
+    }),
+  }).catch(() => {});
+}
+
 export async function recordOysterunRouteCClientAuthLossDiagnostic({
   session,
   trigger,
@@ -2600,7 +2732,7 @@ export async function recordOysterunRouteCClientAuthLossDiagnostic({
   let fallbackTokenHash: string | null = null;
   try {
     fallbackTokenHash = await sha256HexForOysterunDiagnostic(
-      window.localStorage.getItem('cinny_access_token') ?? undefined
+      window.localStorage.getItem('cinny_access_token') ?? undefined,
     );
   } catch {
     fallbackTokenHash = null;
@@ -2704,7 +2836,7 @@ function isOysterunRecord(value: unknown): value is Record<string, unknown> {
 function requiredStringField(
   record: Record<string, unknown>,
   field: string,
-  context: string
+  context: string,
 ): string {
   const value = record[field];
   if (typeof value !== 'string' || !value.trim()) {
@@ -2716,7 +2848,7 @@ function requiredStringField(
 function optionalStringField(
   record: Record<string, unknown>,
   field: string,
-  context: string
+  context: string,
 ): string | null {
   const value = record[field];
   if (value === undefined || value === null) return null;
@@ -2729,7 +2861,7 @@ function optionalStringField(
 function optionalBooleanField(
   record: Record<string, unknown>,
   field: string,
-  context: string
+  context: string,
 ): boolean | null {
   const value = record[field];
   if (value === undefined || value === null) return null;
@@ -2742,7 +2874,7 @@ function optionalBooleanField(
 function optionalFiniteNumberField(
   record: Record<string, unknown>,
   field: string,
-  context: string
+  context: string,
 ): number | null {
   const value = record[field];
   if (value === undefined || value === null) return null;
@@ -2769,7 +2901,7 @@ function readOysterunCancelSemanticHookContent(hook: Record<string, unknown>): {
 
 function buildOysterunCancelSemanticWriteBody(
   hook: Record<string, unknown>,
-  proof: OysterunHost2IntakeProof
+  proof: OysterunHost2IntakeProof,
 ): Record<string, unknown> {
   const endpointPath = requiredStringField(hook, 'endpoint_path', 'cancel semantic source hook');
   if (endpointPath !== HOST_SEMANTIC_EVENTS_PATH) {
@@ -2783,7 +2915,7 @@ function buildOysterunCancelSemanticWriteBody(
   }
   if (hook.direct_matrix_harness_write_used !== false) {
     throw new Error(
-      'Route C cancel semantic source hook must not use direct Matrix harness writes.'
+      'Route C cancel semantic source hook must not use direct Matrix harness writes.',
     );
   }
 
@@ -2791,26 +2923,26 @@ function buildOysterunCancelSemanticWriteBody(
   const semanticType = requiredStringField(hook, 'semantic_type', 'cancel semantic source hook');
   if (!OYSTERUN_CANCEL_SEMANTIC_TYPES.has(semanticType)) {
     throw new Error(
-      `Route C cancel semantic source hook has unsupported semantic_type: ${semanticType}`
+      `Route C cancel semantic source hook has unsupported semantic_type: ${semanticType}`,
     );
   }
 
   const payloadSemanticType = requiredStringField(
     payload,
     'semantic_type',
-    'cancel semantic payload'
+    'cancel semantic payload',
   );
   const canonicalSemanticType = canonicalOysterunControlSemanticType(semanticType);
   if (canonicalOysterunControlSemanticType(payloadSemanticType) !== canonicalSemanticType) {
     throw new Error(
-      `Route C cancel semantic hook type mismatch: hook=${semanticType} payload=${payloadSemanticType}`
+      `Route C cancel semantic hook type mismatch: hook=${semanticType} payload=${payloadSemanticType}`,
     );
   }
 
   const targetUserEventId = requiredStringField(
     hook,
     'target_event_id',
-    'cancel semantic source hook'
+    'cancel semantic source hook',
   );
   if (hook.target_event_id_kind !== 'server') {
     throw new Error('Route C cancel semantic source hook target_event_id_kind must be server.');
@@ -2821,19 +2953,19 @@ function buildOysterunCancelSemanticWriteBody(
     proof.source_user_event_id;
   if (proofTargetEventId && targetUserEventId !== proofTargetEventId) {
     throw new Error(
-      `Route C cancel semantic hook target mismatch: hook=${targetUserEventId} proof=${proofTargetEventId}`
+      `Route C cancel semantic hook target mismatch: hook=${targetUserEventId} proof=${proofTargetEventId}`,
     );
   }
 
   const payloadTargetUserEventId = requiredStringField(
     payload,
     'target_user_event_id',
-    'cancel semantic payload'
+    'cancel semantic payload',
   );
   const payloadTargetEventId = requiredStringField(
     payload,
     'target_event_id',
-    'cancel semantic payload'
+    'cancel semantic payload',
   );
   if (
     payloadTargetUserEventId !== targetUserEventId ||
@@ -2857,16 +2989,16 @@ function buildOysterunCancelSemanticWriteBody(
   const controlRequestId = requiredStringField(
     hook,
     'control_request_id',
-    'cancel semantic source hook'
+    'cancel semantic source hook',
   );
   const payloadControlRequestId = requiredStringField(
     payload,
     'control_request_id',
-    'cancel semantic payload'
+    'cancel semantic payload',
   );
   if (payloadControlRequestId !== controlRequestId) {
     throw new Error(
-      'Route C cancel semantic payload control_request_id does not match source hook.'
+      'Route C cancel semantic payload control_request_id does not match source hook.',
     );
   }
 
@@ -2874,14 +3006,14 @@ function buildOysterunCancelSemanticWriteBody(
   const sourceUserEventId = requiredStringField(
     payload,
     'source_user_event_id',
-    'cancel semantic payload'
+    'cancel semantic payload',
   );
 
   return {
     session_id: hostSessionId,
     semantic_type: canonicalSemanticType,
     category: canonicalOysterunControlSemanticType(
-      optionalStringField(payload, 'semantic_category', 'cancel semantic payload') ?? semanticType
+      optionalStringField(payload, 'semantic_category', 'cancel semantic payload') ?? semanticType,
     ),
     body: requiredStringField(content, 'body', 'cancel semantic Matrix content'),
     semantic_id: semanticId,
@@ -2896,7 +3028,7 @@ function buildOysterunCancelSemanticWriteBody(
     provider_turn_id_kind: optionalStringField(
       payload,
       'provider_turn_id_kind',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     semantic_contract: requiredStringField(payload, 'semantic_contract', 'cancel semantic payload'),
     cancel_outcome: optionalStringField(payload, 'cancel_outcome', 'cancel semantic payload'),
@@ -2911,45 +3043,45 @@ function buildOysterunCancelSemanticWriteBody(
     durable: true,
     replay_policy: canonicalSemanticType === 'control.request' ? 'latest_state_only' : 'always',
     control_outcome: canonicalOysterunControlOutcome(
-      optionalStringField(payload, 'control_outcome', 'cancel semantic payload')
+      optionalStringField(payload, 'control_outcome', 'cancel semantic payload'),
     ),
     outcome: canonicalOysterunControlOutcome(
-      optionalStringField(payload, 'outcome', 'cancel semantic payload')
+      optionalStringField(payload, 'outcome', 'cancel semantic payload'),
     ),
     agent_turn_started: optionalBooleanField(
       payload,
       'agent_turn_started',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     host2_intake_state: optionalStringField(
       payload,
       'host2_intake_state',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     provider_receives_canceled_user_event: optionalBooleanField(
       payload,
       'provider_receives_canceled_user_event',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     provider_started_for_target_event: optionalBooleanField(
       payload,
       'provider_started_for_target_event',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     same_event_both_canceled_and_started: optionalBooleanField(
       payload,
       'same_event_both_canceled_and_started',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     duplicate_user_row_count: optionalFiniteNumberField(
       payload,
       'duplicate_user_row_count',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     outbox_delivery_state: optionalStringField(
       payload,
       'outbox_delivery_state',
-      'cancel semantic payload'
+      'cancel semantic payload',
     ),
     ambiguous_state: optionalStringField(payload, 'ambiguous_state', 'cancel semantic payload'),
     direct_matrix_harness_write_used: false,
@@ -2958,7 +3090,7 @@ function buildOysterunCancelSemanticWriteBody(
 
 async function commitOysterunCancelSemanticSourceHook(
   hook: Record<string, unknown>,
-  proof: OysterunHost2IntakeProof
+  proof: OysterunHost2IntakeProof,
 ): Promise<OysterunCancelSemanticCommitProof> {
   const body = buildOysterunCancelSemanticWriteBody(hook, proof);
   const response = await hostJson<OysterunCancelSemanticCommitResponse>(HOST_SEMANTIC_EVENTS_PATH, {
@@ -2986,19 +3118,19 @@ async function commitOysterunCancelSemanticSourceHook(
     target_user_event_id: requiredStringField(
       body,
       'target_user_event_id',
-      'cancel semantic write body'
+      'cancel semantic write body',
     ),
     control_request_id: requiredStringField(
       body,
       'control_request_id',
-      'cancel semantic write body'
+      'cancel semantic write body',
     ),
     committed_by: response.committed_by,
   };
 }
 
 export async function commitOysterunCancelSemanticSourceHooks(
-  proof: OysterunHost2IntakeProof
+  proof: OysterunHost2IntakeProof,
 ): Promise<OysterunCancelSemanticCommitProof[]> {
   const requestHook = proof.cancel_request_semantic_event_source_hook;
   if (!isOysterunRecord(requestHook)) {
@@ -3249,7 +3381,7 @@ export async function runOysterunHostTerminalCommand({
           matrix_room_id: matrixRoomId,
           route: 'routec_single_bang_terminal_command',
         }),
-      }
+      },
     );
     if (response.status !== 'started') {
       throw new Error(`Route C terminal command returned unexpected status: ${response.status}`);
@@ -3270,12 +3402,12 @@ export async function runOysterunHostTerminalCommand({
       response.terminal_command_started_matrix_event_id.length === 0
     ) {
       throw new Error(
-        'Route C terminal command did not prove Matrix terminal.command.started durability.'
+        'Route C terminal command did not prove Matrix terminal.command.started durability.',
       );
     }
     if (response.terminal_command_result_matrix_event_required !== true) {
       throw new Error(
-        'Route C terminal command did not require terminal.command.result durability.'
+        'Route C terminal command did not require terminal.command.result durability.',
       );
     }
     if (
@@ -3298,7 +3430,7 @@ export async function runOysterunHostTerminalCommand({
     }
     if (response.host_db_transcript_product_truth !== false) {
       throw new Error(
-        'Route C terminal command response treated Host DB transcript as product truth.'
+        'Route C terminal command response treated Host DB transcript as product truth.',
       );
     }
     recordOysterunProof('terminalCommands', {
@@ -3577,7 +3709,7 @@ export async function respondOysterunProviderControl({
         control_family: controlFamily ?? null,
         control_origin: controlOrigin ?? null,
       }),
-    }
+    },
   );
   if (response.status !== 'routec_provider_control_response_accepted') {
     throw new Error(`Route C provider control response was not accepted: ${response.status}`);
@@ -3596,7 +3728,7 @@ export async function respondOysterunProviderControl({
   }
   if (response.browser_local_state_final_truth !== false) {
     throw new Error(
-      'Route C provider control response violated browser-local final truth contract.'
+      'Route C provider control response violated browser-local final truth contract.',
     );
   }
   if (response.direct_matrix_browser_write_used !== false) {
@@ -3612,7 +3744,7 @@ export function recordOysterunProviderControlProof(
     | 'click_requested'
     | 'host_response_accepted'
     | 'click_failed'
-    | 'matrix_outcome_visible'
+    | 'matrix_outcome_visible',
 ) {
   recordOysterunProof('providerControls', {
     stage,
@@ -3634,7 +3766,7 @@ export function recordOysterunProviderControlProof(
 
 export function recordOysterunCancelControlProof(
   proof: Record<string, unknown>,
-  stage: 'visible_before_click' | 'click_requested' | 'click_resolved' | 'click_failed'
+  stage: 'visible_before_click' | 'click_requested' | 'click_resolved' | 'click_failed',
 ) {
   recordOysterunProof('cancelControls', {
     stage,

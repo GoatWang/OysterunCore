@@ -152,6 +152,7 @@ export function RenderMessageContent({
       <OysterunSemanticRenderer
         content={semanticContent}
         fallbackBody={typeof semanticContent.body === 'string' ? semanticContent.body : ''}
+        sourceEventId={oysterunSourceEventId}
         formattedBody={
           typeof semanticContent.formatted_body === 'string'
             ? semanticContent.formatted_body

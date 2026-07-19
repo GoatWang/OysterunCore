@@ -15,7 +15,9 @@ const OYSTERUN_CRYPTO_STARTUP_MODE = 'non_e2ee_unencrypted_facade';
 const OYSTERUN_CAPACITOR_BOOTSTRAP_LOGOUT_URL = 'capacitor://localhost/index.html?logged_out=1';
 const ROUTEC_CRYPTO_STARTUP_STATIC_PROOF =
   'oysterun_crypto_startup_mode=non_e2ee_unencrypted_facade;keys_upload_attempted=false;foundation_pass_claimed=false';
-const ROUTEC_INDEXEDDB_DB_NAME_PREFIX = 'oysterun-routec-web-sync-store';
+const ROUTEC_INDEXEDDB_CACHE_GENERATION = 'p025-v2';
+const ROUTEC_INDEXEDDB_DB_NAME_PREFIX =
+  `oysterun-routec-web-sync-store-${ROUTEC_INDEXEDDB_CACHE_GENERATION}`;
 const ROUTEC_LEGACY_GLOBAL_INDEXEDDB_DB_NAME = 'web-sync-store';
 const ROUTEC_INDEXEDDB_SCOPE_SEGMENT_MAX_LENGTH = 96;
 
@@ -85,6 +87,7 @@ export const initClient = async (
     oysterun_crypto_startup_mode: OYSTERUN_CRYPTO_STARTUP_MODE,
     routec_crypto_startup_static_proof: ROUTEC_CRYPTO_STARTUP_STATIC_PROOF,
     routec_indexeddb_store_db_name: routeCIndexedDBStoreDBName,
+    routec_indexeddb_cache_generation: ROUTEC_INDEXEDDB_CACHE_GENERATION,
     routec_indexeddb_store_scope: 'host_origin+matrix_user_id+host_session_id+matrix_room_id',
     routec_indexeddb_store_db_name_source: 'oysterun_host_scoped_bootstrap_binding',
     routec_legacy_global_indexeddb_db_name: ROUTEC_LEGACY_GLOBAL_INDEXEDDB_DB_NAME,

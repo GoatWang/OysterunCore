@@ -23,6 +23,9 @@ const P67_TOOL_OUTPUT_STRESS_TARGET_EMIT_MS = 16;
 const P67_TOOL_OUTPUT_STRESS_BACKPRESSURE_STEP_MS = 25;
 const P69_HYPERLINK_REGRESSION_SCENARIO_ID =
   "P69_HYPERLINK_REGRESSION_FIXTURE";
+const P017_LIVE_TAIL_SCENARIO_ID = "P017_LIVE_TAIL_3S";
+const P017_LIVE_TAIL_INTERVAL_MS = 3_000;
+const P017_LIVE_TAIL_MESSAGE_COUNT = 20;
 
 function normalizeMessagePayload(payload) {
   if (typeof payload === "string") {
@@ -516,6 +519,36 @@ function buildP69HyperlinkRegressionFixtureEvents({ agentId }) {
   ];
 }
 
+function buildP017LiveTailEvents() {
+  return Array.from({ length: P017_LIVE_TAIL_MESSAGE_COUNT }, (_, index) => {
+    const sequence = index + 1;
+    const ordinal = String(sequence).padStart(2, "0");
+    const heightVariant = sequence % 3;
+    const lines =
+      heightVariant === 0
+        ? Array.from(
+            { length: 10 },
+            (__, lineIndex) =>
+              `P017 live tail ${ordinal}.${String(lineIndex + 1).padStart(2, "0")} deterministic tall row`
+          )
+        : heightVariant === 2
+          ? [
+              `P017 live tail ${ordinal} deterministic medium row`,
+              "This row has stable extra height for bottom-follow geometry verification.",
+              "No tool event or pagination behavior is involved in this fixture.",
+            ]
+          : [`P017 live tail ${ordinal} deterministic short row`];
+    return textEvent(lines.join("\n"), {
+      p017_live_tail_fixture: true,
+      p017_live_tail_sequence: sequence,
+      p017_live_tail_total: P017_LIVE_TAIL_MESSAGE_COUNT,
+      p017_live_tail_interval_ms: P017_LIVE_TAIL_INTERVAL_MS,
+      p017_live_tail_height_variant:
+        heightVariant === 0 ? "tall" : heightVariant === 2 ? "medium" : "short",
+    });
+  });
+}
+
 function textEvent(text, extra = {}) {
   return {
     type: "message.assistant",
@@ -764,6 +797,13 @@ export class DebugFixtureProviderSession extends EventEmitter {
   buildEvents(payload, turnId) {
     const normalized = normalizeMessagePayload(payload);
     const trimmed = normalized.rawText.trim();
+    if (trimmed === P017_LIVE_TAIL_SCENARIO_ID) {
+      return withFixtureMetadata(
+        buildP017LiveTailEvents(),
+        P017_LIVE_TAIL_SCENARIO_ID,
+        turnId
+      );
+    }
     if (trimmed === P69_HYPERLINK_REGRESSION_SCENARIO_ID) {
       return withFixtureMetadata(
         buildP69HyperlinkRegressionFixtureEvents({ agentId: this.agentId }),
@@ -823,6 +863,14 @@ export class DebugFixtureProviderSession extends EventEmitter {
     );
   }
 
+  isP017LiveTailTurn(events) {
+    return events.some(
+      (event) =>
+        event?.p017_live_tail_fixture === true &&
+        event?.debug_fixture_pattern_id === P017_LIVE_TAIL_SCENARIO_ID
+    );
+  }
+
   isP64Pattern16StressTurn(events) {
     return events.some(
       (event) =>
@@ -863,6 +911,18 @@ export class DebugFixtureProviderSession extends EventEmitter {
     this.queueTimer(() => {
       this.emitTurnCompleted(turnId);
     }, this.delayMs * (events.length + 1));
+  }
+
+  queueP017LiveTailEvents(turnId, events) {
+    events.forEach((event, index) => {
+      this.queueTimer(() => {
+        this.emitTurnEvent(turnId, event);
+      }, P017_LIVE_TAIL_INTERVAL_MS * (index + 1));
+    });
+
+    this.queueTimer(() => {
+      this.emitTurnCompleted(turnId);
+    }, P017_LIVE_TAIL_INTERVAL_MS * (events.length + 1));
   }
 
   queueP64Pattern16StressEvents(turnId, events) {
@@ -951,7 +1011,9 @@ export class DebugFixtureProviderSession extends EventEmitter {
       });
     }, 10);
 
-    if (this.isP67ToolOutputStressTurn(events)) {
+    if (this.isP017LiveTailTurn(events)) {
+      this.queueP017LiveTailEvents(turnId, events);
+    } else if (this.isP67ToolOutputStressTurn(events)) {
       this.queueP67ToolOutputStressEvents(turnId, events);
     } else if (this.isP64Pattern16StressTurn(events)) {
       this.queueP64Pattern16StressEvents(turnId, events);

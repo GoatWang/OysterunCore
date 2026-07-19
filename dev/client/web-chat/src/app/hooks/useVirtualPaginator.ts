@@ -8,8 +8,6 @@ import {
 } from '../utils/dom';
 
 const PAGINATOR_ANCHOR_ATTR = 'data-paginator-anchor';
-const SUPPRESSED_PAGINATION_RETRY_DELAY_MS = 160;
-const SUPPRESSED_PAGINATION_RETRY_LIMIT = 6;
 
 export enum Direction {
   Backward = 'B',
@@ -46,6 +44,10 @@ export type ScrollToElement = (element: HTMLElement, opts?: ScrollToOptions) => 
  */
 export type ScrollToItem = (index: number, opts?: ScrollToOptions) => boolean;
 
+export type RemotePaginationEndResult = {
+  autoFill?: boolean;
+};
+
 type HandleObserveAnchor = (element: HTMLElement | null) => void;
 
 type VirtualPaginatorOptions<TScrollElement extends HTMLElement> = {
@@ -55,8 +57,8 @@ type VirtualPaginatorOptions<TScrollElement extends HTMLElement> = {
   onRangeChange: (range: ItemRange) => void;
   getScrollElement: () => TScrollElement | null;
   getItemElement: (index: number) => HTMLElement | undefined;
-  onEnd?: (back: boolean) => boolean | Promise<boolean> | void;
-  shouldSuppressPagination?: (back: boolean) => boolean | number;
+  onEnd?: (back: boolean) => void | Promise<RemotePaginationEndResult | void>;
+  remoteEndTransaction?: boolean;
 };
 
 type VirtualPaginator = {
@@ -65,7 +67,6 @@ type VirtualPaginator = {
   scrollToItem: ScrollToItem;
   observeBackAnchor: HandleObserveAnchor;
   observeFrontAnchor: HandleObserveAnchor;
-  retrySuppressedPagination: (back: boolean, resetAttempts?: boolean) => boolean;
 };
 
 const generateItems = (range: ItemRange) => {
@@ -137,7 +138,7 @@ const getRestoreAnchor = (
 
 const getRestoreScrollData = (scrollTop: number, restoreAnchorData: RestoreAnchorData) => {
   const [anchorItem, anchorElement] = restoreAnchorData;
-  if (anchorItem === undefined || !anchorElement) {
+  if (!anchorItem || !anchorElement) {
     return undefined;
   }
   return {
@@ -174,27 +175,18 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
     getScrollElement,
     getItemElement,
     onEnd,
-    shouldSuppressPagination,
+    remoteEndTransaction = false,
   } = options;
 
   const initialRenderRef = useRef(true);
+  const remoteEndPendingRef = useRef(false);
+  const paginateRef = useRef<(direction: Direction) => void>();
 
   const restoreScrollRef = useRef<{
     scrollTop: number;
     anchorOffsetTop: number;
     anchorItem: number;
   }>();
-  const remoteEndLockRef = useRef<Record<Direction, boolean>>({
-    [Direction.Backward]: false,
-    [Direction.Forward]: false,
-  });
-  const suppressedRetryRef = useRef<
-    Record<Direction, { pending: boolean; attempts: number; timer?: ReturnType<typeof setTimeout> }>
-  >({
-    [Direction.Backward]: { pending: false, attempts: 0 },
-    [Direction.Forward]: { pending: false, attempts: 0 },
-  });
-  const retrySuppressedPaginationRef = useRef<(back: boolean) => boolean>(() => false);
 
   const scrollToItemRef = useRef<{
     index: number;
@@ -221,48 +213,6 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
     const items = generateItems(range);
     return () => items;
   }, [range]);
-
-  const clearSuppressedRetryTimer = useCallback((direction: Direction) => {
-    const pending = suppressedRetryRef.current[direction];
-    if (pending.timer) {
-      clearTimeout(pending.timer);
-      pending.timer = undefined;
-    }
-  }, []);
-
-  const clearSuppressedRetry = useCallback(
-    (direction: Direction) => {
-      clearSuppressedRetryTimer(direction);
-      suppressedRetryRef.current[direction] = { pending: false, attempts: 0 };
-    },
-    [clearSuppressedRetryTimer]
-  );
-
-  const isPaginatorAnchorInView = useCallback(
-    (direction: Direction) => {
-      const scrollElement = getScrollElement();
-      if (!scrollElement) return false;
-      const anchor = scrollElement.querySelector(
-        `[${PAGINATOR_ANCHOR_ATTR}="${direction}"]`
-      ) as HTMLElement | null;
-      return Boolean(anchor && isIntersectingScrollView(scrollElement, anchor));
-    },
-    [getScrollElement]
-  );
-
-  const queueSuppressedRetry = useCallback(
-    (direction: Direction, delay = SUPPRESSED_PAGINATION_RETRY_DELAY_MS, resetAttempts = false) => {
-      const pending = suppressedRetryRef.current[direction];
-      pending.pending = true;
-      if (resetAttempts) pending.attempts = 0;
-      if (pending.timer) return;
-      pending.timer = setTimeout(() => {
-        pending.timer = undefined;
-        retrySuppressedPaginationRef.current(direction === Direction.Backward);
-      }, Math.max(delay, 0));
-    },
-    []
-  );
 
   const scrollToElement = useCallback<ScrollToElement>(
     (element, opts) => {
@@ -315,7 +265,7 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
       // find target or it's previous rendered element to scroll to
       const targetItems = generateItems({ start: currentRange.start, end: index + 1 });
       const targetItem = targetItems.reverse().find((i) => getItemElement(i) !== undefined);
-      const itemElement = targetItem !== undefined ? getItemElement(targetItem) : undefined;
+      const itemElement = targetItem && getItemElement(targetItem);
 
       if (!itemElement) {
         const scrollElement = getScrollElement();
@@ -332,15 +282,6 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
 
   const paginate = useCallback(
     (direction: Direction) => {
-      const suppression = shouldSuppressPagination?.(direction === Direction.Backward);
-      if (suppression) {
-        const delay =
-          typeof suppression === 'number'
-            ? Math.max(suppression, 0)
-            : SUPPRESSED_PAGINATION_RETRY_DELAY_MS;
-        queueSuppressedRetry(direction, delay);
-        return;
-      }
       const scrollEl = getScrollElement();
       const { range: currentRange, limit: currentLimit, count: currentCount } = propRef.current;
       let { start, end } = currentRange;
@@ -348,34 +289,20 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
       if (direction === Direction.Backward) {
         restoreScrollRef.current = undefined;
         if (start === 0) {
-          if (remoteEndLockRef.current[Direction.Backward]) {
-            queueSuppressedRetry(Direction.Backward);
-            return;
-          }
-          remoteEndLockRef.current[Direction.Backward] = true;
-          const onEndResult = onEnd?.(true);
-          if (!onEndResult) {
-            remoteEndLockRef.current[Direction.Backward] = false;
-            queueSuppressedRetry(Direction.Backward);
-          } else if (typeof (onEndResult as Promise<boolean>).then === 'function') {
-            Promise.resolve(onEndResult).then(
-              (started) => {
-                if (started !== false) {
-                  remoteEndLockRef.current[Direction.Backward] = false;
-                  clearSuppressedRetry(Direction.Backward);
-                  return;
-                }
-                remoteEndLockRef.current[Direction.Backward] = false;
-                queueSuppressedRetry(Direction.Backward);
+          if (remoteEndTransaction && remoteEndPendingRef.current) return;
+          const result = onEnd?.(true);
+          if (remoteEndTransaction && result) {
+            remoteEndPendingRef.current = true;
+            result.then(
+              (outcome) => {
+                remoteEndPendingRef.current = false;
+                if (!outcome?.autoFill) return;
+                window.requestAnimationFrame(() => paginateRef.current?.(Direction.Backward));
               },
               () => {
-                remoteEndLockRef.current[Direction.Backward] = false;
-                queueSuppressedRetry(Direction.Backward);
+                remoteEndPendingRef.current = false;
               }
             );
-          } else {
-            remoteEndLockRef.current[Direction.Backward] = false;
-            clearSuppressedRetry(Direction.Backward);
           }
           return;
         }
@@ -394,34 +321,20 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
       if (direction === Direction.Forward) {
         restoreScrollRef.current = undefined;
         if (end === currentCount) {
-          if (remoteEndLockRef.current[Direction.Forward]) {
-            queueSuppressedRetry(Direction.Forward);
-            return;
-          }
-          remoteEndLockRef.current[Direction.Forward] = true;
-          const onEndResult = onEnd?.(false);
-          if (!onEndResult) {
-            remoteEndLockRef.current[Direction.Forward] = false;
-            queueSuppressedRetry(Direction.Forward);
-          } else if (typeof (onEndResult as Promise<boolean>).then === 'function') {
-            Promise.resolve(onEndResult).then(
-              (started) => {
-                if (started !== false) {
-                  remoteEndLockRef.current[Direction.Forward] = false;
-                  clearSuppressedRetry(Direction.Forward);
-                  return;
-                }
-                remoteEndLockRef.current[Direction.Forward] = false;
-                queueSuppressedRetry(Direction.Forward);
+          if (remoteEndTransaction && remoteEndPendingRef.current) return;
+          const result = onEnd?.(false);
+          if (remoteEndTransaction && result) {
+            remoteEndPendingRef.current = true;
+            result.then(
+              (outcome) => {
+                remoteEndPendingRef.current = false;
+                if (!outcome?.autoFill) return;
+                window.requestAnimationFrame(() => paginateRef.current?.(Direction.Forward));
               },
               () => {
-                remoteEndLockRef.current[Direction.Forward] = false;
-                queueSuppressedRetry(Direction.Forward);
+                remoteEndPendingRef.current = false;
               }
             );
-          } else {
-            remoteEndLockRef.current[Direction.Forward] = false;
-            clearSuppressedRetry(Direction.Forward);
           }
           return;
         }
@@ -438,67 +351,28 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
         }
       }
 
-      clearSuppressedRetry(direction);
       onRangeChange({
         start,
         end,
       });
     },
-    [
-      clearSuppressedRetry,
-      getScrollElement,
-      getItemElement,
-      onEnd,
-      onRangeChange,
-      queueSuppressedRetry,
-      shouldSuppressPagination,
-    ]
+    [getScrollElement, getItemElement, onEnd, onRangeChange, remoteEndTransaction]
   );
-
-  const retrySuppressedPagination = useCallback(
-    (back: boolean, resetAttempts = false): boolean => {
-      const direction = back ? Direction.Backward : Direction.Forward;
-      const pending = suppressedRetryRef.current[direction];
-      if (!pending.pending) return false;
-      if (resetAttempts) pending.attempts = 0;
-      clearSuppressedRetryTimer(direction);
-      if (!isPaginatorAnchorInView(direction)) {
-        clearSuppressedRetry(direction);
-        return false;
-      }
-      if (pending.attempts >= SUPPRESSED_PAGINATION_RETRY_LIMIT) {
-        clearSuppressedRetry(direction);
-        return false;
-      }
-      pending.attempts += 1;
-      paginate(direction);
-      return true;
-    },
-    [clearSuppressedRetry, clearSuppressedRetryTimer, isPaginatorAnchorInView, paginate]
-  );
-  retrySuppressedPaginationRef.current = retrySuppressedPagination;
+  paginateRef.current = paginate;
 
   const handlePaginatorElIntersection: OnIntersectionCallback = useCallback(
     (entries) => {
       const anchorB = entries.find(
         (entry) => entry.target.getAttribute(PAGINATOR_ANCHOR_ATTR) === Direction.Backward
       );
-      if (anchorB) {
-        if (anchorB.isIntersecting) {
-          paginate(Direction.Backward);
-        } else {
-          remoteEndLockRef.current[Direction.Backward] = false;
-        }
+      if (anchorB?.isIntersecting) {
+        paginate(Direction.Backward);
       }
       const anchorF = entries.find(
         (entry) => entry.target.getAttribute(PAGINATOR_ANCHOR_ATTR) === Direction.Forward
       );
-      if (anchorF) {
-        if (anchorF.isIntersecting) {
-          paginate(Direction.Forward);
-        } else {
-          remoteEndLockRef.current[Direction.Forward] = false;
-        }
+      if (anchorF?.isIntersecting) {
+        paginate(Direction.Forward);
       }
     },
     [paginate]
@@ -573,38 +447,14 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
       `[${PAGINATOR_ANCHOR_ATTR}="${Direction.Forward}"]`
     ) as HTMLElement | null;
 
-    const backAnchorInView = Boolean(
-      backAnchor && isIntersectingScrollView(scrollElement, backAnchor)
-    );
-    const frontAnchorInView = Boolean(
-      frontAnchor && isIntersectingScrollView(scrollElement, frontAnchor)
-    );
-
-    if (!backAnchorInView) {
-      remoteEndLockRef.current[Direction.Backward] = false;
-      clearSuppressedRetry(Direction.Backward);
-    }
-    if (!frontAnchorInView) {
-      remoteEndLockRef.current[Direction.Forward] = false;
-      clearSuppressedRetry(Direction.Forward);
-    }
-
-    if (backAnchorInView) {
+    if (backAnchor && isIntersectingScrollView(scrollElement, backAnchor)) {
       paginate(Direction.Backward);
       return;
     }
-    if (frontAnchorInView) {
+    if (frontAnchor && isIntersectingScrollView(scrollElement, frontAnchor)) {
       paginate(Direction.Forward);
     }
-  }, [range, clearSuppressedRetry, getScrollElement, paginate]);
-
-  useEffect(
-    () => () => {
-      clearSuppressedRetryTimer(Direction.Backward);
-      clearSuppressedRetryTimer(Direction.Forward);
-    },
-    [clearSuppressedRetryTimer]
-  );
+  }, [range, getScrollElement, paginate]);
 
   return {
     getItems,
@@ -612,6 +462,5 @@ export const useVirtualPaginator = <TScrollElement extends HTMLElement>(
     scrollToElement,
     observeBackAnchor,
     observeFrontAnchor,
-    retrySuppressedPagination,
   };
 };

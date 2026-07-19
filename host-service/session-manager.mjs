@@ -17,6 +17,7 @@ import { CodexAppServerAdapter } from "./adapters/codex-app-server-adapter.mjs";
 import { DebugFixtureProviderAdapter } from "./adapters/debug-fixture-provider-adapter.mjs";
 import { DebugLargeToolSpilloverProviderAdapter } from "./adapters/debug-large-tool-spillover-provider-adapter.mjs";
 import { DebugP135CodexReplayProviderAdapter } from "./adapters/debug-p135-codex-replay-provider-adapter.mjs";
+import { DebugRouteCStructuralReplayProviderAdapter } from "./adapters/debug-routec-structural-replay-provider-adapter.mjs";
 import { readConfig } from "./config.mjs";
 import {
   createProviderUnavailableError,
@@ -671,6 +672,8 @@ function routeCRealProviderDeliveryMarker(providerId) {
     return "oysterun_debug_large_tool_spillover_host_provider_delivery_no_pass";
   if (providerId === "debug-p135-codex-replay")
     return "oysterun_debug_p135_codex_replay_host_provider_delivery_no_pass";
+  if (providerId === "debug-routec-structural-replay")
+    return "oysterun_debug_routec_structural_replay_host_provider_delivery_no_pass";
   return null;
 }
 
@@ -683,6 +686,8 @@ function routeCRealProviderSemanticContract(providerId) {
     return "debug_large_tool_spillover_semantic_contract";
   if (providerId === "debug-p135-codex-replay")
     return "debug_p135_codex_replay_semantic_contract";
+  if (providerId === "debug-routec-structural-replay")
+    return "debug_routec_structural_replay_semantic_contract";
   return null;
 }
 
@@ -733,6 +738,9 @@ export class SessionManager extends EventEmitter {
     const debugP135CodexReplayAdapter =
       options.debugP135CodexReplayAdapter ||
       new DebugP135CodexReplayProviderAdapter();
+    const debugRouteCStructuralReplayAdapter =
+      options.debugRouteCStructuralReplayAdapter ||
+      new DebugRouteCStructuralReplayProviderAdapter();
     this.adapters = new Map([
       [defaultAdapter.providerId, defaultAdapter],
       [codexAdapter.providerId, codexAdapter],
@@ -742,6 +750,10 @@ export class SessionManager extends EventEmitter {
         debugLargeToolSpilloverAdapter,
       ],
       [debugP135CodexReplayAdapter.providerId, debugP135CodexReplayAdapter],
+      [
+        debugRouteCStructuralReplayAdapter.providerId,
+        debugRouteCStructuralReplayAdapter,
+      ],
     ]);
     this.getCurrentConfig = getCurrentConfig;
     this.productSkillRoots = normalizeProductSkillRoots(options.productSkillRoots);
@@ -847,6 +859,8 @@ export class SessionManager extends EventEmitter {
     if (normalized === "codex") return "Codex";
     if (normalized === "debug-fixture") return "Fake";
     if (normalized === "debug-p135-codex-replay") return "P135 Codex Replay";
+    if (normalized === "debug-routec-structural-replay")
+      return "Route C Structural Replay";
     return normalized
       .split(/[-_\s]+/)
       .filter(Boolean)
@@ -4090,6 +4104,8 @@ export class SessionManager extends EventEmitter {
         providerId === "debug-large-tool-spillover",
       debug_p135_codex_replay_host_delivery:
         providerId === "debug-p135-codex-replay",
+      debug_routec_structural_replay_host_delivery:
+        providerId === "debug-routec-structural-replay",
       direct_matrix_harness_write_used: false,
       direct_host_send_used: false,
       real_codex_acceptance_claimed: false,

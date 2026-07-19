@@ -76,10 +76,9 @@ function getNotificationTitle(sessionName) {
   return normalized ? `Oysterun-${normalized}` : "Oysterun";
 }
 
-function buildNotificationTapRoute({ sessionId, matrixEventId }) {
+function buildNotificationTapRoute({ sessionId }) {
   const encodedSessionId = encodeURIComponent(sessionId);
-  const encodedEventId = encodeURIComponent(matrixEventId);
-  return `/app/sessions/${encodedSessionId}/chat?focus_event_id=${encodedEventId}`;
+  return `/app/sessions/${encodedSessionId}/chat`;
 }
 
 export function isCompleteMessageNotifiableSemanticType(semanticType) {
@@ -192,7 +191,7 @@ export function normalizeCommittedProviderOutputMatrixNotificationCandidate({
       notifiable_output_type: semanticType,
       title: getNotificationTitle(sessionName),
       body,
-      url: buildNotificationTapRoute({ sessionId, matrixEventId: eventId }),
+      url: buildNotificationTapRoute({ sessionId }),
     },
   };
 }

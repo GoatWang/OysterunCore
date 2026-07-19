@@ -1,9 +1,8 @@
 import React, {
-  Component,
-  ErrorInfo,
+  CompositionEventHandler,
+  FormEventHandler,
   KeyboardEventHandler,
   RefObject,
-  ReactNode,
   forwardRef,
   useCallback,
   useEffect,
@@ -17,7 +16,7 @@ import { EventType, MsgType, RelationType } from 'matrix-js-sdk/lib/@types/event
 import type { IContent } from 'matrix-js-sdk/lib/models/event';
 import type { Room } from 'matrix-js-sdk/lib/models/room';
 import { ReactEditor } from 'slate-react';
-import { Descendant, Editor, Transforms } from 'slate';
+import { BaseRange, Descendant, Editor, Transforms } from 'slate';
 import {
   Box,
   Dialog,
@@ -59,6 +58,12 @@ import {
   getBeginCommand,
   trimCommand,
   getMentions,
+  cleanupOysterunCompositionDeletion,
+  cloneOysterunSlateRange,
+  isOysterunAppleWebKitIME,
+  isOysterunSlateRangeValid,
+  protectOysterunCompositionDeletion,
+  reconcileOysterunCompositionSelection,
 } from '../../components/editor';
 import { EmojiBoard, EmojiBoardTab } from '../../components/emoji-board';
 import { UseStateProvider } from '../../components/UseStateProvider';
@@ -192,76 +197,7 @@ const OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_COMMAND = 'install_oysterun_skill';
 const OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_PREFIX = `/${OYSTERUN_ROUTE_C_LOCAL_SKILL_INSTALL_COMMAND}`;
 const OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_COMMAND = 'update_oysterun_skill';
 const OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_PREFIX = `/${OYSTERUN_ROUTE_C_LOCAL_SKILL_UPDATE_COMMAND}`;
-const OYSTERUN_P185_COMPOSER_IME_GUARD = 'p185-composer-ime-guard';
-const OYSTERUN_P185_COMPOSER_LOCAL_ERROR_BOUNDARY = 'p185-composer-local-error-boundary';
-const OYSTERUN_P185_COMPOSER_COMPOSITION_SETTLE_MS = 520;
-
-type RouteCComposerLocalErrorBoundaryProps = {
-  children: ReactNode;
-  recoveryKey: number;
-  onRecover: (error: unknown, info: ErrorInfo) => void;
-};
-
-type RouteCComposerLocalErrorBoundaryState = {
-  crashed: boolean;
-};
-
-function isRouteCComposerInvalidSelectionError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const details = `${error.name}\n${error.message}\n${error.stack ?? ''}`;
-  return details.includes('The object is in an invalid state') && details.includes('collapseToEnd');
-}
-
-class RouteCComposerLocalErrorBoundary extends Component<
-  RouteCComposerLocalErrorBoundaryProps,
-  RouteCComposerLocalErrorBoundaryState
-> {
-  state: RouteCComposerLocalErrorBoundaryState = {
-    crashed: false,
-  };
-
-  static getDerivedStateFromError(error: unknown): RouteCComposerLocalErrorBoundaryState {
-    if (!isRouteCComposerInvalidSelectionError(error)) throw error;
-    return {
-      crashed: true,
-    };
-  }
-
-  componentDidCatch(error: unknown, info: ErrorInfo): void {
-    if (isRouteCComposerInvalidSelectionError(error)) {
-      this.props.onRecover(error, info);
-    }
-  }
-
-  componentDidUpdate(prevProps: RouteCComposerLocalErrorBoundaryProps): void {
-    if (this.state.crashed && prevProps.recoveryKey !== this.props.recoveryKey) {
-      this.setState({
-        crashed: false,
-      });
-    }
-  }
-
-  render(): ReactNode {
-    if (this.state.crashed) {
-      return (
-        <Box
-          direction="Column"
-          gap="100"
-          style={{ padding: `${config.space.S200} ${config.space.S300} 0` }}
-          data-oysterun-routec-p185-composer-local-error-boundary={
-            OYSTERUN_P185_COMPOSER_LOCAL_ERROR_BOUNDARY
-          }
-          data-oysterun-routec-p185-composer-recovery-state="recovering"
-        >
-          <Text size="T200" priority="300" role="status" aria-live="polite">
-            Composer recovered. Continue typing.
-          </Text>
-        </Box>
-      );
-    }
-    return this.props.children;
-  }
-}
+const OYSTERUN_P020_COMPOSER_IME_TRANSACTION = 'p020-composer-cjk-ime-transaction';
 
 type RouteCLoopCliStatus = {
   state: 'pending' | 'created' | 'enabled_existing' | 'error';
@@ -694,8 +630,14 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
     const [routeCComposerPlainText, setRouteCComposerPlainText] = useState(() =>
       getOysterunComposerPlainText(editor.children, isMarkdown)
     );
-    const [routeCComposerRecoveryKey, setRouteCComposerRecoveryKey] = useState(0);
-    const routeCPostCompositionRefreshTimerRef = useRef<number>();
+    const routeCCompositionActiveRef = useRef(false);
+    const routeCPostCompositionFrameRef = useRef<number>();
+    const routeCCompositionProtectionNodeRef = useRef<globalThis.Text | null>(null);
+    const routeCLastValidSelectionRef = useRef<BaseRange | null>(
+      isOysterunSlateRangeValid(editor, editor.selection)
+        ? cloneOysterunSlateRange(editor.selection)
+        : null
+    );
 
     const sendTypingStatus = useTypingStatusUpdater(mx, roomId);
 
@@ -1211,15 +1153,19 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
     const handleEditorChange = useCallback(
       (value: Descendant[]) => {
         setRouteCComposerPlainText(getOysterunComposerPlainText(value, isMarkdown));
+        if (isOysterunSlateRangeValid(editor, editor.selection)) {
+          routeCLastValidSelectionRef.current = cloneOysterunSlateRange(editor.selection);
+        }
       },
-      [isMarkdown]
+      [editor, isMarkdown]
     );
 
     const handleKeyDown: KeyboardEventHandler = useCallback(
       (evt) => {
+        if (routeCCompositionActiveRef.current || isComposing(evt)) return;
         if (
-          (isKeyHotkey('mod+enter', evt) || (submitWithBareEnter && isKeyHotkey('enter', evt))) &&
-          !isComposing(evt)
+          isKeyHotkey('mod+enter', evt) ||
+          (submitWithBareEnter && isKeyHotkey('enter', evt))
         ) {
           evt.preventDefault();
           void submit();
@@ -1249,25 +1195,84 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
       }
     }, [editor, routeCChatShell]);
 
-    const clearRouteCPostCompositionRefresh = useCallback(() => {
-      if (routeCPostCompositionRefreshTimerRef.current === undefined) return;
-      window.clearTimeout(routeCPostCompositionRefreshTimerRef.current);
-      routeCPostCompositionRefreshTimerRef.current = undefined;
+    const clearRouteCPostCompositionFrame = useCallback(() => {
+      if (routeCPostCompositionFrameRef.current === undefined) return;
+      window.cancelAnimationFrame(routeCPostCompositionFrameRef.current);
+      routeCPostCompositionFrameRef.current = undefined;
     }, []);
 
-    const scheduleRouteCPostCompositionRefresh = useCallback(() => {
-      clearRouteCPostCompositionRefresh();
-      routeCPostCompositionRefreshTimerRef.current = window.setTimeout(() => {
-        routeCPostCompositionRefreshTimerRef.current = undefined;
+    const clearRouteCCompositionProtection = useCallback(() => {
+      cleanupOysterunCompositionDeletion(routeCCompositionProtectionNodeRef.current);
+      routeCCompositionProtectionNodeRef.current = null;
+    }, []);
+
+    const scheduleRouteCPostCompositionReconciliation = useCallback(() => {
+      clearRouteCPostCompositionFrame();
+      routeCPostCompositionFrameRef.current = window.requestAnimationFrame(() => {
+        routeCPostCompositionFrameRef.current = undefined;
+        clearRouteCCompositionProtection();
+        if (routeCCompositionActiveRef.current) return;
+        reconcileOysterunCompositionSelection(editor, routeCLastValidSelectionRef.current);
+        if (isOysterunSlateRangeValid(editor, editor.selection)) {
+          routeCLastValidSelectionRef.current = cloneOysterunSlateRange(editor.selection);
+        }
+        if (!hideActivity) {
+          sendTypingStatus(!isEmptyEditor(editor));
+        }
         refreshAutocompleteQuery();
-      }, OYSTERUN_P185_COMPOSER_COMPOSITION_SETTLE_MS);
-    }, [clearRouteCPostCompositionRefresh, refreshAutocompleteQuery]);
+      });
+    }, [
+      clearRouteCCompositionProtection,
+      clearRouteCPostCompositionFrame,
+      editor,
+      hideActivity,
+      refreshAutocompleteQuery,
+      sendTypingStatus,
+    ]);
 
     useEffect(
       () => () => {
-        clearRouteCPostCompositionRefresh();
+        clearRouteCPostCompositionFrame();
+        clearRouteCCompositionProtection();
       },
-      [clearRouteCPostCompositionRefresh]
+      [clearRouteCCompositionProtection, clearRouteCPostCompositionFrame]
+    );
+
+    const handleCompositionStart: CompositionEventHandler<HTMLDivElement> = useCallback(() => {
+      routeCCompositionActiveRef.current = true;
+      clearRouteCPostCompositionFrame();
+      clearRouteCCompositionProtection();
+      if (isOysterunSlateRangeValid(editor, editor.selection)) {
+        routeCLastValidSelectionRef.current = cloneOysterunSlateRange(editor.selection);
+      }
+      setAutocompleteQuery(undefined);
+      setRouteCAtMode('path');
+    }, [clearRouteCCompositionProtection, clearRouteCPostCompositionFrame, editor]);
+
+    const handleCompositionUpdate: CompositionEventHandler<HTMLDivElement> = useCallback(() => {
+      routeCCompositionActiveRef.current = true;
+    }, []);
+
+    const handleCompositionEnd: CompositionEventHandler<HTMLDivElement> = useCallback(() => {
+      routeCCompositionActiveRef.current = false;
+      scheduleRouteCPostCompositionReconciliation();
+    }, [scheduleRouteCPostCompositionReconciliation]);
+
+    const handleDOMBeforeInput = useCallback(
+      (evt: InputEvent) => {
+        if (!isOysterunAppleWebKitIME()) return;
+        clearRouteCCompositionProtection();
+        routeCCompositionProtectionNodeRef.current = protectOysterunCompositionDeletion(evt);
+      },
+      [clearRouteCCompositionProtection]
+    );
+
+    const handleInput: FormEventHandler<HTMLDivElement> = useCallback(
+      (evt) => {
+        const { inputType } = evt.nativeEvent as InputEvent;
+        if (inputType === 'deleteCompositionText') clearRouteCCompositionProtection();
+      },
+      [clearRouteCCompositionProtection]
     );
 
     const handleKeyUp: KeyboardEventHandler = useCallback(
@@ -1277,14 +1282,7 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
           return;
         }
 
-        if (isComposing(evt)) {
-          setAutocompleteQuery(undefined);
-          setRouteCAtMode('path');
-          scheduleRouteCPostCompositionRefresh();
-          return;
-        }
-
-        clearRouteCPostCompositionRefresh();
+        if (routeCCompositionActiveRef.current || isComposing(evt)) return;
 
         if (!hideActivity) {
           sendTypingStatus(!isEmptyEditor(editor));
@@ -1292,15 +1290,7 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
 
         refreshAutocompleteQuery();
       },
-      [
-        clearRouteCPostCompositionRefresh,
-        editor,
-        hideActivity,
-        isComposing,
-        refreshAutocompleteQuery,
-        scheduleRouteCPostCompositionRefresh,
-        sendTypingStatus,
-      ]
+      [editor, hideActivity, isComposing, refreshAutocompleteQuery, sendTypingStatus]
     );
 
     const handleCloseAutocomplete = useCallback(() => {
@@ -1308,16 +1298,6 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
       setRouteCAtMode('path');
       ReactEditor.focus(editor);
     }, [editor]);
-
-    const handleRouteCComposerRecover = useCallback((error: unknown, info: ErrorInfo) => {
-      setAutocompleteQuery(undefined);
-      setRouteCAtMode('path');
-      setRouteCComposerRecoveryKey((current) => current + 1);
-      console.warn('[oysterun-routec] recovered composer invalid selection', {
-        error,
-        componentStack: info.componentStack,
-      });
-    }, []);
 
     const handleRouteCMemberMode = useCallback(() => {
       setRouteCAtMode('member');
@@ -1357,21 +1337,16 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
         }
         data-oysterun-routec-insert-path-room-id={routeCChatShell ? roomId : undefined}
         data-oysterun-clean-session-insert-path-room-id={routeCChatShell ? roomId : undefined}
-        data-oysterun-routec-p185-composer-ime-guard={
-          routeCChatShell ? OYSTERUN_P185_COMPOSER_IME_GUARD : undefined
+        data-oysterun-routec-p020-composer-ime-transaction={
+          routeCChatShell ? OYSTERUN_P020_COMPOSER_IME_TRANSACTION : undefined
         }
       >
-        <RouteCComposerLocalErrorBoundary
-          recoveryKey={routeCComposerRecoveryKey}
-          onRecover={handleRouteCComposerRecover}
+        <div
+          data-oysterun-routec-p020-composer-stable-identity={
+            routeCChatShell ? 'stable-editor-without-remount-key' : undefined
+          }
         >
-          <div
-            key={routeCComposerRecoveryKey}
-            data-oysterun-routec-p185-composer-local-error-boundary={
-              routeCChatShell ? OYSTERUN_P185_COMPOSER_LOCAL_ERROR_BOUNDARY : undefined
-            }
-          >
-            {selectedFiles.length > 0 && (
+          {selectedFiles.length > 0 && (
               <UploadBoard
                 header={
                   <UploadBoardHeader
@@ -1521,6 +1496,11 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
               placeholder="Send a message..."
               onKeyDown={handleKeyDown}
               onKeyUp={handleKeyUp}
+              onCompositionStart={handleCompositionStart}
+              onCompositionUpdate={handleCompositionUpdate}
+              onCompositionEnd={handleCompositionEnd}
+              onDOMBeforeInput={handleDOMBeforeInput}
+              onInput={handleInput}
               onChange={handleEditorChange}
               onPaste={handlePaste}
               top={
@@ -1870,7 +1850,6 @@ export const RoomInput = forwardRef<HTMLDivElement, RoomInputProps>(
               }
             />
           </div>
-        </RouteCComposerLocalErrorBoundary>
       </div>
     );
   }

@@ -6,4 +6,5 @@ export * from './keyboard';
 export * from './output';
 export * from './Toolbar';
 export * from './input';
+export * from './ime';
 export * from './types';

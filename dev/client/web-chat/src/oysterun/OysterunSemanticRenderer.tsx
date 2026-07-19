@@ -1,4 +1,4 @@
-import React, { CSSProperties, ReactNode, useEffect, useState } from 'react';
+import React, { CSSProperties, ReactNode, useEffect, useRef, useState } from 'react';
 import { Box, Button, Text, config } from 'folds';
 
 import {
@@ -17,6 +17,7 @@ export const OYSTERUN_SEMANTIC_NAMESPACE = 'org.oysterun.semantic.v1';
 export const OYSTERUN_PROVIDER_COMPLETION_MARKER =
   'oysterun_provider_complete_message_notification_v1';
 export const OYSTERUN_PROVIDER_COMPLETION_PENDING_STATE = 'pending_turn_completion';
+export const OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE = 'sqlite_continuation_v1';
 
 const OYSTERUN_PROVIDER_COMPLETION_TERMINAL_STATES = new Set([
   'turn_completed',
@@ -123,6 +124,7 @@ export type OysterunSemanticPayload = {
   consecutive_run_index?: number | null;
   matrix_retained_tool_event_count?: number | null;
   tool_event_count_label?: string;
+  tool_storage_generation?: string;
   detail_available?: boolean;
   tool_detail_available?: boolean;
   tool_detail_storage_kind?: string;
@@ -210,6 +212,7 @@ export type OysterunToolCompressionDetail = {
   matrixEventSenderActorKind?: string;
   detailAvailable?: boolean;
   detailStorageKind?: string;
+  toolStorageGeneration?: string;
   toolTransferProjection?: unknown;
   ts?: number;
 };
@@ -523,14 +526,17 @@ function buildToolDetailFromPayload({
   semanticType,
   payload,
   fallbackBody,
+  sourceEventId,
 }: {
   semanticType: string;
   payload: OysterunSemanticPayload;
   fallbackBody: string;
+  sourceEventId?: string;
 }): OysterunToolCompressionDetail {
   const fallbackPayload =
     fallbackBody.trim() && fallbackBody.trim() !== semanticType ? fallbackBody : undefined;
   return {
+    eventId: sourceEventId,
     semanticId: typeof payload.semantic_id === 'string' ? payload.semantic_id : undefined,
     semanticType,
     hostSessionId: payload.host_session_id,
@@ -553,6 +559,10 @@ function buildToolDetailFromPayload({
     detailStorageKind:
       typeof payload.tool_detail_storage_kind === 'string'
         ? payload.tool_detail_storage_kind
+        : undefined,
+    toolStorageGeneration:
+      typeof payload.tool_storage_generation === 'string'
+        ? payload.tool_storage_generation
         : undefined,
     toolTransferProjection: payload.tool_transfer_projection,
   };
@@ -588,6 +598,10 @@ function OysterunToolDetailView({
     retainedMatrixDetails,
   });
   const retainedIdentity = lazyDetailFetchIdentity.detail;
+  const retainedHostSessionId = retainedIdentity?.hostSessionId ?? '';
+  const retainedMatrixRoomId = retainedIdentity?.matrixRoomId ?? '';
+  const retainedMatrixEventId = retainedIdentity?.eventId ?? '';
+  const retainedToolStorageGeneration = retainedIdentity?.toolStorageGeneration ?? '';
   const [toolEventDetailPage, setToolEventDetailPage] = useState(1);
   const [knownToolEventDetailPageCount, setKnownToolEventDetailPageCount] = useState(1);
   const [toolEventDetail, setToolEventDetail] = useState<OysterunToolEventDetailResponse | null>(
@@ -596,30 +610,88 @@ function OysterunToolDetailView({
   const [toolEventDetailLoading, setToolEventDetailLoading] = useState(false);
   const [toolEventDetailError, setToolEventDetailError] = useState('');
   const canLoadToolEventDetail = Boolean(
-    retainedIdentity?.hostSessionId &&
-      retainedIdentity.matrixRoomId &&
-      retainedIdentity.eventId
+    retainedHostSessionId &&
+      retainedMatrixRoomId &&
+      retainedMatrixEventId &&
+      retainedToolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE
+  );
+  const toolEventDetailRequestKey = canLoadToolEventDetail
+    ? JSON.stringify([
+        retainedHostSessionId,
+        retainedMatrixRoomId,
+        retainedMatrixEventId,
+        retainedToolStorageGeneration,
+        toolEventDetailPage,
+      ])
+    : '';
+  const activeToolEventDetailRequestKeyRef = useRef('');
+  const toolEventDetailResponseCacheRef = useRef(
+    new Map<string, OysterunToolEventDetailResponse>()
+  );
+  const toolEventDetailRequestCacheRef = useRef(
+    new Map<string, Promise<OysterunToolEventDetailResponse>>()
   );
 
   useEffect(() => {
     let canceled = false;
-    if (canLoadToolEventDetail && retainedIdentity) {
+    activeToolEventDetailRequestKeyRef.current = toolEventDetailRequestKey;
+    if (canLoadToolEventDetail) {
+      const cachedResponse = toolEventDetailResponseCacheRef.current.get(toolEventDetailRequestKey);
+      if (cachedResponse) {
+        setToolEventDetail(cachedResponse);
+        setKnownToolEventDetailPageCount(cachedResponse.page_count ?? 1);
+        setToolEventDetailError('');
+        setToolEventDetailLoading(false);
+        return () => {
+          canceled = true;
+        };
+      }
+
       setToolEventDetailLoading(true);
       setToolEventDetailError('');
-      getOysterunToolEventDetail({
-        sessionId: retainedIdentity.hostSessionId ?? '',
-        matrixRoomId: retainedIdentity.matrixRoomId ?? '',
-        matrixEventId: retainedIdentity.eventId ?? '',
-        page: toolEventDetailPage,
-      })
+      let request = toolEventDetailRequestCacheRef.current.get(toolEventDetailRequestKey);
+      if (!request) {
+        request = getOysterunToolEventDetail({
+          sessionId: retainedHostSessionId,
+          matrixRoomId: retainedMatrixRoomId,
+          matrixEventId: retainedMatrixEventId,
+          toolStorageGeneration: OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE,
+          page: toolEventDetailPage,
+        });
+        toolEventDetailRequestCacheRef.current.set(toolEventDetailRequestKey, request);
+        request.then(
+          () => {
+            if (toolEventDetailRequestCacheRef.current.get(toolEventDetailRequestKey) === request) {
+              toolEventDetailRequestCacheRef.current.delete(toolEventDetailRequestKey);
+            }
+          },
+          () => {
+            if (toolEventDetailRequestCacheRef.current.get(toolEventDetailRequestKey) === request) {
+              toolEventDetailRequestCacheRef.current.delete(toolEventDetailRequestKey);
+            }
+          }
+        );
+      }
+      request
         .then((response) => {
-          if (canceled) return;
+          toolEventDetailResponseCacheRef.current.set(toolEventDetailRequestKey, response);
+          if (
+            canceled ||
+            activeToolEventDetailRequestKeyRef.current !== toolEventDetailRequestKey
+          ) {
+            return;
+          }
           setToolEventDetail(response);
           setKnownToolEventDetailPageCount(response.page_count ?? 1);
           setToolEventDetailLoading(false);
         })
         .catch((err: unknown) => {
-          if (canceled) return;
+          if (
+            canceled ||
+            activeToolEventDetailRequestKeyRef.current !== toolEventDetailRequestKey
+          ) {
+            return;
+          }
           setToolEventDetailError(err instanceof Error ? err.message : String(err));
           setToolEventDetailLoading(false);
         });
@@ -632,7 +704,15 @@ function OysterunToolDetailView({
     return () => {
       canceled = true;
     };
-  }, [canLoadToolEventDetail, retainedIdentity, toolEventDetailPage]);
+  }, [
+    canLoadToolEventDetail,
+    retainedHostSessionId,
+    retainedMatrixRoomId,
+    retainedMatrixEventId,
+    retainedToolStorageGeneration,
+    toolEventDetailPage,
+    toolEventDetailRequestKey,
+  ]);
 
   const detailMatchesRequestedPage = toolEventDetail?.page === toolEventDetailPage;
   const invocations: OysterunToolLifecycleInvocation[] =
@@ -704,7 +784,8 @@ function OysterunToolDetailView({
       data-oysterun-p153-flat-page-size={String(OYSTERUN_ROUTE_C_TOOL_EXPANSION_EVENT_PAGE_SIZE)}
       data-oysterun-p153-flat-page-visible-count={String(retainedMatrixPageDetails.length)}
       data-oysterun-p153-flat-page-entry-source={p153FlatPageEntrySource}
-      data-oysterun-p153-jsonl-continuation-order="endpoint-response-order"
+      data-oysterun-p017-sqlite-continuation-order="endpoint-response-order"
+      data-oysterun-p017-tool-storage-generation={retainedIdentity?.toolStorageGeneration}
       data-oysterun-p153-p131-detail-row-scoped="true"
       data-oysterun-p153-p131-detail-replaces-flat-page="false"
       data-oysterun-tool-output-batch-index={compression?.batchIndex}
@@ -931,15 +1012,22 @@ function OysterunToolSemanticBox({
   semanticType,
   payload,
   fallbackBody,
+  sourceEventId,
   compression,
 }: {
   semanticType: string;
   payload: OysterunSemanticPayload;
   fallbackBody: string;
+  sourceEventId?: string;
   compression?: OysterunToolCompression;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
-  const currentDetail = buildToolDetailFromPayload({ semanticType, payload, fallbackBody });
+  const currentDetail = buildToolDetailFromPayload({
+    semanticType,
+    payload,
+    fallbackBody,
+    sourceEventId,
+  });
   const details = compression?.details.length ? compression.details : [currentDetail];
   const isToolOutputBatch = compression?.compressionKind === 'tool_output_batch';
   const isToolSemanticStreamPage = compression?.compressionKind === 'tool_semantic_stream_page';
@@ -967,8 +1055,17 @@ function OysterunToolSemanticBox({
   const totalCount = compression?.totalCount ?? details.length;
   const compressedCount = compression?.compressedCount ?? Math.max(0, totalCount - 1);
   const isCompressedGroup = isToolSemanticStreamPage || totalCount > 1 || compressedCount > 0;
+  const hasToolDetailFetchIdentity = Boolean(
+    primaryDetail.hostSessionId &&
+      primaryDetail.matrixRoomId &&
+      primaryDetail.eventId &&
+      primaryDetail.toolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE
+  );
   const hasDetailView =
-    isCompressedGroup || preview.clipped || primaryDetail.detailAvailable === true;
+    isCompressedGroup ||
+    preview.clipped ||
+    primaryDetail.detailAvailable === true ||
+    hasToolDetailFetchIdentity;
 
   return (
     <Box
@@ -1022,6 +1119,7 @@ function OysterunToolSemanticBox({
       }
       data-oysterun-tool-name={primaryDetail.toolName}
       data-oysterun-tool-call-id={primaryDetail.toolCallId}
+      data-oysterun-tool-storage-generation={primaryDetail.toolStorageGeneration}
       data-oysterun-tool-is-error={
         typeof primaryDetail.toolIsError === 'boolean'
           ? String(primaryDetail.toolIsError)
@@ -1287,6 +1385,7 @@ function requiredSemanticPayloadString(value: string | undefined, field: string)
 export function OysterunSemanticRenderer({
   content,
   fallbackBody,
+  sourceEventId,
   controlOutcome,
   formattedBody,
   renderBody,
@@ -1294,6 +1393,7 @@ export function OysterunSemanticRenderer({
 }: {
   content: unknown;
   fallbackBody: string;
+  sourceEventId?: string;
   controlOutcome?: OysterunSemanticControlOutcome;
   formattedBody?: string;
   renderBody?: OysterunSemanticBodyRenderer;
@@ -1715,6 +1815,7 @@ export function OysterunSemanticRenderer({
         semanticType={semanticType}
         payload={payload}
         fallbackBody={fallbackBody}
+        sourceEventId={sourceEventId}
         compression={toolCompression}
       />
     );

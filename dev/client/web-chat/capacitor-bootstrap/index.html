@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Oysterun</title>
+    <script src="./oysterun-capacitor-bootstrap-navigation.js"></script>
     <script src="./oysterun-capacitor-bootstrap-config.js"></script>
     <script src="./jsQR.js"></script>
     <style>
@@ -553,6 +554,16 @@
         const SAVED_RESTORE_CONNECTIVITY_RETRY_MS = 3000;
         const SAVED_RESTORE_CONNECTIVITY_MAX_RETRIES = 3;
         const DASHBOARD_TOKEN_VALIDATION_TIMEOUT_MS = 3000;
+        const COLD_START_PUSH_REPLAY_WINDOW_MS = 250;
+        const bootstrapNavigationFactory =
+          window.OysterunCapacitorBootstrapNavigation?.createNavigationCoordinator;
+        if (typeof bootstrapNavigationFactory !== 'function') {
+          throw new Error('Capacitor bootstrap navigation coordinator is unavailable.');
+        }
+        const bootstrapNavigation = bootstrapNavigationFactory({
+          dashboard_token_restore: 10,
+          push_route: 100,
+        });
         let scanStream = null;
         let scanTimer = null;
         let savedRestoreRetryTimer = null;
@@ -1391,7 +1402,23 @@
           }
         }
 
-        async function openAppWithStoredDashboardToken(origin, route, stage) {
+        function buildDashboardOpenResult(overrides = {}) {
+          return {
+            opened: false,
+            tokenPresent: false,
+            invalidAuth: false,
+            connectivityUnknown: false,
+            validationStatus: null,
+            superseded: false,
+            ...overrides,
+          };
+        }
+
+        function isDashboardNavigationClaimCurrent(navigationClaim) {
+          return !navigationClaim || bootstrapNavigation.isCurrent(navigationClaim);
+        }
+
+        async function openAppWithStoredDashboardToken(origin, route, stage, options = {}) {
           const normalizedOrigin = normalizeHostOrigin(origin);
           const token = await loadDashboardToken(normalizedOrigin);
           recordCapacitorBootstrapDiagnostic(normalizedOrigin, `${stage}_dashboard_token_loaded`, {
@@ -1399,13 +1426,7 @@
             native_auth_store_available: Boolean(getDashboardAuthStore()),
           });
           if (!token) {
-            return {
-              opened: false,
-              tokenPresent: false,
-              invalidAuth: false,
-              connectivityUnknown: false,
-              validationStatus: null,
-            };
+            return buildDashboardOpenResult();
           }
 
           const validation = await validateDashboardToken(normalizedOrigin, token);
@@ -1423,23 +1444,36 @@
             if (validation.invalidAuth) {
               await clearDashboardToken(normalizedOrigin);
             }
-            return {
-              opened: false,
+            return buildDashboardOpenResult({
               tokenPresent: true,
               invalidAuth: validation.invalidAuth,
               connectivityUnknown: !validation.invalidAuth,
               validationStatus: validation.status || null,
-            };
+            });
+          }
+
+          if (!isDashboardNavigationClaimCurrent(options.navigationClaim)) {
+            recordCapacitorBootstrapDiagnostic(
+              normalizedOrigin,
+              `${stage}_navigation_superseded`,
+              {
+                navigation_owner: options.navigationClaim?.owner || null,
+                winning_navigation_owner:
+                  bootstrapNavigation.getCurrent()?.owner || null,
+              }
+            );
+            return buildDashboardOpenResult({
+              tokenPresent: true,
+              validationStatus: validation.status || null,
+              superseded: true,
+            });
           }
 
           if (stage === 'dashboard_token_restore' && savedRestoreDecisionSurfaceOpen) {
-            return {
-              opened: false,
+            return buildDashboardOpenResult({
               tokenPresent: true,
-              invalidAuth: false,
-              connectivityUnknown: false,
               validationStatus: validation.status || null,
-            };
+            });
           }
 
           saveTarget(normalizedOrigin, validation.displayName);
@@ -1449,14 +1483,16 @@
             `${stage}_before_dashboard_navigation`,
             describeNavigationTarget(appUrl)
           );
-          window.location.assign(appUrl);
-          return {
+          if (options.replaceHistory === true) {
+            window.location.replace(appUrl);
+          } else {
+            window.location.assign(appUrl);
+          }
+          return buildDashboardOpenResult({
             opened: true,
             tokenPresent: true,
-            invalidAuth: false,
-            connectivityUnknown: false,
             validationStatus: validation.status || null,
-          };
+          });
         }
 
         function showConnectSurfaceForDashboardOpenDecision(result, opts = {}) {
@@ -1496,6 +1532,11 @@
 
         async function restoreSavedDashboardSession() {
           if (savedRestoreDecisionSurfaceOpen) return;
+          const navigationClaim = bootstrapNavigation.claim(
+            'dashboard_token_restore',
+            { route: config.startPath || '/app' }
+          );
+          if (!navigationClaim) return;
           const savedTarget = loadSavedTarget();
           let origin = '';
           try {
@@ -1523,8 +1564,10 @@
             const result = await openAppWithStoredDashboardToken(
               origin,
               config.startPath || '/app',
-              'dashboard_token_restore'
+              'dashboard_token_restore',
+              { navigationClaim }
             );
+            if (result.superseded) return;
             if (savedRestoreDecisionSurfaceOpen) return;
             if (result.opened) return;
             if (
@@ -1764,76 +1807,125 @@
           }
         }
 
+        async function handlePushTapRoute(event, navigationClaim) {
+          const data = event?.notification?.data || {};
+          const route =
+            typeof data.url === 'string'
+              ? data.url
+              : typeof data.oysterun_route === 'string'
+              ? data.oysterun_route
+              : '';
+          if (!route || !bootstrapNavigation.isCurrent(navigationClaim)) return;
+          clearSavedDashboardRestoreRetryTimer();
+          const saved = loadSavedTarget();
+          if (!saved?.direct_host_url) {
+            showConnectSurfaceForSavedRestoreDecision(
+              'no_saved_candidate',
+              'Host is not paired on this device.',
+              'error'
+            );
+            return;
+          }
+          if (route.startsWith('http://') || route.startsWith('https://')) {
+            try {
+              const parsed = new URL(route);
+              const savedOrigin = normalizeHostOrigin(saved.direct_host_url);
+              if (parsed.origin === savedOrigin && parsed.pathname.startsWith('/app')) {
+                try {
+                  const result = await openAppWithStoredDashboardToken(
+                    savedOrigin,
+                    `${parsed.pathname}${parsed.search}`,
+                    'push_route',
+                    { replaceHistory: true, navigationClaim }
+                  );
+                  if (result.superseded || result.opened) return;
+                  if (result.tokenPresent && result.connectivityUnknown) {
+                    setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
+                    return;
+                  }
+                  if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
+                } catch {
+                  // Fall through to the restore-decision prompt below.
+                }
+                showConnectSurfaceForPushRouteLoginDecision();
+                return;
+              }
+            } catch {
+              // Fall through to the platform URL policy below.
+            }
+            if (bootstrapNavigation.isCurrent(navigationClaim)) {
+              window.location.assign(route);
+            }
+            return;
+          }
+          if (route.startsWith('/app')) {
+            try {
+              const result = await openAppWithStoredDashboardToken(
+                saved.direct_host_url,
+                route,
+                'push_route',
+                { replaceHistory: true, navigationClaim }
+              );
+              if (result.superseded || result.opened) return;
+              if (result.tokenPresent && result.connectivityUnknown) {
+                setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
+                return;
+              }
+              if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
+            } catch {
+              // Fall through to the restore-decision prompt below.
+            }
+            showConnectSurfaceForPushRouteLoginDecision();
+          }
+        }
+
         function bindPushTapRouting() {
           const capacitor = window.Capacitor;
           const push = capacitor?.Plugins?.PushNotifications;
-          if (!push || typeof push.addListener !== 'function') return;
-          push.addListener('pushNotificationActionPerformed', async (event) => {
-            const data = event?.notification?.data || {};
-            const route =
-              typeof data.url === 'string'
+          if (!push || typeof push.addListener !== 'function') {
+            return Promise.resolve(false);
+          }
+
+          return new Promise((resolveInitialAction) => {
+            let initialActionSettled = false;
+            const settleInitialAction = (claimed) => {
+              if (initialActionSettled) return;
+              initialActionSettled = true;
+              resolveInitialAction(claimed);
+            };
+            const replayTimer = window.setTimeout(
+              () => settleInitialAction(false),
+              COLD_START_PUSH_REPLAY_WINDOW_MS
+            );
+
+            const listener = push.addListener('pushNotificationActionPerformed', (event) => {
+              const data = event?.notification?.data || {};
+              const route =
+                typeof data.url === 'string'
                 ? data.url
                 : typeof data.oysterun_route === 'string'
                 ? data.oysterun_route
                 : '';
-            if (!route) return;
-            const saved = loadSavedTarget();
-            if (!saved?.direct_host_url) {
-              showConnectSurfaceForSavedRestoreDecision(
-                'no_saved_candidate',
-                'Host is not paired on this device.',
-                'error'
-              );
-              return;
-            }
-            if (route.startsWith('http://') || route.startsWith('https://')) {
-              try {
-                const parsed = new URL(route);
-                const savedOrigin = normalizeHostOrigin(saved.direct_host_url);
-                if (parsed.origin === savedOrigin && parsed.pathname.startsWith('/app')) {
-                  try {
-                    const result = await openAppWithStoredDashboardToken(
-                      savedOrigin,
-                      `${parsed.pathname}${parsed.search}`,
-                      'push_route'
-                    );
-                    if (result.opened) return;
-                    if (result.tokenPresent && result.connectivityUnknown) {
-                      setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
-                      return;
-                    }
-                    if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
-                  } catch {
-                    // Fall through to the restore-decision prompt below.
-                  }
-                  showConnectSurfaceForPushRouteLoginDecision();
-                  return;
-                }
-              } catch {
-                // Fall through to the platform URL policy below.
-              }
-              window.location.assign(route);
-              return;
-            }
-            if (route.startsWith('/app')) {
-              try {
-                const result = await openAppWithStoredDashboardToken(
-                  saved.direct_host_url,
-                  route,
-                  'push_route'
-                );
-                if (result.opened) return;
-                if (result.tokenPresent && result.connectivityUnknown) {
-                  setStatus('Connection interrupted. Retry after the Host is reachable.', 'error');
-                  return;
-                }
-                if (showConnectSurfaceForPushRouteLoginDecision(result)) return;
-              } catch {
-                // Fall through to the restore-decision prompt below.
-              }
-              showConnectSurfaceForPushRouteLoginDecision();
-            }
+              if (!route) return;
+              const navigationClaim = bootstrapNavigation.claim('push_route', {
+                route,
+              });
+              if (!navigationClaim) return;
+              window.clearTimeout(replayTimer);
+              settleInitialAction(true);
+              void handlePushTapRoute(event, navigationClaim);
+            });
+            Promise.resolve(listener).catch(() => {
+              window.clearTimeout(replayTimer);
+              settleInitialAction(false);
+            });
           });
+        }
+
+        async function startCapacitorBootstrapNavigation() {
+          const initialPushActionClaimed = await bindPushTapRouting();
+          if (initialPushActionClaimed) return;
+          void restoreSavedDashboardSession();
         }
 
         document.getElementById('connect-form').addEventListener('submit', (event) => {
@@ -1869,8 +1961,7 @@
         hostInput.value = getInitialHostOrigin();
         updateHostGuidance();
         renderSavedHosts();
-        bindPushTapRouting();
-        void restoreSavedDashboardSession();
+        void startCapacitorBootstrapNavigation();
       })();
     </script>
   </body>

@@ -9,10 +9,12 @@
     "service:logs": "tool_scripts/oysterun_release_service.sh logs",
     "service:uninstall": "tool_scripts/oysterun_release_service.sh uninstall",
     "package:npm": "node tool_scripts/package_oysterun_npm.mjs",
-    "publish:beta:prepare": "node tool_scripts/prepare_oysterun_beta_publish.mjs"
+    "publish:beta:prepare": "node tool_scripts/prepare_oysterun_beta_publish.mjs",
+    "test:npm-artifact": "node tool_scripts/test_oysterun_npm_artifact.mjs",
+    "test:p018": "node host-service/test-p018-npm-native-install.mjs && npm run test:npm-artifact"
   },
   "dependencies": {
-    "better-sqlite3": "^12.8.0",
+    "better-sqlite3": "12.8.0",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.19.0"
   },

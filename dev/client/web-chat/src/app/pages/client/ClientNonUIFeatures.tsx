@@ -22,6 +22,7 @@ import {
   type OysterunCompleteMessageNotificationRelease,
 } from '../../../oysterun/OysterunCompleteMessageNotification';
 import {
+  bindOysterunIOSRemotePushNotificationActions,
   ensureOysterunIOSPushRegistered,
   isOysterunCapacitorIOSRuntime,
 } from '../../../oysterun/OysterunNotificationRuntime';
@@ -141,6 +142,7 @@ function OysterunCompleteMessageNotifications() {
   useEffect(() => {
     if (capacitorIOSRuntime) {
       void bindOysterunIOSLocalNotificationActions();
+      void bindOysterunIOSRemotePushNotificationActions();
       void ensureOysterunIOSPushRegistered();
     }
 

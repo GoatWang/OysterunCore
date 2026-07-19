@@ -10,9 +10,16 @@ import {
   RectCords,
   Text,
 } from 'folds';
-import { HttpApiEvent, HttpApiEventHandlerMap, MatrixClient } from 'matrix-js-sdk';
+import { HttpApiEvent, HttpApiEventHandlerMap, MatrixClient, Room, RoomEvent } from 'matrix-js-sdk';
 import FocusTrap from 'focus-trap-react';
-import React, { MouseEventHandler, ReactNode, useCallback, useEffect, useState } from 'react';
+import React, {
+  MouseEventHandler,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   clearCacheAndReload,
@@ -55,6 +62,7 @@ import {
 } from '../../../oysterun/OysterunHostClient';
 import { OysterunRecoveryPage } from '../../../oysterun/OysterunRecoveryPage';
 import { getHomeRoomPath, getHomeSearchPath } from '../pathUtils';
+import { isRouteCRoomEntryTimelineUsable } from './RouteCRoomEntry';
 
 type RouteCRoomEntryState =
   | 'bootstrap_pending'
@@ -100,7 +108,7 @@ const hasMatchingHostSessionRouteSearch = (routeSearch: string, currentSearch: s
 
 const buildRouteCHostSessionSearchWithHandoff = (
   routeSearch: string,
-  currentSearch: string,
+  currentSearch: string
 ): string => {
   const targetParams = new URLSearchParams(routeSearch);
   const currentParams = new URLSearchParams(currentSearch);
@@ -221,6 +229,42 @@ function ClientRootBootstrapError({
       }}
     />
   );
+}
+
+function RouteCRoomEntryTimelineBoundary({
+  enabled,
+  room,
+  children,
+}: {
+  enabled: boolean;
+  room: Room | undefined;
+  children: ReactNode;
+}) {
+  const liveTimelineRef = useRef(
+    enabled && room ? room.getUnfilteredTimelineSet().getLiveTimeline() : undefined
+  );
+  const [liveTimelineGeneration, setLiveTimelineGeneration] = useState(0);
+
+  useEffect(() => {
+    if (!enabled || !room) return undefined;
+    const syncLiveTimelineIdentity = () => {
+      const nextLiveTimeline = room.getUnfilteredTimelineSet().getLiveTimeline();
+      if (liveTimelineRef.current === nextLiveTimeline) return;
+      liveTimelineRef.current = nextLiveTimeline;
+      setLiveTimelineGeneration((generation) => generation + 1);
+    };
+
+    room.on(RoomEvent.TimelineReset, syncLiveTimelineIdentity);
+    room.on(RoomEvent.TimelineRefresh, syncLiveTimelineIdentity);
+    syncLiveTimelineIdentity();
+    return () => {
+      room.removeListener(RoomEvent.TimelineReset, syncLiveTimelineIdentity);
+      room.removeListener(RoomEvent.TimelineRefresh, syncLiveTimelineIdentity);
+    };
+  }, [enabled, room]);
+
+  const boundaryKey = enabled && room ? `${room.roomId}:${liveTimelineGeneration}` : 'generic';
+  return <React.Fragment key={boundaryKey}>{children}</React.Fragment>;
 }
 
 function ClientRootOptions({ mx }: { mx?: MatrixClient }) {
@@ -465,11 +509,11 @@ export function ClientRoot({ children }: ClientRootProps) {
       };
       setOysterunSession(session);
       return initClient(session, getOysterunRouteCMatrixCacheScope(bootstrap));
-    }, []),
+    }, [])
   );
   const mx = loadState.status === AsyncStatus.Success ? loadState.data : undefined;
   const [startState, startMatrix] = useAsyncCallback<void, Error, [MatrixClient]>(
-    useCallback((m) => startOysterunMatrixClient(m), []),
+    useCallback((m) => startOysterunMatrixClient(m), [])
   );
 
   const recoverMatrixClient = useCallback(
@@ -505,40 +549,43 @@ export function ClientRoot({ children }: ClientRootProps) {
       if (state === 'PREPARED') {
         setLoading(false);
       }
-    }, []),
+    }, [])
   );
 
   const boundMatrixRoom = mx && matrixRoomId ? mx.getRoom(matrixRoomId) : undefined;
+  const boundMatrixTimelineUsable = isRouteCRoomEntryTimelineUsable(boundMatrixRoom, matrixRoomId);
   const roomEntryReady = Boolean(
     mx &&
-    !loading &&
-    hostSessionId &&
-    matrixRoomId &&
-    boundMatrixRoom &&
-    roomEntryBinding.matrix_room_ready,
+      !loading &&
+      hostSessionId &&
+      matrixRoomId &&
+      boundMatrixRoom &&
+      roomEntryBinding.matrix_room_ready &&
+      boundMatrixTimelineUsable
   );
+  const routeCRoomEntryPending = Boolean(hostSessionId) && !roomEntryReady;
   const roomEntryState: RouteCRoomEntryState =
     loadState.status === AsyncStatus.Error || startState.status === AsyncStatus.Error
       ? 'matrix_client_error'
       : !matrixRoomId
-        ? 'bootstrap_pending'
-        : loading || !mx
-          ? 'matrix_client_prepared_pending'
-          : roomEntryReady
-            ? 'bound_room_ready'
-            : 'bound_room_missing_after_sync';
+      ? 'bootstrap_pending'
+      : loading || !mx
+      ? 'matrix_client_prepared_pending'
+      : roomEntryReady
+      ? 'bound_room_ready'
+      : 'bound_room_missing_after_sync';
   const bootstrapErrorState: RouteCBootstrapErrorState | undefined =
     loadState.status === AsyncStatus.Error
       ? 'host_scoped_bootstrap_failed'
       : startState.status === AsyncStatus.Error
-        ? 'matrix_client_start_failed'
-        : undefined;
+      ? 'matrix_client_start_failed'
+      : undefined;
   const bootstrapError =
     loadState.status === AsyncStatus.Error
       ? loadState.error
       : startState.status === AsyncStatus.Error
-        ? startState.error
-        : undefined;
+      ? startState.error
+      : undefined;
   const retryBootstrap = mx ? () => startMatrix(mx) : loadMatrix;
   const redirectingStaleCleanChat =
     Boolean(bootstrapError) &&
@@ -630,26 +677,31 @@ export function ClientRoot({ children }: ClientRootProps) {
               error={bootstrapError}
               onRetry={retryBootstrap}
             />
-          ) : loading || !mx ? (
+          ) : loading || !mx || routeCRoomEntryPending ? (
             <ClientRootLoading
               hostSessionId={hostSessionId}
               matrixRoomId={matrixRoomId}
               roomEntryState={roomEntryState}
             />
           ) : (
-            <MatrixClientProvider value={mx}>
-              <ServerConfigsLoader>
-                {(serverConfigs) => (
-                  <CapabilitiesProvider value={serverConfigs.capabilities ?? {}}>
-                    <MediaConfigProvider value={serverConfigs.mediaConfig ?? {}}>
-                      <AuthMetadataProvider value={serverConfigs.authMetadata}>
-                        {children}
-                      </AuthMetadataProvider>
-                    </MediaConfigProvider>
-                  </CapabilitiesProvider>
-                )}
-              </ServerConfigsLoader>
-            </MatrixClientProvider>
+            <RouteCRoomEntryTimelineBoundary
+              enabled={Boolean(hostSessionId)}
+              room={boundMatrixRoom}
+            >
+              <MatrixClientProvider value={mx}>
+                <ServerConfigsLoader>
+                  {(serverConfigs) => (
+                    <CapabilitiesProvider value={serverConfigs.capabilities ?? {}}>
+                      <MediaConfigProvider value={serverConfigs.mediaConfig ?? {}}>
+                        <AuthMetadataProvider value={serverConfigs.authMetadata}>
+                          {children}
+                        </AuthMetadataProvider>
+                      </MediaConfigProvider>
+                    </CapabilitiesProvider>
+                  )}
+                </ServerConfigsLoader>
+              </MatrixClientProvider>
+            </RouteCRoomEntryTimelineBoundary>
           )}
         </>
       </SpecVersions>

@@ -11,6 +11,7 @@ import {
   normalizeOysterunCompleteMessageNotificationCandidateInput,
   normalizeOysterunCompleteMessageNotificationReleaseInput,
 } from './OysterunCompleteMessageNotificationPredicate';
+import { recordOysterunRouteCNavigationDiagnostic } from './OysterunHostClient';
 
 export type OysterunCompleteMessageNotificationCandidate = {
   source: 'matrix_committed_event';
@@ -227,7 +228,12 @@ export async function bindOysterunIOSLocalNotificationActions(): Promise<void> {
     const extra = notification?.extra || {};
     const url = typeof extra.url === 'string' ? extra.url : '';
     if (url && url.startsWith('/app')) {
-      window.location.assign(url);
+      recordOysterunRouteCNavigationDiagnostic('notification_navigation', {
+        navigation_source: 'web_chat_capacitor_local_notification_action',
+        navigation_method: 'location_replace',
+        target: url,
+      });
+      window.location.replace(url);
     }
   });
 }

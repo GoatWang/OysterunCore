@@ -17,6 +17,7 @@ import App from './app/pages/App';
 import './app/i18n';
 import { pushSessionToSW } from './sw-session';
 import { getFallbackSession } from './app/state/sessions';
+import { recordOysterunRouteCNavigationDiagnostic } from './oysterun/OysterunHostClient';
 
 const ROUTEC_MATRIX_RECOVERY_EVENT = 'oysterun-routec-matrix-resume';
 const ROUTEC_MATRIX_RECOVERY_SW_MESSAGE = 'oysterunRouteCMatrixResume';
@@ -50,6 +51,12 @@ if ('serviceWorker' in navigator) {
       }
 
       if (type === ROUTEC_MATRIX_RECOVERY_SW_MESSAGE) {
+        recordOysterunRouteCNavigationDiagnostic('notification_navigation', {
+          navigation_source: 'web_chat_service_worker_notification_click',
+          navigation_method: 'service_worker_client_navigate',
+          target: typeof ev.data?.targetUrl === 'string' ? ev.data.targetUrl : '',
+          same_url_before_navigation: ev.data?.sameUrl === true,
+        });
         window.dispatchEvent(
           new CustomEvent(ROUTEC_MATRIX_RECOVERY_EVENT, {
             detail: {

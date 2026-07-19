@@ -149,11 +149,30 @@ import {
   writeUpdateOperationState,
 } from "./update-reminder-state.mjs";
 import {
+  OYSTERUN_UPDATE_CHANNEL_BETA,
+  classifyOysterunBetaVersion,
+  compareOysterunSemver,
+} from "./npm-update-policy.mjs";
+import {
+  createHostRestartHandoff,
+  getHostRestartHandoffDelayMs,
+} from "./host-restart-handoff.mjs";
+import {
+  activateHostRestartLoginGate,
+  buildHostRestartLoginGateStatus,
+  getHostRestartLoginGatePath,
+  releaseHostRestartLoginGate,
+} from "./host-restart-login-gate.mjs";
+import {
   appendHostRuntimeDiagnostic,
   readHostRuntimeMetadataStatus,
   serializeRuntimeError,
   writeHostRuntimeMetadata,
 } from "./host-runtime-diagnostics.mjs";
+import {
+  appendRouteCViewportGeometryDiagnostic,
+  areRouteCViewportGeometryDiagnosticsEnabled,
+} from "./routec-viewport-geometry-diagnostics.mjs";
 import { createRouteCMatrixFacade } from "./matrix-facade.mjs";
 import {
   createRouteCMatrixRoomBinding,
@@ -202,10 +221,8 @@ import {
 } from "./scheduler-setup-snapshot-contract.mjs";
 import {
   ROUTEC_LARGE_TOOL_EVENT_THRESHOLD,
-  ROUTEC_LARGE_TOOL_EVENT_COUNT_LABEL,
-  ROUTEC_LARGE_TOOL_JSONL_PAGE_SIZE,
-  ROUTEC_LARGE_TOOL_NOTICE_BODY,
-  ROUTEC_LARGE_TOOL_NOTICE_KIND,
+  ROUTEC_TOOL_CONTINUATION_PAGE_SIZE,
+  ROUTEC_TOOL_STORAGE_GENERATION_SQLITE,
   createLargeToolCallStore,
   shouldResetRouteCToolRunAfterSemanticWrite,
 } from "./large-tool-call-store.mjs";
@@ -216,7 +233,7 @@ import {
 import {
   ROUTEC_UNIFIED_TOOL_DETAIL_PAGE_SIZE,
   buildUnifiedToolLifecycleDetail,
-  normalizeJsonlToolPhysicalRecord,
+  normalizeContinuationToolPhysicalRecord,
   normalizeMatrixToolPhysicalRecord,
 } from "./unified-tool-lifecycle-detail.mjs";
 import { SchedulerRunner } from "./scheduler-runner.mjs";
@@ -3359,6 +3376,7 @@ const ROUTEC_P82_TOOL_SEMANTIC_TYPES = new Set([
 const routeCP82LargeToolRunStates = new Map();
 const routeCP82LargeToolRunIndexes = new Map();
 const routeCP82SemanticBridgeWriteChains = new Map();
+const ROUTEC_SEMANTIC_NAMESPACE = "org.oysterun.semantic.v1";
 
 function routeCSemanticBridgeSessionId(event) {
   return (
@@ -3474,8 +3492,7 @@ function routeCP82GetOrCreateToolRunState(event) {
       count: 0,
       retainedMatrixEventIds: [],
       largeToolRef: null,
-      noticeSent: false,
-      noticeMatrixEventId: null,
+      storageGeneration: largeToolCallStore.getWriteGeneration(),
     };
     routeCP82LargeToolRunStates.set(grouping.key, state);
   }
@@ -3484,7 +3501,22 @@ function routeCP82GetOrCreateToolRunState(event) {
 
 function routeCP82ResetToolRunState(event) {
   const grouping = routeCP82GroupingKeyForEvent(event);
-  routeCP82LargeToolRunStates.delete(grouping.key);
+  const sessionId = routeCSemanticBridgeSessionId(event);
+  const matrixRoomId = routeCSemanticBridgeRoomId(event);
+  const matchingEntries = [...routeCP82LargeToolRunStates.entries()].filter(
+    ([key, state]) =>
+      key === grouping.key ||
+      (sessionId &&
+        matrixRoomId &&
+        state.sessionId === sessionId &&
+        state.matrixRoomId === matrixRoomId)
+  );
+  for (const [key, state] of matchingEntries) {
+    if (state.largeToolRef) {
+      largeToolCallStore.closeToolRun({ largeToolRef: state.largeToolRef });
+    }
+    routeCP82LargeToolRunStates.delete(key);
+  }
 }
 
 function routeCP82ToolRunIdentity(state) {
@@ -3496,70 +3528,19 @@ function routeCP82ToolRunIdentity(state) {
     grouping_key: state.groupingKey,
     grouping_key_kind: state.groupingKeyKind,
     consecutive_run_index: state.consecutiveRunIndex,
+    storage_generation: state.storageGeneration,
   };
 }
 
-function routeCP82BuildNoticeEvent(sourceEvent, state) {
-  const delivery = sourceEvent.routec_matrix_delivery || {};
-  return {
-    ...sourceEvent,
-    type: "session.lifecycle",
-    semantic_type: "session_lifecycle",
-    semantic_body: ROUTEC_LARGE_TOOL_NOTICE_BODY,
-    body: ROUTEC_LARGE_TOOL_NOTICE_BODY,
-    display_text: ROUTEC_LARGE_TOOL_NOTICE_BODY,
-    provider: sourceEvent.provider || delivery.provider_id || null,
-    routec_matrix_delivery: {
-      ...delivery,
-      semantic_type: "session_lifecycle",
-      provider_runtime_event_index: null,
-      large_tool_notice: true,
-      large_tool_notice_kind: ROUTEC_LARGE_TOOL_NOTICE_KIND,
-      consecutive_run_index: state.consecutiveRunIndex,
-      matrix_retained_tool_event_count: ROUTEC_LARGE_TOOL_EVENT_THRESHOLD,
-      tool_event_count_label: ROUTEC_LARGE_TOOL_EVENT_COUNT_LABEL,
-      detail_available: true,
-      search_indexed: true,
-    },
-    large_tool_notice: true,
-    large_tool_notice_kind: ROUTEC_LARGE_TOOL_NOTICE_KIND,
-    consecutive_run_index: state.consecutiveRunIndex,
-    matrix_retained_tool_event_count: ROUTEC_LARGE_TOOL_EVENT_THRESHOLD,
-    tool_event_count_label: ROUTEC_LARGE_TOOL_EVENT_COUNT_LABEL,
-    detail_available: true,
-    search_indexed: true,
-    durable: true,
-    replay_policy: "always",
-  };
-}
-
-async function routeCP82WriteNoticeIfNeeded(sourceEvent, state) {
-  if (state.noticeSent) {
-    return {
-      status: "large_tool_notice_already_sent",
-      event_id: state.noticeMatrixEventId,
-    };
-  }
-  const result = await routeCMatrixFacade.writeProviderSemanticEventFromRuntime({
-    event: routeCP82BuildNoticeEvent(sourceEvent, state),
-  });
-  state.noticeSent = true;
-  state.noticeMatrixEventId = result?.event_id || null;
-  if (state.largeToolRef) {
-    largeToolCallStore.markNoticeSent({
-      sessionId: state.sessionId,
-      largeToolRef: state.largeToolRef,
-      noticeMatrixEventId: state.noticeMatrixEventId,
-    });
-  }
-  return result;
+function routeCP82SemanticMatrixEventCommitted(result) {
+  return (
+    result?.status === "provider_semantic_matrix_event_committed" &&
+    Boolean(result?.event_id)
+  );
 }
 
 function routeCP82NoteRetainedMatrixEvent(state, result) {
-  if (
-    result?.status === "provider_semantic_matrix_event_committed" &&
-    result?.event_id
-  ) {
+  if (routeCP82SemanticMatrixEventCommitted(result)) {
     state.retainedMatrixEventIds.push(result.event_id);
   }
 }
@@ -3585,41 +3566,51 @@ async function routeCP82WriteSemanticBridgeEvent(enrichedEvent) {
   const state = routeCP82GetOrCreateToolRunState(enrichedEvent);
   state.count += 1;
   if (state.count <= ROUTEC_LARGE_TOOL_EVENT_THRESHOLD) {
+    const retainedEvent = {
+      ...enrichedEvent,
+      tool_storage_generation: state.storageGeneration,
+      routec_matrix_delivery: {
+        ...(enrichedEvent.routec_matrix_delivery || {}),
+        tool_storage_generation: state.storageGeneration,
+      },
+    };
     const result = await routeCMatrixFacade.writeProviderSemanticEventFromRuntime({
-      event: enrichedEvent,
+      event: retainedEvent,
     });
     routeCP82NoteRetainedMatrixEvent(state, result);
+    if (routeCP82SemanticMatrixEventCommitted(result)) {
+      const run = largeToolCallStore.registerToolRun({
+        identity: routeCP82ToolRunIdentity(state),
+        firstRetainedMatrixEventId: result.event_id,
+        provider:
+          normalizeString(enrichedEvent?.provider) ||
+          normalizeString(enrichedEvent?.routec_matrix_delivery?.provider_id),
+      });
+      state.largeToolRef = run.large_tool_ref;
+    }
     return result;
   }
 
   const appendResult = largeToolCallStore.appendToolEvent({
     identity: routeCP82ToolRunIdentity(state),
-    retainedMatrixEventIds: state.retainedMatrixEventIds,
+    firstRetainedMatrixEventId: state.retainedMatrixEventIds[0],
     event: enrichedEvent,
     semanticType,
     toolEventIndex: state.count,
   });
   state.largeToolRef = appendResult.large_tool_ref || state.largeToolRef;
-  if (state.count === ROUTEC_LARGE_TOOL_EVENT_THRESHOLD + 1) {
-    const noticeResult = await routeCP82WriteNoticeIfNeeded(
-      enrichedEvent,
-      state
+  if (appendResult.appended === false) {
+    const storedToolEventCount = Number(
+      appendResult.index?.total_tool_event_count
     );
-    return {
-      status: "large_tool_event_spilled_with_matrix_notice",
-      semantic_matrix_event_committed: false,
-      spillover_jsonl_written: appendResult.appended === true,
-      notice_result: noticeResult,
-      large_tool_summary: appendResult.index,
-      matrix_large_ref_written: false,
-      matrix_large_tool_ref_written: false,
-      resolver_path_fields_exposed: false,
-    };
+    if (Number.isSafeInteger(storedToolEventCount) && storedToolEventCount >= 2) {
+      state.count = storedToolEventCount;
+    }
   }
   return {
-    status: "large_tool_event_spilled_to_jsonl_only",
+    status: "tool_event_continuation_stored_sqlite_only",
     semantic_matrix_event_committed: false,
-    spillover_jsonl_written: appendResult.appended === true,
+    continuation_sqlite_written: appendResult.appended === true,
     large_tool_summary: appendResult.index,
     matrix_large_ref_written: false,
     matrix_large_tool_ref_written: false,
@@ -6048,6 +6039,15 @@ function normalizeOysterunUpdateChannel() {
   return OYSTERUN_UPDATE_RELEASE_CHANNEL;
 }
 
+function isHostPreferencesBetaUpdateEnabled() {
+  return readConfig().debug_host_preferences_beta_update_enabled === true;
+}
+
+function assertHostPreferencesBetaUpdateEnabled() {
+  if (isHostPreferencesBetaUpdateEnabled()) return;
+  throw new Error("Host Preferences beta update is disabled on this Host.");
+}
+
 function normalizeOysterunUpdateSource(value, fallback = "manual") {
   const normalized = normalizeString(value || fallback);
   if (normalized === "automatic") return "automatic";
@@ -6055,31 +6055,6 @@ function normalizeOysterunUpdateSource(value, fallback = "manual") {
   if (normalized === "update_run") return "update_run";
   if (normalized === "status") return "status";
   return fallback;
-}
-
-function compareVersionStrings(a, b) {
-  const normalize = (value) =>
-    String(value || "")
-      .replace(/^v/, "")
-      .split(/[-+.]/)
-      .map((part) => {
-        const number = Number.parseInt(part, 10);
-        return Number.isNaN(number) ? part : number;
-      });
-  const left = normalize(a);
-  const right = normalize(b);
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const l = left[index] ?? 0;
-    const r = right[index] ?? 0;
-    if (typeof l === "number" && typeof r === "number" && l !== r) {
-      return l > r ? 1 : -1;
-    }
-    const ls = String(l);
-    const rs = String(r);
-    if (ls !== rs) return ls > rs ? 1 : -1;
-  }
-  return 0;
 }
 
 function resolveOysterunUpdateRegistry() {
@@ -6127,6 +6102,16 @@ function assertOysterunPackageUpdateSupported({ registry = null } = {}) {
 function buildOysterunPackageMetadataUrl(registryUrl) {
   const base = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
   return new URL(encodeURIComponent(OYSTERUN_NPM_PACKAGE_NAME), base).toString();
+}
+
+async function fetchOysterunNpmPackageMetadata(registry) {
+  const resp = await fetch(buildOysterunPackageMetadataUrl(registry.url), {
+    headers: { Accept: "application/json" },
+  });
+  if (!resp.ok) {
+    throw new Error(`npm registry returned HTTP ${resp.status}`);
+  }
+  return resp.json();
 }
 
 function buildUpdateLogPath(kind) {
@@ -6177,6 +6162,9 @@ function reconcileOysterunUpdateOperation(currentVersion) {
   const operation = readUpdateOperationState({ configDir: getConfigDir() });
   if (!operation.operation_id) return null;
   const targetVersion = normalizeString(operation.target_version);
+  const targetVersionComparison = targetVersion
+    ? compareOysterunSemver(currentVersion, targetVersion)
+    : null;
   const restartRestore = readHostRestartRestoreState({ configDir: getConfigDir() });
   const restartRestoreConsumed =
     operation.running === true &&
@@ -6188,7 +6176,8 @@ function reconcileOysterunUpdateOperation(currentVersion) {
   if (
     operation.running === true &&
     targetVersion &&
-    compareVersionStrings(currentVersion, targetVersion) >= 0
+    targetVersionComparison !== null &&
+    targetVersionComparison >= 0
   ) {
     return writeUpdateOperationState(
       {
@@ -6220,7 +6209,8 @@ function reconcileOysterunUpdateOperation(currentVersion) {
   if (
     operation.status === "update_complete" &&
     targetVersion &&
-    compareVersionStrings(currentVersion, targetVersion) < 0
+    targetVersionComparison !== null &&
+    targetVersionComparison < 0
   ) {
     return writeUpdateOperationState(
       {
@@ -6247,7 +6237,11 @@ function serializeOysterunUpdateOperation(operation) {
     running: operation.running === true,
     requested_at: operation.requested_at,
     updated_at: operation.updated_at,
+    handoff_started_at: operation.handoff_started_at,
+    execute_not_before: operation.execute_not_before,
+    handoff_seconds: operation.handoff_seconds,
     source: operation.source,
+    channel: operation.channel,
     target_version: operation.target_version,
     newest_version: operation.newest_version,
     registry_source: operation.registry_source,
@@ -6256,6 +6250,63 @@ function serializeOysterunUpdateOperation(operation) {
     final_observed_version: operation.final_observed_version,
     error: operation.error,
     error_redacted: operation.error_redacted === true,
+    log_path_returned: false,
+  };
+}
+
+function buildOysterunBetaUpdateStatusPayload(extra = {}) {
+  const currentVersion = readOysterunPackageVersion();
+  const betaVersion = normalizeString(extra.beta_version);
+  const classification = betaVersion
+    ? classifyOysterunBetaVersion({ currentVersion, betaVersion })
+    : { relation: "unknown", install_available: false };
+  const operation = reconcileOysterunUpdateOperation(currentVersion);
+  const updateSupported = isOysterunUpdateSupported();
+  return {
+    status: extra.status || "beta_update_status",
+    enabled: isHostPreferencesBetaUpdateEnabled(),
+    package_name: OYSTERUN_NPM_PACKAGE_NAME,
+    current_version: currentVersion,
+    channel: OYSTERUN_UPDATE_CHANNEL_BETA,
+    beta_version: betaVersion || null,
+    target_version: betaVersion || null,
+    relation: classification.relation,
+    install_available:
+      updateSupported && classification.install_available === true,
+    update_supported: updateSupported,
+    active_stack: getActiveStackName(),
+    source: normalizeOysterunUpdateSource(extra.source, "status"),
+    checked_at: extra.checked_at || null,
+    error: extra.error || null,
+    registry_source: extra.registry_source || null,
+    registry_override_active: extra.registry_override_active === true,
+    resolved_version: betaVersion || null,
+    handoff_started_at:
+      normalizeString(extra.handoff_started_at) ||
+      operation?.handoff_started_at ||
+      null,
+    execute_not_before:
+      normalizeString(extra.execute_not_before) ||
+      operation?.execute_not_before ||
+      null,
+    handoff_seconds:
+      Number.isInteger(extra.handoff_seconds)
+        ? extra.handoff_seconds
+        : operation?.handoff_seconds || null,
+    update_operation: serializeOysterunUpdateOperation(operation),
+    restart_restore:
+      extra.restart_restore && typeof extra.restart_restore === "object"
+        ? extra.restart_restore
+        : null,
+    operation_log:
+      extra.operation_log && typeof extra.operation_log === "object"
+        ? {
+            written: extra.operation_log.written === true,
+            path_returned: false,
+            redacted: true,
+          }
+        : null,
+    log_path: null,
     log_path_returned: false,
   };
 }
@@ -6270,7 +6321,7 @@ function buildOysterunUpdateStatusPayload(extra = {}) {
     getCachedNewestVersion(source);
   const operation = reconcileOysterunUpdateOperation(currentVersion);
   const updateAvailable = newestVersion
-    ? compareVersionStrings(newestVersion, currentVersion) > 0
+    ? compareOysterunSemver(newestVersion, currentVersion) === 1
     : false;
   const payload = {
     status: extra.status || "update_status",
@@ -6305,6 +6356,18 @@ function buildOysterunUpdateStatusPayload(extra = {}) {
     log_path_returned: false,
     resolved_version:
       normalizeString(extra.resolved_version || newestVersion) || null,
+    handoff_started_at:
+      normalizeString(extra.handoff_started_at) ||
+      operation?.handoff_started_at ||
+      null,
+    execute_not_before:
+      normalizeString(extra.execute_not_before) ||
+      operation?.execute_not_before ||
+      null,
+    handoff_seconds:
+      Number.isInteger(extra.handoff_seconds)
+        ? extra.handoff_seconds
+        : operation?.handoff_seconds || null,
     update_operation: serializeOysterunUpdateOperation(operation),
     restart_restore:
       extra.restart_restore && typeof extra.restart_restore === "object"
@@ -6350,13 +6413,7 @@ async function checkOysterunNpmUpdate({ source = "manual" } = {}) {
   const registry = resolveOysterunUpdateRegistry();
   let metadata;
   try {
-    const resp = await fetch(buildOysterunPackageMetadataUrl(registry.url), {
-      headers: { Accept: "application/json" },
-    });
-    if (!resp.ok) {
-      throw new Error(`npm registry returned HTTP ${resp.status}`);
-    }
-    metadata = await resp.json();
+    metadata = await fetchOysterunNpmPackageMetadata(registry);
   } catch (err) {
     if (resolvedSource === "automatic") {
       updateReminderState(
@@ -6420,7 +6477,8 @@ async function checkOysterunNpmUpdate({ source = "manual" } = {}) {
     throw distTagError;
   }
   const currentVersion = readOysterunPackageVersion();
-  const updateAvailable = compareVersionStrings(newestVersion, currentVersion) > 0;
+  const updateAvailable =
+    compareOysterunSemver(newestVersion, currentVersion) === 1;
   let shouldNotify = false;
   let noticedVersion = reminder.noticed_version;
   if (updateAvailable) {
@@ -6489,6 +6547,67 @@ async function checkOysterunNpmUpdate({ source = "manual" } = {}) {
   });
 }
 
+async function checkOysterunNpmBetaUpdate() {
+  assertHostPreferencesBetaUpdateEnabled();
+  const checkedAt = new Date().toISOString();
+  const registry = resolveOysterunUpdateRegistry();
+  let metadata;
+  try {
+    metadata = await fetchOysterunNpmPackageMetadata(registry);
+  } catch (err) {
+    const operationLog = writeOysterunUpdateOperationLog("beta-check-failed", {
+      requested_at: checkedAt,
+      source: "manual",
+      channel: OYSTERUN_UPDATE_CHANNEL_BETA,
+      current_version: readOysterunPackageVersion(),
+      error: err.message,
+    });
+    const error = new Error("Could not check the npm beta tag.");
+    error.updatePayload = buildOysterunBetaUpdateStatusPayload({
+      status: "beta_update_check_failed",
+      source: "manual",
+      checked_at: checkedAt,
+      error: error.message,
+      operation_log: operationLog,
+      registry_source: registry.source,
+      registry_override_active: registry.override_active,
+    });
+    throw error;
+  }
+
+  const betaVersion = normalizeString(
+    metadata?.["dist-tags"]?.[OYSTERUN_UPDATE_CHANNEL_BETA]
+  );
+  if (!betaVersion) {
+    throw new Error("npm dist-tag not found: beta");
+  }
+  const classification = classifyOysterunBetaVersion({
+    currentVersion: readOysterunPackageVersion(),
+    betaVersion,
+  });
+  if (classification.relation === "invalid") {
+    throw new Error("npm beta dist-tag must resolve to a valid prerelease version.");
+  }
+  const operationLog = writeOysterunUpdateOperationLog("beta-check", {
+    requested_at: checkedAt,
+    source: "manual",
+    channel: OYSTERUN_UPDATE_CHANNEL_BETA,
+    current_version: readOysterunPackageVersion(),
+    beta_version: betaVersion,
+    relation: classification.relation,
+    registry_source: registry.source,
+  });
+  return buildOysterunBetaUpdateStatusPayload({
+    status: "beta_update_check",
+    source: "manual",
+    beta_version: betaVersion,
+    checked_at: checkedAt,
+    operation_log: operationLog,
+    registry_source: registry.source,
+    registry_override_active: registry.override_active,
+  });
+}
+
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
@@ -6508,6 +6627,33 @@ function buildUpdateOperationStateShellCommand(statePatch) {
     "payload.updated_at = new Date().toISOString();",
     "fs.mkdirSync(path.dirname(statePath), { recursive: true });",
     "fs.writeFileSync(statePath, JSON.stringify(payload, null, 2) + '\\n', 'utf8');",
+  ].join(" ");
+  return `${shellQuote(process.execPath)} -e ${shellQuote(script)}`;
+}
+
+function buildHostRestartLoginGateReleaseShellCommand({ gateId, reason }) {
+  const gatePath = getHostRestartLoginGatePath(getConfigDir());
+  const normalizedGateId = normalizeString(gateId);
+  const normalizedReason = normalizeString(reason);
+  if (!normalizedGateId || !normalizedReason) {
+    throw new Error("restart login gate id and release reason are required");
+  }
+  const script = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    `const gatePath = ${JSON.stringify(gatePath)};`,
+    `const gateId = ${JSON.stringify(normalizedGateId)};`,
+    `const reason = ${JSON.stringify(normalizedReason)};`,
+    "if (!fs.existsSync(gatePath)) process.exit(0);",
+    "const gate = JSON.parse(fs.readFileSync(gatePath, 'utf8'));",
+    "if (gate.gate_id !== gateId || gate.state !== 'blocked') process.exit(0);",
+    "gate.state = 'released';",
+    "gate.released_at = new Date().toISOString();",
+    "gate.release_reason = reason;",
+    "fs.mkdirSync(path.dirname(gatePath), { recursive: true });",
+    "const temporary = gatePath + '.' + process.pid + '.' + Date.now() + '.tmp';",
+    "fs.writeFileSync(temporary, JSON.stringify(gate, null, 2) + '\\n', 'utf8');",
+    "fs.renameSync(temporary, gatePath);",
   ].join(" ");
   return `${shellQuote(process.execPath)} -e ${shellQuote(script)}`;
 }
@@ -6880,19 +7026,59 @@ function serializeProviderModelRefreshResult(result = {}) {
   };
 }
 
-async function scheduleOysterunPackageUpdate() {
+function assertNoOysterunUpdateOperationRunning() {
+  const operation = reconcileOysterunUpdateOperation(readOysterunPackageVersion());
+  if (operation?.running === true) {
+    throw new Error("An Oysterun update or restart operation is already running.");
+  }
+}
+
+function releaseHostRestartLoginGateSafely({ gateId, reason, source }) {
+  try {
+    return releaseHostRestartLoginGate({
+      configDir: getConfigDir(),
+      gateId,
+      reason,
+    });
+  } catch (error) {
+    console.error(
+      `[oysterun-host] ${source} restart login gate release failed: ${
+        error?.message || String(error)
+      }`
+    );
+    return { released: false, error: error?.message || String(error) };
+  }
+}
+
+async function scheduleOysterunPackageUpdate({
+  channel = OYSTERUN_UPDATE_RELEASE_CHANNEL,
+} = {}) {
+  const betaUpdate = channel === OYSTERUN_UPDATE_CHANNEL_BETA;
+  if (!betaUpdate && channel !== OYSTERUN_UPDATE_RELEASE_CHANNEL) {
+    throw new Error("Unsupported Oysterun update channel.");
+  }
+  if (betaUpdate) assertHostPreferencesBetaUpdateEnabled();
   const stackName = getActiveStackName();
-  const resolvedChannel = normalizeOysterunUpdateChannel();
+  const resolvedChannel = betaUpdate
+    ? OYSTERUN_UPDATE_CHANNEL_BETA
+    : normalizeOysterunUpdateChannel();
   const registry = resolveOysterunUpdateRegistry();
   assertOysterunPackageUpdateSupported({ registry });
-  const updateCheck = await checkOysterunNpmUpdate({
-    source: "update_run",
-  });
-  const exactVersion = normalizeString(updateCheck.newest_version);
+  assertNoOysterunUpdateOperationRunning();
+  const updateCheck = betaUpdate
+    ? await checkOysterunNpmBetaUpdate()
+    : await checkOysterunNpmUpdate({ source: "update_run" });
+  const exactVersion = normalizeString(
+    betaUpdate ? updateCheck.beta_version : updateCheck.newest_version
+  );
   if (!exactVersion) {
     throw new Error(`Could not resolve exact Oysterun package version for ${resolvedChannel}`);
   }
+  if (betaUpdate && updateCheck.install_available !== true) {
+    throw new Error("The npm beta version is not newer than the installed version.");
+  }
   const currentVersion = readOysterunPackageVersion();
+  const restartHandoff = createHostRestartHandoff();
   const restartRestore = prepareHostRestartRestore({
     trigger: "host_preferences_update_restart",
   });
@@ -6903,18 +7089,17 @@ async function scheduleOysterunPackageUpdate() {
     `oysterun-update-${new Date().toISOString().replace(/[:.]/g, "-")}.log`
   );
   const packageSpec = `${OYSTERUN_NPM_PACKAGE_NAME}@${exactVersion}`;
-  const registryArg = registry.override_active
-    ? ` --registry ${shellQuote(registry.url)}`
-    : "";
   const redactedInstallCommand = `npm install -g ${packageSpec} --prefer-online${
     registry.override_active ? " --registry [redacted-update-registry]" : ""
   }`;
   const operationState = writeUpdateOperationState(
     {
       status: "update_restart_scheduled",
-      phase: "Installing...",
+      phase: "Waiting to start...",
       running: true,
-      source: "manual",
+      ...restartHandoff,
+      source: betaUpdate ? "beta_manual" : "manual",
+      channel: resolvedChannel,
       current_version: currentVersion,
       target_version: exactVersion,
       newest_version: exactVersion,
@@ -6927,7 +7112,8 @@ async function scheduleOysterunPackageUpdate() {
   );
   const operationLog = writeOysterunUpdateOperationLog("update-restart", {
     requested_at: operationState.requested_at,
-    source: "manual",
+    source: betaUpdate ? "beta_manual" : "manual",
+    channel: resolvedChannel,
     current_version: currentVersion,
     newest_version: exactVersion,
     resolved_target_version: exactVersion,
@@ -6940,7 +7126,15 @@ async function scheduleOysterunPackageUpdate() {
     status: "install_failed",
     phase: "Install failed",
     running: false,
-    error: "npm install failed before restart.",
+    error:
+      "Package install, runtime validation, or active Host config compatibility validation failed before restart.",
+  });
+  const installingStateCommand = buildUpdateOperationStateShellCommand({
+    ...operationState,
+    status: "installing",
+    phase: "Installing...",
+    running: true,
+    error: null,
   });
   const restartPhaseStateCommand = buildUpdateOperationStateShellCommand({
     ...operationState,
@@ -6977,16 +7171,52 @@ async function scheduleOysterunPackageUpdate() {
   const restartClaimCommand = buildUpdateOperationRestartClaimShellCommand({
     operationId: operationState.operation_id,
   });
+  const updateInstallerCommand = [
+    shellQuote(restartCommand.nodeBin),
+    shellQuote(join(REPO_ROOT, "tool_scripts", "install_oysterun_update.mjs")),
+    "--package-spec",
+    shellQuote(packageSpec),
+    "--expected-version",
+    shellQuote(exactVersion),
+    "--active-package-root",
+    shellQuote(REPO_ROOT),
+    "--node-bin",
+    shellQuote(restartCommand.nodeBin),
+    "--config-dir",
+    shellQuote(getConfigDir()),
+    ...(registry.override_active
+      ? ["--registry", shellQuote(registry.url)]
+      : []),
+  ].join(" ");
+  const restartLoginGate = activateHostRestartLoginGate({
+    configDir: getConfigDir(),
+    restartId: operationState.restart_id,
+    operationId: operationState.operation_id,
+    mode: betaUpdate ? "beta" : "latest",
+    handoffStartedAt: restartHandoff.handoff_started_at,
+    executeNotBefore: restartHandoff.execute_not_before,
+  });
+  const installFailedGateReleaseCommand =
+    buildHostRestartLoginGateReleaseShellCommand({
+      gateId: restartLoginGate.gate_id,
+      reason: "update_install_failed_before_restart",
+    });
+  const restartFailedGateReleaseCommand =
+    buildHostRestartLoginGateReleaseShellCommand({
+      gateId: restartLoginGate.gate_id,
+      reason: "update_restart_runner_failed",
+    });
   const command = [
     "set -euo pipefail",
     'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"',
     `export OYSTERUN_NODE_BIN=${shellQuote(restartCommand.nodeBin)}`,
     `echo "[oysterun-update] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
-    `npm install -g ${shellQuote(packageSpec)} --prefer-online${registryArg} || { ${installFailedStateCommand}; exit 1; }`,
-    `echo "[oysterun-update] npm install complete $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
+    installingStateCommand,
+    `${updateInstallerCommand} || { ${installFailedStateCommand}; ${installFailedGateReleaseCommand}; exit 1; }`,
+    `echo "[oysterun-update] install and runtime validation complete $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
     restartPhaseStateCommand,
     `echo "[oysterun-update] one-shot restart runner claim $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
-    `if ${restartClaimCommand}; then echo "[oysterun-update] restart runner start $(date -u +%Y-%m-%dT%H:%M:%SZ)"; ${restartCommand.shellCommand} || { ${restartFailedStateCommand}; exit 1; }; else echo "[oysterun-update] restart runner skipped because operation was already claimed or completed $(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi`,
+    `if ${restartClaimCommand}; then echo "[oysterun-update] restart runner start $(date -u +%Y-%m-%dT%H:%M:%SZ)"; ${restartCommand.shellCommand} || { ${restartFailedStateCommand}; ${restartFailedGateReleaseCommand}; exit 1; }; else echo "[oysterun-update] restart runner skipped because operation was already claimed or completed $(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi`,
   ].join("\n");
   setTimeout(() => {
     const child = spawn("bash", ["-lc", `${command} >> ${shellQuote(logPath)} 2>&1`], {
@@ -7000,8 +7230,38 @@ async function scheduleOysterunPackageUpdate() {
       },
       stdio: "ignore",
     });
+    child.once("error", () => {
+      releaseHostRestartLoginGateSafely({
+        gateId: restartLoginGate.gate_id,
+        reason: "update_runner_spawn_failed",
+        source: "Update runner spawn failure",
+      });
+    });
+    child.once("exit", (code) => {
+      if (code === 0) return;
+      releaseHostRestartLoginGateSafely({
+        gateId: restartLoginGate.gate_id,
+        reason: "update_runner_exited_before_restart",
+        source: "Update runner exit",
+      });
+    });
     child.unref();
-  }, 500).unref();
+  }, getHostRestartHandoffDelayMs(restartHandoff.execute_not_before)).unref();
+  if (betaUpdate) {
+    return buildOysterunBetaUpdateStatusPayload({
+      status: "beta_update_scheduled",
+      source: "manual",
+      beta_version: exactVersion,
+      operation_log: operationLog,
+      registry_source: registry.source,
+      registry_override_active: registry.override_active,
+      restart_restore: restartRestore.restart_restore,
+      restart_login_gate: buildHostRestartLoginGateStatus({
+        configDir: getConfigDir(),
+      }),
+      ...restartHandoff,
+    });
+  }
   return buildOysterunUpdateStatusPayload({
     status: "update_scheduled",
     channel: resolvedChannel,
@@ -7011,11 +7271,26 @@ async function scheduleOysterunPackageUpdate() {
     registry_source: registry.source,
     registry_override_active: registry.override_active,
     restart_restore: restartRestore.restart_restore,
+    restart_login_gate: buildHostRestartLoginGateStatus({
+      configDir: getConfigDir(),
+    }),
+    ...restartHandoff,
   });
 }
 
-function scheduleHostRestart({ redirectUrl = null, restartRestore = null } = {}) {
+function scheduleHostRestart({
+  redirectUrl = null,
+  restartRestore = null,
+  restartHandoff = createHostRestartHandoff(),
+} = {}) {
   const { stackName, restartScript } = assertHostRestartSchedulingAvailable();
+  const restartLoginGate = activateHostRestartLoginGate({
+    configDir: getConfigDir(),
+    restartId: restartRestore?.restart_id,
+    mode: "restart",
+    handoffStartedAt: restartHandoff.handoff_started_at,
+    executeNotBefore: restartHandoff.execute_not_before,
+  });
   setTimeout(() => {
     const child = spawn(restartScript, ["--stack", stackName], {
       cwd: REPO_ROOT,
@@ -7026,13 +7301,32 @@ function scheduleHostRestart({ redirectUrl = null, restartRestore = null } = {})
       },
       stdio: "ignore",
     });
+    child.once("error", () => {
+      releaseHostRestartLoginGateSafely({
+        gateId: restartLoginGate.gate_id,
+        reason: "restart_runner_spawn_failed",
+        source: "Restart runner spawn failure",
+      });
+    });
+    child.once("exit", (code) => {
+      if (code === 0) return;
+      releaseHostRestartLoginGateSafely({
+        gateId: restartLoginGate.gate_id,
+        reason: "restart_runner_failed",
+        source: "Restart runner exit",
+      });
+    });
     child.unref();
-  }, 500).unref();
+  }, getHostRestartHandoffDelayMs(restartHandoff.execute_not_before)).unref();
   return {
     status: "restart_scheduled",
     stack_name: stackName,
     redirect_url: normalizeString(redirectUrl),
     restart_restore: restartRestore,
+    restart_login_gate: buildHostRestartLoginGateStatus({
+      configDir: getConfigDir(),
+    }),
+    ...restartHandoff,
   };
 }
 
@@ -7163,6 +7457,8 @@ function buildHostPreferencesPayload() {
     folder_access_settings_supported: supportsMacFolderAccessPermissions(),
     debug_host_preferences_full_disk_access_block_enabled:
       config.debug_host_preferences_full_disk_access_block_enabled === true,
+    debug_host_preferences_beta_update_enabled:
+      config.debug_host_preferences_beta_update_enabled === true,
     folder_access_settings_uri: supportsMacFolderAccessPermissions()
       ? FULL_DISK_ACCESS_SETTINGS_URI
       : null,
@@ -7671,7 +7967,11 @@ function readWritableAgentConfig(
   return parsed;
 }
 
-const ROUTEC_RESUMABLE_HISTORY_RUNTIMES = new Set(["claude", "codex"]);
+const ROUTEC_RESUMABLE_HISTORY_RUNTIMES = new Set([
+  "claude",
+  "codex",
+  "debug-routec-structural-replay",
+]);
 
 function resolveProviderResumeMetadataFromHistory(sourceRecord, resumeAdapter) {
   const runtime = normalizeString(sourceRecord?.runtime);
@@ -7698,6 +7998,8 @@ function resolveProviderResumeMetadataFromHistory(sourceRecord, resumeAdapter) {
     runtime === "codex"
       ? normalizeString(sourceRecord.provider_thread_id) ||
         normalizeString(sourceRecord.provider_resume_id)
+      : runtime === "debug-routec-structural-replay"
+      ? normalizeString(sourceRecord.session_id)
       : normalizeString(sourceRecord.provider_resume_id);
   if (!providerResumeId) {
     return {
@@ -11132,8 +11434,58 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    // ── GET /auth/restart-status (no auth, secret-free) ───
+    if (req.method === "GET" && path === "/auth/restart-status") {
+      try {
+        return respond(
+          res,
+          200,
+          buildHostRestartLoginGateStatus({ configDir: getConfigDir() })
+        );
+      } catch (err) {
+        console.error(
+          `[dashboard] Restart login gate status unavailable: ${err.message}`
+        );
+        return respond(res, 503, {
+          status: "restart_state_unavailable",
+          login_blocked: true,
+          code: "host_restart_state_unavailable",
+          error:
+            "Oysterun restart status is unavailable. Login remains blocked until Host readiness can be confirmed.",
+          retry_after_seconds: 1,
+          secret_material_exposed: false,
+        });
+      }
+    }
+
     // ── POST /auth/login (no auth required) ────────────────
     if (req.method === "POST" && path === "/auth/login") {
+      let restartLoginGate;
+      try {
+        restartLoginGate = buildHostRestartLoginGateStatus({
+          configDir: getConfigDir(),
+        });
+      } catch (err) {
+        console.error(
+          `[dashboard] Login blocked because restart gate state is unavailable: ${err.message}`
+        );
+        return respond(res, 503, {
+          status: "restart_state_unavailable",
+          login_blocked: true,
+          code: "host_restart_state_unavailable",
+          error:
+            "Oysterun restart status is unavailable. Please wait for Host readiness before signing in.",
+          retry_after_seconds: 1,
+          secret_material_exposed: false,
+        });
+      }
+      if (restartLoginGate.login_blocked) {
+        return respond(res, 503, {
+          ...restartLoginGate,
+          error:
+            "Oysterun is restarting. Please wait until the Host is ready before signing in.",
+        });
+      }
       const body = await readBody(req);
       const bootstrapToken =
         typeof body.bootstrap_token === "string" ? body.bootstrap_token : "";
@@ -11290,9 +11642,21 @@ const server = createServer(async (req, res) => {
       const matrixRoomId = normalizeString(
         url.searchParams.get("matrix_room_id") || url.searchParams.get("room_id")
       );
+      const storageGeneration = normalizeString(
+        url.searchParams.get("tool_storage_generation")
+      );
       if (!sessionId || !matrixRoomId) {
         return respond(res, 400, {
           error: "session_id and matrix_room_id required",
+          resolver_path_fields_exposed: false,
+        });
+      }
+      if (storageGeneration !== ROUTEC_TOOL_STORAGE_GENERATION_SQLITE) {
+        return respond(res, 409, {
+          status: "legacy_matrix_only",
+          error:
+            "SQLite tool continuation requires the exact Matrix storage generation marker",
+          expected_storage_generation: ROUTEC_TOOL_STORAGE_GENERATION_SQLITE,
           resolver_path_fields_exposed: false,
         });
       }
@@ -11326,6 +11690,7 @@ const server = createServer(async (req, res) => {
         const output = largeToolCallStore.resolveLargeToolOutput({
           sessionId,
           matrixRoomId,
+          storageGeneration,
           page,
           retainedMatrixEventId: normalizeString(
             url.searchParams.get("retained_event_id") ||
@@ -11347,13 +11712,15 @@ const server = createServer(async (req, res) => {
           ...output,
           session_id: sessionId,
           matrix_room_id: matrixRoomId,
-          page_size: output.page_size || ROUTEC_LARGE_TOOL_JSONL_PAGE_SIZE,
+          page_size: output.page_size || ROUTEC_TOOL_CONTINUATION_PAGE_SIZE,
           committed_transcript_truth: "matrix_room_timeline",
-          host_local_large_tool_calls_jsonl: true,
+          host_local_tool_event_continuation_sqlite:
+            output.storage_kind === "host_tool_event_continuation_sqlite",
+          legacy_jsonl_read_only_migration_fallback: false,
           matrix_large_ref_written: false,
           matrix_large_tool_ref_written: false,
           resolver_path_fields_exposed: false,
-          matrix_chat_search_includes_jsonl: false,
+          matrix_chat_search_includes_continuation: false,
           explicit_detail_navigation_required: true,
           debug_tool_detail_source_ui_enabled:
             readConfig().debug_routec_tool_detail_source_ui_enabled === true,
@@ -11468,10 +11835,22 @@ const server = createServer(async (req, res) => {
         url.searchParams.get("matrix_event_id") ||
           url.searchParams.get("event_id")
       );
+      const storageGeneration = normalizeString(
+        url.searchParams.get("tool_storage_generation")
+      );
       if (!sessionId || !matrixRoomId || !matrixEventId) {
         return respond(res, 400, {
           status: "missing_identity",
           error: "session_id, matrix_room_id, and matrix_event_id required",
+          resolver_path_fields_exposed: false,
+        });
+      }
+      if (storageGeneration !== ROUTEC_TOOL_STORAGE_GENERATION_SQLITE) {
+        return respond(res, 409, {
+          status: "legacy_matrix_only",
+          error:
+            "SQLite tool detail requires the exact Matrix storage generation marker",
+          expected_storage_generation: ROUTEC_TOOL_STORAGE_GENERATION_SQLITE,
           resolver_path_fields_exposed: false,
         });
       }
@@ -11511,9 +11890,36 @@ const server = createServer(async (req, res) => {
         });
       }
       try {
+        const matrixRun = readRouteCMatrixToolRun({
+          binding,
+          eventId: matrixEventId,
+          retainedEventIds: [matrixEventId],
+        });
+        if (matrixRun.status !== "ok") {
+          return respond(res, 404, {
+            status: "unavailable",
+            error: "tool event detail Matrix anchor not found",
+            resolver_path_fields_exposed: false,
+          });
+        }
+        const matrixStorageGeneration = normalizeString(
+          matrixRun.events[0]?.content?.[ROUTEC_SEMANTIC_NAMESPACE]
+            ?.tool_storage_generation
+        );
+        if (matrixStorageGeneration !== ROUTEC_TOOL_STORAGE_GENERATION_SQLITE) {
+          return respond(res, 409, {
+            status: "legacy_matrix_only",
+            error:
+              "Matrix tool event is legacy and has no SQLite continuation contract",
+            expected_storage_generation: ROUTEC_TOOL_STORAGE_GENERATION_SQLITE,
+            actual_storage_generation: matrixStorageGeneration,
+            resolver_path_fields_exposed: false,
+          });
+        }
         const largeRun = largeToolCallStore.resolveLargeToolRun({
           sessionId,
           matrixRoomId,
+          storageGeneration,
           retainedMatrixEventId: matrixEventId,
         });
         if (largeRun.status === "ambiguous") {
@@ -11522,18 +11928,11 @@ const server = createServer(async (req, res) => {
             error: "tool run identity is ambiguous",
           });
         }
-        const matrixRun = readRouteCMatrixToolRun({
-          binding,
-          eventId: matrixEventId,
-          retainedEventIds:
-            largeRun.status === "ok"
-              ? largeRun.retained_matrix_event_ids
-              : null,
-        });
-        if (matrixRun.status !== "ok") {
+        if (largeRun.status !== "ok") {
           return respond(res, 404, {
             status: "unavailable",
-            error: "tool event detail run not found",
+            error: "SQLite tool event detail run not found",
+            resolver_path_fields_exposed: false,
           });
         }
         const matrixRecords = matrixRun.events.map((event, index) => {
@@ -11548,12 +11947,9 @@ const server = createServer(async (req, res) => {
             detailRecord,
           });
         });
-        const continuationRecords =
-          largeRun.status === "ok"
-            ? largeRun.continuation_records.map((record) =>
-                normalizeJsonlToolPhysicalRecord(record)
-              )
-            : [];
+        const continuationRecords = largeRun.continuation_records.map((record) =>
+          normalizeContinuationToolPhysicalRecord(record)
+        );
         const detail = buildUnifiedToolLifecycleDetail({
           sessionId,
           matrixRoomId,
@@ -11571,7 +11967,13 @@ const server = createServer(async (req, res) => {
           selected_detail_top_only: true,
           debug_tool_detail_source_ui_enabled:
             readConfig().debug_routec_tool_detail_source_ui_enabled === true,
-          matrix_first_10_jsonl_continuation_preserved: true,
+          continuation_storage_kind:
+            largeRun.summary.storage_kind,
+          tool_storage_generation: storageGeneration,
+          matrix_retained_plus_sqlite_continuation:
+            largeRun.summary.storage_kind ===
+              "host_tool_event_continuation_sqlite",
+          legacy_jsonl_read_only_migration_fallback: false,
           provider_private_transcript_used: false,
           resolver_path_fields_exposed: false,
           tool_payload_local_paths_preserved: true,
@@ -11859,6 +12261,36 @@ const server = createServer(async (req, res) => {
           res,
           202,
           await scheduleOysterunPackageUpdate()
+        );
+      } catch (err) {
+        return respond(res, 409, { error: err.message });
+      }
+    }
+
+    if (req.method === "POST" && path === "/admin/update-beta-check") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        await readJsonBody(req);
+        return respond(res, 200, await checkOysterunNpmBetaUpdate());
+      } catch (err) {
+        return respond(
+          res,
+          409,
+          err.updatePayload || { error: err.message }
+        );
+      }
+    }
+
+    if (req.method === "POST" && path === "/admin/update-beta-run") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        await readJsonBody(req);
+        return respond(
+          res,
+          202,
+          await scheduleOysterunPackageUpdate({
+            channel: OYSTERUN_UPDATE_CHANNEL_BETA,
+          })
         );
       } catch (err) {
         return respond(res, 409, { error: err.message });
@@ -16659,6 +17091,55 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // ── POST /session/routec-viewport-geometry-diagnostic ──
+    if (
+      req.method === "POST" &&
+      path === "/session/routec-viewport-geometry-diagnostic"
+    ) {
+      const body = await readBody(req);
+      const sessionId = normalizeString(body.session_id);
+      const session = requireSessionCapability(
+        claims,
+        sessionId,
+        "can_chat",
+        res
+      );
+      if (!session) return;
+      const binding = requireRouteCMatrixRoomBinding(session.id);
+      const matrixRoomId = normalizeString(body.matrix_room_id);
+      if (!matrixRoomId || matrixRoomId !== binding.matrix_room_id) {
+        return respond(res, 403, {
+          error: "Route C viewport geometry diagnostic room mismatch",
+          diagnostic_written: false,
+        });
+      }
+      if (!areRouteCViewportGeometryDiagnosticsEnabled()) {
+        return respond(res, 200, {
+          status: "routec_viewport_geometry_diagnostics_disabled",
+          diagnostic_written: false,
+          product_behavior_mutated: false,
+        });
+      }
+      try {
+        const result = appendRouteCViewportGeometryDiagnostic({
+          hostSessionId: session.id,
+          matrixRoomId,
+          sample: body.sample,
+        });
+        return respond(res, 201, {
+          status: result.status,
+          diagnostic_written: result.written === true,
+          product_behavior_mutated: false,
+        });
+      } catch (err) {
+        return respond(res, 400, {
+          error: err.message,
+          diagnostic_written: false,
+          product_behavior_mutated: false,
+        });
+      }
+    }
+
     // ── GET /session/snapshot?session_id=… ─────────────────
     if (req.method === "GET" && path === "/session/snapshot") {
       const session_id = normalizeString(url.searchParams.get("session_id"));
@@ -17520,13 +18001,27 @@ const server = createServer(async (req, res) => {
       if (explicitProvider.error) {
         return respond(res, 400, { error: explicitProvider.error });
       }
+      const resumeProvider =
+        explicitProvider.requestedProvider ||
+        (sourceRecord.runtime === "debug-routec-structural-replay"
+          ? sourceRecord.runtime
+          : undefined);
       const resolved = resolveAgentRuntimeConfig(
         resolvedFolder,
         buildRuntimeOverridesFromBody(
           body,
-          explicitProvider.requestedProvider ?? undefined
+          resumeProvider
         )
       );
+      const resumeProofBody =
+        resumeProvider === "debug-routec-structural-replay"
+          ? {
+              ...body,
+              provider: resumeProvider,
+              model:
+                normalizeString(sourceRecord.model) || resolved.runtime.model,
+            }
+          : body;
       try {
         validateProviderPermissionRequest({
           body,
@@ -17568,8 +18063,8 @@ const server = createServer(async (req, res) => {
       }
 
       const resumeProofFields = buildSessionSetupProviderModelPermissionFields({
-        body,
-        requestedProvider: explicitProvider.requestedProvider,
+        body: resumeProofBody,
+        requestedProvider: resumeProvider,
         resolved,
       });
       if (!resumeProofFields.request_response_provider_model_permission_match) {
@@ -17769,8 +18264,8 @@ const server = createServer(async (req, res) => {
         same_session_resume: true,
       });
       const sessionSetupProof = buildSessionSetupProviderModelPermissionProof({
-        body,
-        requestedProvider: explicitProvider.requestedProvider,
+        body: resumeProofBody,
+        requestedProvider: resumeProvider,
         resolved,
         session,
         proofSurface: "host_sessions_resume_response",
@@ -18642,6 +19137,21 @@ if (!normalizeString(DEVICE_TOKEN)) {
 
 server.listen(PORT, () => {
   try {
+    const loginGateRelease = releaseHostRestartLoginGate({
+      configDir: getConfigDir(),
+      reason: "replacement_host_listening",
+    });
+    if (loginGateRelease.released) {
+      console.log(
+        `[oysterun-host] Released restart login gate ${loginGateRelease.gate.gate_id}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[oysterun-host] Restart login gate release failed: ${err.message}`
+    );
+  }
+  try {
     const runtimeMetadata = writeHostRuntimeMetadata({
       startedAt: HOST_RUNTIME_STARTED_AT,
       port: PORT,
@@ -18773,6 +19283,7 @@ process.on("SIGINT", () => {
   providerModelRefreshRunner.stop();
   schedulerService.close();
   sessionManager.stopAll();
+  largeToolCallStore.close();
   wss.close();
   server.close(() => {
     console.log("[oysterun-host] Bye.");
@@ -18787,6 +19298,7 @@ process.on("SIGTERM", () => {
   providerModelRefreshRunner.stop();
   schedulerService.close();
   sessionManager.stopAll();
+  largeToolCallStore.close();
   wss.close();
   server.close(() => process.exit(0));
 });

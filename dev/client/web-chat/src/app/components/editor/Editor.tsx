@@ -1,6 +1,8 @@
 /* eslint-disable no-param-reassign */
 import React, {
   ClipboardEventHandler,
+  CompositionEventHandler,
+  FormEventHandler,
   KeyboardEventHandler,
   ReactNode,
   forwardRef,
@@ -16,6 +18,7 @@ import {
   RenderLeafProps,
   RenderElementProps,
   RenderPlaceholderProps,
+  ReactEditor,
 } from 'slate-react';
 import { withHistory } from 'slate-history';
 import { BlockType } from './types';
@@ -70,6 +73,11 @@ type CustomEditorProps = {
   placeholder?: string;
   onKeyDown?: KeyboardEventHandler;
   onKeyUp?: KeyboardEventHandler;
+  onCompositionStart?: CompositionEventHandler<HTMLDivElement>;
+  onCompositionUpdate?: CompositionEventHandler<HTMLDivElement>;
+  onCompositionEnd?: CompositionEventHandler<HTMLDivElement>;
+  onDOMBeforeInput?: (event: InputEvent) => void;
+  onInput?: FormEventHandler<HTMLDivElement>;
   onChange?: EditorChangeHandler;
   onPaste?: ClipboardEventHandler;
 };
@@ -87,6 +95,11 @@ export const CustomEditor = forwardRef<HTMLDivElement, CustomEditorProps>(
       placeholder,
       onKeyDown,
       onKeyUp,
+      onCompositionStart,
+      onCompositionUpdate,
+      onCompositionEnd,
+      onDOMBeforeInput,
+      onInput,
       onChange,
       onPaste,
     },
@@ -102,6 +115,13 @@ export const CustomEditor = forwardRef<HTMLDivElement, CustomEditorProps>(
     const handleKeydown: KeyboardEventHandler = useCallback(
       (evt) => {
         onKeyDown?.(evt);
+        if (
+          evt.defaultPrevented ||
+          evt.nativeEvent.isComposing ||
+          ReactEditor.isComposing(editor)
+        ) {
+          return;
+        }
         const shortcutToggled = toggleKeyboardShortcut(editor, evt);
         if (shortcutToggled) evt.preventDefault();
       },
@@ -148,6 +168,11 @@ export const CustomEditor = forwardRef<HTMLDivElement, CustomEditorProps>(
                 renderLeaf={renderLeaf}
                 onKeyDown={handleKeydown}
                 onKeyUp={onKeyUp}
+                onCompositionStart={onCompositionStart}
+                onCompositionUpdate={onCompositionUpdate}
+                onCompositionEnd={onCompositionEnd}
+                onDOMBeforeInput={onDOMBeforeInput}
+                onInput={onInput}
                 onPaste={onPaste}
               />
             </Scroll>

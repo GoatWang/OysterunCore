@@ -1,6 +1,6 @@
 {
   "name": "oysterun-host-service",
-  "version": "1.4.9",
+  "version": "1.5.1",
   "type": "module",
   "description": "Oysterun host service — runs on Mac mini, manages Claude Code sessions",
   "scripts": {
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.44.0",
-    "better-sqlite3": "^12.8.0",
+    "better-sqlite3": "12.8.0",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
   }

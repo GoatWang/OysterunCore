@@ -112,7 +112,7 @@ export function normalizeMatrixToolPhysicalRecord({
   };
 }
 
-export function normalizeJsonlToolPhysicalRecord(row) {
+export function normalizeContinuationToolPhysicalRecord(row) {
   const semanticType = normalizeString(row?.semantic_type);
   if (!TOOL_SEMANTIC_TYPES.has(semanticType)) return null;
   return {
@@ -121,7 +121,7 @@ export function normalizeJsonlToolPhysicalRecord(row) {
       row.provider_runtime_event_index
     ),
     semantic_type: semanticType,
-    source: "host_jsonl",
+    source: "host_sqlite",
     matrix_event_id: null,
     provider: normalizeString(row.provider),
     provider_turn_id: normalizeString(row.provider_turn_id),

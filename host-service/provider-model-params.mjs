@@ -448,13 +448,16 @@ function nextProviderRefreshAt(params, providerId) {
 export function loadProviderModelCatalogState(providerId, options = {}) {
   if (
     providerId === "debug-fixture" ||
-    providerId === "debug-large-tool-spillover"
+    providerId === "debug-large-tool-spillover" ||
+    providerId === "debug-routec-structural-replay"
   ) {
     return {
       models: getProviderModelCatalogSeed(providerId),
       status: {
         source:
-          providerId === "debug-large-tool-spillover"
+          providerId === "debug-routec-structural-replay"
+            ? "host_debug_routec_structural_replay_seed"
+            : providerId === "debug-large-tool-spillover"
             ? "host_debug_large_tool_spillover_seed"
             : "host_debug_fixture_seed",
         params_path: null,
