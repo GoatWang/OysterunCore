@@ -7,39 +7,19 @@ import {
   renameSync,
   writeFileSync,
 } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { completeSchedulerSessionSetupPayloadForRuntime } from "./scheduler-setup-snapshot-contract.mjs";
+import { deriveBrowserRootProjectId } from "./browser-root-project-index.mjs";
+import {
+  computeNextScheduleRunAt,
+  normalizeScheduleRule,
+} from "./scheduler-rule-model.mjs";
 
 export const PORTABLE_SCHEDULER_STORAGE_OWNER =
   "agent_folder_oysterun_schedulers_json";
 export const PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER =
   "host_config_oysterun_sqlite_runtime";
 export const PORTABLE_SCHEDULER_FILE_VERSION = 1;
-
-const FORBIDDEN_SETUP_KEYS = new Set([
-  "host_session_id",
-  "hostSessionId",
-  "saved_session_id",
-  "savedSessionId",
-  "session_setup_record_id",
-  "sessionSetupRecordId",
-  "session_id",
-  "sessionId",
-  "source_session_id",
-  "sourceSessionId",
-  "history_session_id",
-  "historySessionId",
-  "matrix_room_id",
-  "matrixRoomId",
-  "room_id",
-  "roomId",
-  "provider_resume_id",
-  "providerResumeId",
-  "transcript",
-  "messages",
-  "run_logs",
-  "runLogs",
-]);
 
 function nowIso(clock = () => new Date()) {
   const value = clock();
@@ -64,38 +44,11 @@ function normalizeOptionalString(value) {
   return value.trim() || null;
 }
 
-function normalizeScheduleStatus(value, enabled) {
-  const status = normalizeOptionalString(value);
-  if (status) {
-    if (!["active", "paused", "stopped", "failed", "draft"].includes(status)) {
-      throw new Error(`Unsupported portable scheduler status: ${status}`);
-    }
-    return status;
-  }
-  return enabled === true ? "active" : "paused";
-}
-
 function deepCloneJson(value, fieldName) {
   try {
     return JSON.parse(JSON.stringify(value));
   } catch (err) {
     throw new Error(`${fieldName} must be JSON serializable: ${err.message}`);
-  }
-}
-
-function assertNoForbiddenSetupKeys(value, path = "setup_snapshot") {
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) =>
-      assertNoForbiddenSetupKeys(entry, `${path}[${index}]`)
-    );
-    return;
-  }
-  if (!isObjectRecord(value)) return;
-  for (const [key, entry] of Object.entries(value)) {
-    if (FORBIDDEN_SETUP_KEYS.has(key)) {
-      throw new Error(`${path}.${key} cannot be stored in schedulers.json`);
-    }
-    assertNoForbiddenSetupKeys(entry, `${path}.${key}`);
   }
 }
 
@@ -121,12 +74,7 @@ export function hashPortableScheduleDefinition(definition) {
     .digest("hex");
 }
 
-export function normalizePortableSetupSnapshot(value) {
-  if (!isObjectRecord(value)) {
-    throw new Error("setup_snapshot must be an object");
-  }
-  assertNoForbiddenSetupKeys(value);
-  const source = deepCloneJson(value, "setup_snapshot");
+function projectPortableSetupSnapshot(value) {
   const snapshot = {};
   for (const key of [
     "provider",
@@ -136,12 +84,10 @@ export function normalizePortableSetupSnapshot(value) {
     "reasoning_effort",
     "permission_mode",
     "approval_policy",
-    "agent_folder",
-    "cwd",
     "web_access",
     "notifications_enabled",
   ]) {
-    const normalized = normalizeOptionalString(source[key]);
+    const normalized = normalizeOptionalString(value[key]);
     if (normalized) snapshot[key] = normalized;
   }
   for (const key of [
@@ -150,31 +96,31 @@ export function normalizePortableSetupSnapshot(value) {
     "search_enabled",
     "image_input_enabled",
   ]) {
-    if (Object.prototype.hasOwnProperty.call(source, key)) {
-      snapshot[key] = source[key] === true;
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      snapshot[key] = value[key] === true;
     }
   }
   const allowedPaths = normalizeStringArray(
-    source.allowed_paths,
+    value.allowed_paths,
     "setup_snapshot.allowed_paths"
   );
   if (allowedPaths) snapshot.allowed_paths = allowedPaths;
-  if (isObjectRecord(source.runtime_capabilities)) {
+  if (isObjectRecord(value.runtime_capabilities)) {
     snapshot.runtime_capabilities = deepCloneJson(
-      source.runtime_capabilities,
+      value.runtime_capabilities,
       "setup_snapshot.runtime_capabilities"
     );
   }
-  if (isObjectRecord(source.capabilities)) {
+  if (isObjectRecord(value.capabilities)) {
     snapshot.capabilities = deepCloneJson(
-      source.capabilities,
+      value.capabilities,
       "setup_snapshot.capabilities"
     );
   }
-  if (isObjectRecord(source.workspace_policy)) {
+  if (isObjectRecord(value.workspace_policy)) {
     const workspacePolicy = {};
     const workspaceAllowed = normalizeStringArray(
-      source.workspace_policy.allowed_paths,
+      value.workspace_policy.allowed_paths,
       "setup_snapshot.workspace_policy.allowed_paths"
     );
     if (workspaceAllowed) workspacePolicy.allowed_paths = workspaceAllowed;
@@ -182,59 +128,84 @@ export function normalizePortableSetupSnapshot(value) {
       snapshot.workspace_policy = workspacePolicy;
     }
   }
-  const agentFolder = normalizeOptionalString(snapshot.agent_folder);
-  if (!agentFolder) {
-    throw new Error("setup_snapshot.agent_folder is required");
-  }
-  if (!snapshot.cwd) snapshot.cwd = agentFolder;
   return snapshot;
 }
 
-function normalizePortableScheduleForFile(input, { now }) {
+export function normalizePortableSetupSnapshot(value) {
+  if (!isObjectRecord(value)) {
+    throw new Error("setup_snapshot must be an object");
+  }
+  return projectPortableSetupSnapshot(value);
+}
+
+function normalizePortableMetadata(value) {
+  if (!isObjectRecord(value)) return value;
+  const {
+    target_binding: _runtimeTargetBinding,
+    portable_agent_folder: _runtimeAgentFolder,
+    portable_schedulers_json_path: _runtimeSchedulersPath,
+    ...portableMetadata
+  } = value;
+  return deepCloneJson(portableMetadata, "portable scheduler metadata");
+}
+
+function normalizePortableScheduleForFile(input, { now, agentFolder }) {
   if (!isObjectRecord(input)) {
     throw new Error("portable scheduler definition must be an object");
   }
+  const canonicalFolder = realpathSync(
+    normalizeRequiredString(agentFolder, "agentFolder")
+  );
+  const expectedAgentId = deriveBrowserRootProjectId(basename(canonicalFolder));
+  const inputAgentId = normalizeRequiredString(input.agent_id, "agent_id");
+  if (inputAgentId !== expectedAgentId) {
+    const err = new Error(
+      `portable scheduler agent_id must match Browser Root project id ${expectedAgentId}`
+    );
+    err.code = "portable_scheduler_agent_id_mismatch";
+    throw err;
+  }
+  const portableSetupSnapshot = normalizePortableSetupSnapshot(
+    input.setup_snapshot
+  );
   const setupSnapshot = completeSchedulerSessionSetupPayloadForRuntime({
-    agentFolder: input.setup_snapshot?.agent_folder || input.setup_snapshot?.cwd,
-    sessionPayload: normalizePortableSetupSnapshot(input.setup_snapshot),
+    agentFolder: canonicalFolder,
+    sessionPayload: {
+      ...portableSetupSnapshot,
+      agent_folder: canonicalFolder,
+      cwd: canonicalFolder,
+    },
     label: "portable scheduler",
     requireExplicitRuntimeProof: true,
   }).sessionPayload;
-  const agentFolder = normalizeRequiredString(
-    setupSnapshot.agent_folder,
-    "setup_snapshot.agent_folder"
-  );
   const enabled = input.enabled === true;
   const scheduleRule = isObjectRecord(input.schedule_rule)
     ? deepCloneJson(input.schedule_rule, "schedule_rule")
     : null;
   if (!scheduleRule) throw new Error("schedule_rule is required");
   const id = normalizeOptionalString(input.id) || randomUUID();
-  const commandText =
-    normalizeOptionalString(input.command_text) ||
-    normalizeOptionalString(input.prompt) ||
-    normalizeOptionalString(input.input_text);
+  const commandText = normalizeOptionalString(input.command_text);
   if (!commandText) throw new Error("command_text is required");
   const createdAt = normalizeOptionalString(input.created_at) || now;
   const metadata = isObjectRecord(input.metadata)
-    ? deepCloneJson(input.metadata, "metadata")
+    ? normalizePortableMetadata(input.metadata)
     : {};
   return {
     id,
-    agent_id: normalizeRequiredString(input.agent_id, "agent_id"),
+    agent_id: expectedAgentId,
     created_by:
       normalizeOptionalString(input.created_by) || "oysterun-host",
     command_text: commandText,
     normalized_command:
       normalizeOptionalString(input.normalized_command) || commandText,
     enabled,
-    status: normalizeScheduleStatus(input.status, enabled),
-    next_run_at: normalizeOptionalString(input.next_run_at),
+    status: enabled ? "active" : "paused",
     schedule_rule: scheduleRule,
     timezone:
       normalizeOptionalString(input.timezone) ||
       normalizeOptionalString(scheduleRule.timezone),
     setup_snapshot: setupSnapshot,
+    portable_setup_snapshot: portableSetupSnapshot,
     metadata,
     created_at: createdAt,
     updated_at: normalizeOptionalString(input.updated_at) || now,
@@ -244,31 +215,35 @@ function normalizePortableScheduleForFile(input, { now }) {
   };
 }
 
+function serializePortableScheduleForFile(definition) {
+  const serialized = deepCloneJson(definition, "portable scheduler definition");
+  serialized.setup_snapshot = deepCloneJson(
+    definition.portable_setup_snapshot || {},
+    "portable setup_snapshot"
+  );
+  delete serialized.portable_setup_snapshot;
+  delete serialized.next_run_at;
+  delete serialized.status;
+  serialized.metadata = normalizePortableMetadata(serialized.metadata || {});
+  return serialized;
+}
+
 function buildInvalidPortableScheduleDefinition(
   input,
   { now, error, index, filePath, agentFolder }
 ) {
   const source = isObjectRecord(input) ? input : {};
   const rawSetupSnapshot = isObjectRecord(source.setup_snapshot)
-    ? deepCloneJson(source.setup_snapshot, "invalid setup_snapshot")
+    ? projectPortableSetupSnapshot(source.setup_snapshot)
     : {};
   const sourceMetadata = isObjectRecord(source.metadata)
-    ? deepCloneJson(source.metadata, "invalid metadata")
-    : {};
-  const sourceTargetBinding = isObjectRecord(sourceMetadata.target_binding)
-    ? sourceMetadata.target_binding
-    : {};
-  const sourceTargetSnapshot = isObjectRecord(
-    sourceTargetBinding.setup_snapshot
-  )
-    ? sourceTargetBinding.setup_snapshot
+    ? normalizePortableMetadata(source.metadata)
     : {};
   const setupSnapshot = {
-    ...sourceTargetSnapshot,
     ...rawSetupSnapshot,
+    agent_folder: agentFolder,
+    cwd: agentFolder,
   };
-  if (!setupSnapshot.agent_folder) setupSnapshot.agent_folder = agentFolder;
-  if (!setupSnapshot.cwd) setupSnapshot.cwd = setupSnapshot.agent_folder;
   const errorMessage = error?.message || String(error);
   const errorCode =
     normalizeOptionalString(error?.code) ||
@@ -282,16 +257,12 @@ function buildInvalidPortableScheduleDefinition(
     `invalid_portable_scheduler_${stableIdHash}`;
   const agentId =
     normalizeOptionalString(source.agent_id) ||
-    normalizeOptionalString(sourceTargetBinding.agent_id) ||
-    normalizeOptionalString(setupSnapshot.agent_id) ||
     "invalid-portable-scheduler";
   const scheduleRule = isObjectRecord(source.schedule_rule)
     ? deepCloneJson(source.schedule_rule, "invalid schedule_rule")
     : null;
   const commandText =
     normalizeOptionalString(source.command_text) ||
-    normalizeOptionalString(source.prompt) ||
-    normalizeOptionalString(source.input_text) ||
     `Invalid portable scheduler definition: ${errorMessage}`;
   return {
     id,
@@ -313,7 +284,7 @@ function buildInvalidPortableScheduleDefinition(
     updated_at: now,
     metadata: {
       ...sourceMetadata,
-      source: "p72_agent_folder_schedulers_json",
+      source: "browser_root_project_schedulers_json",
       schedule_rule: scheduleRule,
       timezone:
         normalizeOptionalString(source.timezone) ||
@@ -359,22 +330,17 @@ function writePortableFile(filePath, payload) {
   renameSync(tmpPath, filePath);
 }
 
-function normalizeKnownFolderEntry(entry) {
-  if (typeof entry === "string") {
-    return { agent_id: null, agent_folder: entry };
+function normalizeBrowserRootProjectEntry(entry) {
+  if (!isObjectRecord(entry)) {
+    throw new Error("Browser Root project entry must be an object");
   }
-  if (!isObjectRecord(entry)) return null;
-  const agentFolder =
-    normalizeOptionalString(entry.agent_folder) ||
-    normalizeOptionalString(entry.agentFolder) ||
-    normalizeOptionalString(entry.folder) ||
-    normalizeOptionalString(entry.cwd);
-  if (!agentFolder) return null;
+  const projectId = normalizeRequiredString(entry.project_id, "project_id");
+  const agentFolder = normalizeRequiredString(
+    entry.agent_folder,
+    "agent_folder"
+  );
   return {
-    agent_id:
-      normalizeOptionalString(entry.agent_id) ||
-      normalizeOptionalString(entry.agentId) ||
-      null,
+    project_id: projectId,
     agent_folder: agentFolder,
   };
 }
@@ -382,33 +348,34 @@ function normalizeKnownFolderEntry(entry) {
 export class PortableSchedulerDefinitionStore {
   constructor({
     runtimeStore,
-    getKnownAgentFolders = () => [],
+    getBrowserRootProjects = () => [],
+    getProjectIndexGeneration = () => null,
     clock = () => new Date(),
   } = {}) {
     if (!runtimeStore) {
       throw new Error("PortableSchedulerDefinitionStore requires runtimeStore");
     }
     this.runtimeStore = runtimeStore;
-    this.getKnownAgentFolders = getKnownAgentFolders;
+    this.getBrowserRootProjects = getBrowserRootProjects;
+    this.getProjectIndexGeneration = getProjectIndexGeneration;
     this.clock = clock;
-    this.memoryKnownFolders = new Map();
+    this.cachedSchedules = null;
+    this.cachedProjectIndexGeneration = null;
   }
 
   now() {
     return nowIso(this.clock);
   }
 
-  getKnownFolders({ includeMemory = true } = {}) {
-    const candidates = [];
-    for (const entry of this.getKnownAgentFolders() || []) {
-      const normalized = normalizeKnownFolderEntry(entry);
-      if (normalized) candidates.push(normalized);
-    }
-    if (includeMemory) {
-      for (const entry of this.memoryKnownFolders.values()) {
-        candidates.push(entry);
-      }
-    }
+  invalidateScheduleCache() {
+    this.cachedSchedules = null;
+    this.cachedProjectIndexGeneration = null;
+  }
+
+  getBrowserRootProjectFolders() {
+    const candidates = (this.getBrowserRootProjects() || []).map(
+      normalizeBrowserRootProjectEntry
+    );
     const seen = new Set();
     const result = [];
     for (const entry of candidates) {
@@ -421,29 +388,12 @@ export class PortableSchedulerDefinitionStore {
     return result;
   }
 
-  rememberKnownFolder(agentId, agentFolder) {
+  assertBrowserRootProjectFolder(agentFolder) {
     const realFolder = realpathSync(
       normalizeRequiredString(agentFolder, "agentFolder")
     );
-    this.memoryKnownFolders.set(realFolder, {
-      agent_id: normalizeOptionalString(agentId),
-      agent_folder: realFolder,
-    });
-    return realFolder;
-  }
-
-  assertHostKnownAgentFolder(
-    agentFolder,
-    { includeMemory = true, requireKnown = false } = {}
-  ) {
-    const realFolder = realpathSync(
-      normalizeRequiredString(agentFolder, "agentFolder")
-    );
-    const knownFolders = this.getKnownFolders({ includeMemory });
-    if (
-      (requireKnown || knownFolders.length > 0) &&
-      !knownFolders.some((entry) => entry.agent_folder === realFolder)
-    ) {
+    const knownFolders = this.getBrowserRootProjectFolders();
+    if (!knownFolders.some((entry) => entry.agent_folder === realFolder)) {
       throw new Error("scheduler_agent_folder_not_host_known");
     }
     return realFolder;
@@ -454,11 +404,28 @@ export class PortableSchedulerDefinitionStore {
       normalizeRequiredString(agentFolder, "agentFolder")
     );
     const filePath = getPortableSchedulersJsonPath(realFolder);
-    const payload = readPortableFile(filePath);
     const now = this.now();
+    let payload;
+    try {
+      payload = readPortableFile(filePath);
+    } catch (err) {
+      if (!tolerateInvalid) throw err;
+      return [
+        buildInvalidPortableScheduleDefinition({}, {
+          now,
+          error: err,
+          index: 0,
+          filePath,
+          agentFolder: realFolder,
+        }),
+      ];
+    }
     return payload.schedulers.map((entry, index) => {
       try {
-        return normalizePortableScheduleForFile(entry, { now });
+        return normalizePortableScheduleForFile(entry, {
+          now,
+          agentFolder: realFolder,
+        });
       } catch (err) {
         if (!tolerateInvalid) throw err;
         return buildInvalidPortableScheduleDefinition(entry, {
@@ -473,12 +440,13 @@ export class PortableSchedulerDefinitionStore {
   }
 
   writeDefinitionsForFolder(agentFolder, definitions) {
-    const realFolder = this.assertHostKnownAgentFolder(agentFolder);
+    const realFolder = this.assertBrowserRootProjectFolder(agentFolder);
     const filePath = getPortableSchedulersJsonPath(realFolder);
     writePortableFile(filePath, {
       version: PORTABLE_SCHEDULER_FILE_VERSION,
-      schedulers: definitions,
+      schedulers: definitions.map(serializePortableScheduleForFile),
     });
+    this.invalidateScheduleCache();
     return filePath;
   }
 
@@ -488,40 +456,46 @@ export class PortableSchedulerDefinitionStore {
       agent_id: definition.agent_id,
       command_text: definition.command_text,
       enabled: definition.enabled,
-      status: definition.status,
-      next_run_at: definition.next_run_at,
       schedule_rule: definition.schedule_rule,
-      setup_snapshot: definition.setup_snapshot,
+      setup_snapshot:
+        definition.portable_setup_snapshot || definition.setup_snapshot,
       metadata: definition.metadata,
     });
   }
 
-  definitionToSchedule(definition, { agentFolder, ownerManaged = false } = {}) {
+  definitionToSchedule(definition, { agentFolder } = {}) {
     const portableHash = this.buildPortableHash(definition);
     const runtimeState =
       this.runtimeStore.ensurePortableScheduleRuntimeState({
         scheduleId: definition.id,
         agentFolder,
         portableHash,
-        ownerManaged,
       });
-    const ownerActivated = Boolean(runtimeState?.owner_enabled_at) &&
-      (!runtimeState?.owner_disabled_at ||
-        runtimeState.owner_enabled_at > runtimeState.owner_disabled_at);
-    const clonedDisabled = definition.enabled === true && !ownerActivated;
-    const effectiveEnabled = definition.enabled === true && ownerActivated;
+    const effectiveEnabled = definition.enabled === true;
+    const normalizedRule = normalizeScheduleRule(definition.schedule_rule, {
+      timezone: definition.timezone || definition.schedule_rule?.timezone,
+    });
     const status =
-      definition.status === "stopped" || definition.status === "failed"
+      definition.metadata?.portable_scheduler_validation_failed === true
         ? definition.status
-        : effectiveEnabled
-        ? "active"
-        : "paused";
+        : !effectiveEnabled
+        ? "paused"
+        : runtimeState.runtime_status === "stopped" ||
+          runtimeState.runtime_status === "failed"
+        ? runtimeState.runtime_status
+        : "active";
+    const nextRunAt =
+      status === "active"
+        ? runtimeState.next_run_at ||
+          computeNextScheduleRunAt(normalizedRule, {
+            after: runtimeState.first_discovered_at,
+            timezone: normalizedRule.timezone,
+          })
+        : null;
     const availabilityState = effectiveEnabled ? "active" : "paused";
-    const availabilityReason = clonedDisabled
-      ? "P72 cloned portable scheduler disabled until Owner enables it on this Host"
-      : effectiveEnabled
-      ? "P72 portable agent-folder scheduler is enabled"
-      : "P72 portable agent-folder scheduler is disabled";
+    const availabilityReason = effectiveEnabled
+      ? "Browser Root portable scheduler is enabled"
+      : "Browser Root portable scheduler is disabled";
     return {
       id: definition.id,
       host_session_id: `portable:${agentFolder}`,
@@ -532,14 +506,14 @@ export class PortableSchedulerDefinitionStore {
       input_text: definition.command_text,
       interval_ms: null,
       normalized_command: definition.normalized_command,
-      next_run_at: effectiveEnabled ? definition.next_run_at : null,
+      next_run_at: nextRunAt,
       availability_state: availabilityState,
       availability_reason: availabilityReason,
       metadata: {
         ...definition.metadata,
-        source: "p72_agent_folder_schedulers_json",
-        schedule_rule: definition.schedule_rule,
-        timezone: definition.timezone || definition.schedule_rule?.timezone,
+        source: "browser_root_project_schedulers_json",
+        schedule_rule: normalizedRule,
+        timezone: normalizedRule.timezone,
         target_binding: {
           kind: "setup_snapshot",
           agent_id: definition.agent_id,
@@ -549,7 +523,6 @@ export class PortableSchedulerDefinitionStore {
         missed_run_policy: "skip_without_catch_up",
         catch_up_burst: false,
         p12_5_scheduler_tab: true,
-        p72_portable_scheduler: true,
         setup_snapshot_copied: true,
         source_session_references_present: false,
         storage_owner: PORTABLE_SCHEDULER_STORAGE_OWNER,
@@ -557,7 +530,6 @@ export class PortableSchedulerDefinitionStore {
         portable_agent_folder: agentFolder,
         portable_schedulers_json_path: getPortableSchedulersJsonPath(agentFolder),
         portable_definition_hash: portableHash,
-        cloned_first_discovery_disabled: clonedDisabled,
         effective_enabled: effectiveEnabled,
       },
       created_at: definition.created_at,
@@ -575,8 +547,16 @@ export class PortableSchedulerDefinitionStore {
   }
 
   listSchedules() {
+    const projectIndexGeneration = this.getProjectIndexGeneration();
+    if (
+      projectIndexGeneration !== null &&
+      this.cachedSchedules &&
+      this.cachedProjectIndexGeneration === projectIndexGeneration
+    ) {
+      return deepCloneJson(this.cachedSchedules, "cached portable schedules");
+    }
     const schedules = [];
-    for (const entry of this.getKnownFolders()) {
+    for (const entry of this.getBrowserRootProjectFolders()) {
       for (const definition of this.readDefinitionsForFolder(
         entry.agent_folder,
         { tolerateInvalid: true }
@@ -588,12 +568,20 @@ export class PortableSchedulerDefinitionStore {
         );
       }
     }
-    return schedules.sort((a, b) => {
+    const sortedSchedules = schedules.sort((a, b) => {
       const aNext = a.next_run_at || "9999";
       const bNext = b.next_run_at || "9999";
       if (aNext !== bNext) return aNext.localeCompare(bNext);
       return String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
     });
+    if (projectIndexGeneration !== null) {
+      this.cachedProjectIndexGeneration = projectIndexGeneration;
+      this.cachedSchedules = deepCloneJson(
+        sortedSchedules,
+        "portable schedules"
+      );
+    }
+    return sortedSchedules;
   }
 
   getSchedule(scheduleId) {
@@ -616,8 +604,11 @@ export class PortableSchedulerDefinitionStore {
       .slice(0, limit);
   }
 
-  createSchedule(input) {
+  createSchedule(input, { agentFolder } = {}) {
     const now = this.now();
+    const canonicalAgentFolder = this.assertBrowserRootProjectFolder(
+      agentFolder
+    );
     const definition = normalizePortableScheduleForFile(
       {
         ...input,
@@ -625,28 +616,18 @@ export class PortableSchedulerDefinitionStore {
         created_at: now,
         updated_at: now,
       },
-      { now }
+      { now, agentFolder: canonicalAgentFolder }
     );
-    const agentFolder = this.assertHostKnownAgentFolder(
-      definition.setup_snapshot.agent_folder,
-      { includeMemory: false }
-    );
-    this.rememberKnownFolder(definition.agent_id, agentFolder);
-    const existing = this.readDefinitionsForFolder(agentFolder);
+    const existing = this.readDefinitionsForFolder(canonicalAgentFolder);
     if (existing.some((entry) => entry.id === definition.id)) {
       throw new Error(`portable scheduler already exists: ${definition.id}`);
     }
-    this.writeDefinitionsForFolder(agentFolder, [...existing, definition]);
-    const portableHash = this.buildPortableHash(definition);
-    this.runtimeStore.markPortableScheduleOwnerToggle({
-      scheduleId: definition.id,
-      agentFolder,
-      portableHash,
-      enabled: definition.enabled,
-    });
+    this.writeDefinitionsForFolder(canonicalAgentFolder, [
+      ...existing,
+      definition,
+    ]);
     return this.definitionToSchedule(definition, {
-      agentFolder,
-      ownerManaged: true,
+      agentFolder: canonicalAgentFolder,
     });
   }
 
@@ -666,32 +647,13 @@ export class PortableSchedulerDefinitionStore {
         created_at: definitions[index].created_at,
         updated_at: now,
       },
-      { now }
+      { now, agentFolder }
     );
-    const updatedFolder = this.assertHostKnownAgentFolder(
-      updated.setup_snapshot.agent_folder,
-      { includeMemory: false }
-    );
-    this.rememberKnownFolder(updated.agent_id, updatedFolder);
-    if (updatedFolder !== agentFolder) {
-      const oldDefinitions = definitions.filter((entry) => entry.id !== scheduleId);
-      this.writeDefinitionsForFolder(agentFolder, oldDefinitions);
-      const targetDefinitions = this.readDefinitionsForFolder(updatedFolder);
-      this.writeDefinitionsForFolder(updatedFolder, [...targetDefinitions, updated]);
-    } else {
-      definitions[index] = updated;
-      this.writeDefinitionsForFolder(agentFolder, definitions);
-    }
-    const portableHash = this.buildPortableHash(updated);
-    this.runtimeStore.markPortableScheduleOwnerToggle({
-      scheduleId,
-      agentFolder: updatedFolder,
-      portableHash,
-      enabled: updated.enabled,
-    });
+    const updatedFolder = agentFolder;
+    definitions[index] = updated;
+    this.writeDefinitionsForFolder(agentFolder, definitions);
     return this.definitionToSchedule(updated, {
       agentFolder: updatedFolder,
-      ownerManaged: true,
     });
   }
 
@@ -718,26 +680,16 @@ export class PortableSchedulerDefinitionStore {
     const schedule = this.getSchedule(scheduleId);
     if (!schedule) throw new Error("Host schedule not found");
     const agentFolder = schedule.metadata.portable_agent_folder;
-    const definitions = this.readDefinitionsForFolder(agentFolder);
-    const index = definitions.findIndex((entry) => entry.id === scheduleId);
-    if (index < 0) throw new Error("Host schedule not found");
-    definitions[index] = {
-      ...definitions[index],
-      next_run_at: nextRunAt || null,
-      enabled: status ? status === "active" : definitions[index].enabled,
-      status: status || definitions[index].status,
-      updated_at: this.now(),
-    };
-    this.writeDefinitionsForFolder(agentFolder, definitions);
     this.runtimeStore.recordPortableScheduleDispatch({
       scheduleId,
       agentFolder,
-      portableHash: this.buildPortableHash(definitions[index]),
+      portableHash: schedule.metadata.portable_definition_hash,
       triggeredAt,
       nextRunAt,
       dispatchedMessageId,
       status,
     });
+    this.invalidateScheduleCache();
     return this.getSchedule(scheduleId);
   }
 
@@ -745,25 +697,15 @@ export class PortableSchedulerDefinitionStore {
     const schedule = this.getSchedule(scheduleId);
     if (!schedule) throw new Error("Host schedule not found");
     const agentFolder = schedule.metadata.portable_agent_folder;
-    const definitions = this.readDefinitionsForFolder(agentFolder);
-    const index = definitions.findIndex((entry) => entry.id === scheduleId);
-    if (index < 0) throw new Error("Host schedule not found");
-    definitions[index] = {
-      ...definitions[index],
-      next_run_at: nextRunAt || null,
-      enabled: status ? status === "active" : definitions[index].enabled,
-      status: status || definitions[index].status,
-      updated_at: this.now(),
-    };
-    this.writeDefinitionsForFolder(agentFolder, definitions);
     this.runtimeStore.recordPortableScheduleSkip({
       scheduleId,
       agentFolder,
-      portableHash: this.buildPortableHash(definitions[index]),
+      portableHash: schedule.metadata.portable_definition_hash,
       triggeredAt,
       nextRunAt,
       status,
     });
+    this.invalidateScheduleCache();
     return this.getSchedule(scheduleId);
   }
 }

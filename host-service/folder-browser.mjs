@@ -1,10 +1,12 @@
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "fs/promises";
-import { dirname, isAbsolute, join } from "path";
+import { basename, dirname, isAbsolute, join } from "path";
 import { fileURLToPath } from "url";
 import { resolveDefaultBrowsePathAsync, resolveDirectoryPathAsync } from "./config.mjs";
 import { completeSchedulerSessionSetupPayloadForRuntime } from "./scheduler-setup-snapshot-contract.mjs";
+import { deriveBrowserRootProjectId } from "./browser-root-project-index.mjs";
+import { normalizePortableSetupSnapshot } from "./portable-scheduler-definitions.mjs";
 import { FULL_DISK_ACCESS_SETTINGS_URI as MACOS_FULL_DISK_ACCESS_SETTINGS_URI } from "./macos-permissions.mjs";
 
 const DEFAULT_LIMIT = 100;
@@ -19,7 +21,6 @@ const DEFAULT_WORKER_PATH = join(__dirname, "folder-browser-worker.mjs");
 const DEMO_AGENT_ID = "oysterun-github-tracker";
 const DEMO_AGENT_BASE_FOLDER_NAME = "oysterun-github-tracker";
 const DEMO_AGENT_TEMPLATE_ROOT = join(__dirname, "templates", "demo-agents");
-const DEMO_AGENT_PATH_PLACEHOLDER = "__OYSTERUN_DEMO_AGENT_FOLDER__";
 const NODE_FOLDER_ACCESS_PERMISSION = "node_folder_access";
 
 function normalizeOffset(rawOffset) {
@@ -132,23 +133,6 @@ function computeNextTaipeiDailyRunAt(time = "11:30", now = new Date()) {
   return new Date(targetUtc).toISOString();
 }
 
-function replaceDemoAgentPathValues(value, copiedPath) {
-  if (Array.isArray(value)) {
-    return value.map((entry) => replaceDemoAgentPathValues(entry, copiedPath));
-  }
-  if (isObjectRecord(value)) {
-    const next = {};
-    for (const [key, entry] of Object.entries(value)) {
-      next[key] = replaceDemoAgentPathValues(entry, copiedPath);
-    }
-    return next;
-  }
-  if (typeof value === "string" && value === DEMO_AGENT_PATH_PLACEHOLDER) {
-    return copiedPath;
-  }
-  return value;
-}
-
 async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
   const schedulersPath = join(copiedPath, ".oysterun", "schedulers.json");
   const raw = await readFile(schedulersPath, "utf8");
@@ -161,40 +145,49 @@ async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
     );
   }
   const timestamp = nowIso();
+  const projectId = deriveBrowserRootProjectId(basename(copiedPath));
   const normalizedSchedulers = payload.schedulers.map((entry) => {
-    const schedule = replaceDemoAgentPathValues(entry, copiedPath);
+    const schedule = JSON.parse(JSON.stringify(entry));
+    if (!isObjectRecord(schedule) || !isObjectRecord(schedule.setup_snapshot)) {
+      throw buildFolderMutationError(
+        "Demo agent scheduler setup_snapshot is invalid",
+        500,
+        "demo_agent_scheduler_invalid"
+      );
+    }
     const time =
       schedule?.schedule_rule?.timezone === "Asia/Taipei"
         ? schedule.schedule_rule.time
         : "11:30";
     const id = randomUUID();
     schedule.id = id;
-    schedule.agent_id = schedule.agent_id || DEMO_AGENT_ID;
+    schedule.agent_id = projectId;
     schedule.created_by = "oysterun-demo-agent-copy";
     schedule.enabled = true;
     schedule.status = "active";
     schedule.next_run_at = computeNextTaipeiDailyRunAt(time);
     schedule.created_at = timestamp;
     schedule.updated_at = timestamp;
-    if (isObjectRecord(schedule.setup_snapshot)) {
-      schedule.setup_snapshot.agent_folder = copiedPath;
-      schedule.setup_snapshot.cwd = copiedPath;
-    }
-    if (isObjectRecord(schedule.metadata?.target_binding?.setup_snapshot)) {
-      schedule.metadata.target_binding.setup_snapshot.agent_folder = copiedPath;
-      schedule.metadata.target_binding.setup_snapshot.cwd = copiedPath;
-    }
-    const completedSetup = completeSchedulerSessionSetupPayloadForRuntime({
+    const portableSetupSnapshot = normalizePortableSetupSnapshot(
+      schedule.setup_snapshot
+    );
+    schedule.setup_snapshot = portableSetupSnapshot;
+    completeSchedulerSessionSetupPayloadForRuntime({
       agentFolder: copiedPath,
-      sessionPayload: schedule.setup_snapshot,
+      sessionPayload: {
+        ...portableSetupSnapshot,
+        agent_folder: copiedPath,
+        cwd: copiedPath,
+      },
       label: `demo agent scheduler ${id}`,
       requireExplicitRuntimeProof: true,
     }).sessionPayload;
-    schedule.setup_snapshot = completedSetup;
     if (isObjectRecord(schedule.metadata?.target_binding)) {
       schedule.metadata.target_binding.kind = "setup_snapshot";
-      schedule.metadata.target_binding.agent_id = schedule.agent_id;
-      schedule.metadata.target_binding.setup_snapshot = completedSetup;
+      schedule.metadata.target_binding.agent_id = projectId;
+      schedule.metadata.target_binding.setup_snapshot = {
+        ...portableSetupSnapshot,
+      };
     }
     return schedule;
   });

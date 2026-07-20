@@ -558,6 +558,7 @@ export function buildOysterunSemanticMatrixContent({
       control_kind: controlKind,
       control_family: controlFamily,
       control_origin: controlOrigin,
+      control_payload: normalizeOptionalJsonValue(correlation.control_payload),
       outcome: controlOutcome,
       actor,
       matrix_event_sender: normalizeOptionalString(
@@ -750,6 +751,7 @@ export function classifyOysterunSemanticContent(content) {
     control_kind: payload.control_kind || null,
     control_family: payload.control_family || null,
     control_origin: payload.control_origin || null,
+    control_payload: payload.control_payload ?? null,
     actor: payload.actor || null,
     matrix_event_sender: payload.matrix_event_sender || null,
     matrix_event_sender_actor_key:

@@ -4046,6 +4046,10 @@ function routeCSemanticBodyForRuntimeEvent(event, semanticType) {
         event
       ) ||
       "control";
+    if (controlKind === "mcp_elicitation") {
+      const message = normalizeRouteCSemanticString(event?.payload?.message);
+      if (message) return message;
+    }
     return `Control request ${controlKind} is awaiting action.`;
   }
   if (semanticType === "control.outcome") {
@@ -4428,6 +4432,18 @@ function routeCControlAllowedActionsForRuntimeEvent(
         }`
       );
   }
+}
+
+function routeCControlPayloadForRuntimeEvent(event, controlKind, semanticType) {
+  if (
+    semanticType !== "control.request" ||
+    controlKind !== "mcp_elicitation" ||
+    !event?.payload ||
+    typeof event.payload !== "object"
+  ) {
+    return null;
+  }
+  return boundedRedactedMatrixValue(event.payload);
 }
 
 function routeCControlTargetForRuntimeEvent(
@@ -5762,6 +5778,11 @@ export function createRouteCMatrixFacade({
         controlKind,
         semanticType
       );
+      const controlPayload = routeCControlPayloadForRuntimeEvent(
+        event,
+        controlKind,
+        semanticType
+      );
       const toolSemanticFields = routeCToolSemanticFieldsForRuntimeEvent(
         event,
         semanticType
@@ -5872,6 +5893,7 @@ export function createRouteCMatrixFacade({
           control_kind: controlKind,
           control_family: controlFamily,
           control_origin: controlOrigin,
+          control_payload: controlPayload,
           control_outcome: controlOutcome,
           outcome: controlOutcome,
           actor:
@@ -6523,6 +6545,11 @@ export function createRouteCMatrixFacade({
         event,
         semanticType
       );
+      const controlPayload = routeCControlPayloadForRuntimeEvent(
+        event,
+        controlKind,
+        semanticType
+      );
       const semanticIdentityHash = hashMatrixContent({
         session_id: session.id,
         matrix_room_id: binding.matrix_room_id,
@@ -6575,6 +6602,7 @@ export function createRouteCMatrixFacade({
           control_kind: controlKind,
           control_family: controlFamily,
           control_origin: controlOrigin,
+          control_payload: controlPayload,
           control_outcome: controlOutcome,
           outcome: controlOutcome,
           actor:

@@ -2,8 +2,8 @@
 """
 Oysterun GitHub repository report.
 
-Fetches configured GitHub repository updates, writes data/latest_report.html,
-and sends the same HTML report to the Host owner through Oysterun Mail.
+Fetches configured GitHub repository updates, publishes one HTML report through
+the project Website, and sends that same file through Oysterun Mail.
 """
 
 import argparse
@@ -24,7 +24,10 @@ from github_tracker import GitHubTracker
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-PREVIEW_FILE = DATA_DIR / "latest_report.html"
+SITE_DIR = PROJECT_ROOT / ".oysterun" / "site"
+REPORTS_DIR = SITE_DIR / "reports"
+REPORT_FILE = REPORTS_DIR / "latest_report.html"
+SITE_INDEX_FILE = SITE_DIR / "index.html"
 DEFAULT_SOURCE_TYPE = "github_tracker"
 DEFAULT_SOURCE_REF = "github-tracker-daily"
 
@@ -704,10 +707,53 @@ def build_html_report(all_updates: list, repos_config: dict, days: int) -> tuple
     return html_report, mail_summary
 
 
-def write_preview(html_report: str) -> Path:
-    DATA_DIR.mkdir(exist_ok=True)
-    PREVIEW_FILE.write_text(html_report, encoding="utf-8")
-    return PREVIEW_FILE
+def build_site_index(title: str) -> str:
+    safe_title = html.escape(title)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Oysterun GitHub Tracker</title>
+  <style>
+    body {{ margin: 0; font-family: system-ui, sans-serif; color: #172033; background: #f5f7fb; }}
+    main {{ width: min(760px, calc(100% - 32px)); margin: 64px auto; }}
+    h1 {{ margin: 0 0 12px; font-size: 32px; }}
+    p {{ color: #596579; line-height: 1.6; }}
+    a {{ display: inline-block; margin-top: 18px; color: #175cd3; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Oysterun GitHub Tracker</h1>
+    <p>{safe_title}</p>
+    <a href="reports/latest_report.html">Open the latest report</a>
+  </main>
+</body>
+</html>
+"""
+
+
+def snapshot_optional_file(path: Path) -> tuple[bool, bytes]:
+    if not path.exists():
+        return False, b""
+    return True, path.read_bytes()
+
+
+def restore_optional_file(path: Path, snapshot: tuple[bool, bytes]) -> None:
+    existed, content = snapshot
+    if existed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def publish_website_report(html_report: str, title: str) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORT_FILE.write_text(html_report, encoding="utf-8")
+    SITE_INDEX_FILE.write_text(build_site_index(title), encoding="utf-8")
+    return REPORT_FILE
 
 
 def snapshot_state_file() -> tuple[bool, bytes]:
@@ -796,9 +842,13 @@ def main() -> None:
     tracker = GitHubTracker(state_file=state_file, github_token=github_token, days=args.days)
     all_updates = fetch_updates(tracker, repos_config)
     html_report, mail_summary = build_html_report(all_updates, repos_config, args.days)
-    preview_file = write_preview(html_report)
+    title = args.title or f"GitHub Updates Report - {datetime.now().strftime('%Y-%m-%d')}"
+    report_snapshot = snapshot_optional_file(REPORT_FILE)
+    index_snapshot = snapshot_optional_file(SITE_INDEX_FILE)
+    report_file = publish_website_report(html_report, title)
     total_releases, total_commits = count_totals(all_updates)
-    print(f"Preview saved to: {preview_file}")
+    print(f"Website report published to: {report_file}")
+    print(f"Website landing page updated at: {SITE_INDEX_FILE}")
     print(
         "Report stats: "
         f"{len(repos_config['repositories'])} repo(s) tracked, "
@@ -812,12 +862,14 @@ def main() -> None:
         print("Tracker state restored because this was a no-mail preview run.")
         return
 
-    title = args.title or f"GitHub Updates Report - {datetime.now().strftime('%Y-%m-%d')}"
     try:
-        send_oysterun_mail(title, preview_file, mail_summary, args.source_ref)
+        send_oysterun_mail(title, report_file, mail_summary, args.source_ref)
     except Exception:
         restore_state_file(state_snapshot)
+        restore_optional_file(REPORT_FILE, report_snapshot)
+        restore_optional_file(SITE_INDEX_FILE, index_snapshot)
         print("Tracker state restored because Oysterun Mail send failed.", file=sys.stderr)
+        print("Website report restored because Oysterun Mail send failed.", file=sys.stderr)
         raise
 
 

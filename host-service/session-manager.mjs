@@ -4594,13 +4594,6 @@ export class SessionManager extends EventEmitter {
       notification_config_updated_at: normalizeHostRestartString(
         session.notificationConfigUpdatedAt
       ),
-      website_access_override: normalizeHostRestartString(
-        session.websiteAccessOverride
-      ),
-      website_enabled_override:
-        typeof session.websiteEnabledOverride === "boolean"
-          ? session.websiteEnabledOverride
-          : null,
       search_enabled: session.searchEnabled === true,
       image_input_enabled: session.imageInputEnabled === true,
       allow_dangerously_skip_permissions:
@@ -4725,16 +4718,6 @@ export class SessionManager extends EventEmitter {
       const restoredNotificationConfigUpdatedAt =
         normalizeHostRestartString(record.notification_config_updated_at) ||
         normalizeHostRestartString(record.notificationConfigUpdatedAt);
-      const restoredWebsiteAccessOverride =
-        normalizeHostRestartString(record.website_access_override) ||
-        normalizeHostRestartString(record.websiteAccessOverride);
-      const restoredWebsiteEnabledOverride =
-        typeof record.website_enabled_override === "boolean"
-          ? record.website_enabled_override
-          : typeof record.websiteEnabledOverride === "boolean"
-            ? record.websiteEnabledOverride
-            : null;
-
       let session;
       try {
         session = this.start({
@@ -4785,12 +4768,6 @@ export class SessionManager extends EventEmitter {
       if (restoredNotificationConfigUpdatedAt) {
         session.notificationConfigUpdatedAt =
           restoredNotificationConfigUpdatedAt;
-      }
-      if (restoredWebsiteAccessOverride) {
-        session.websiteAccessOverride = restoredWebsiteAccessOverride;
-      }
-      if (typeof restoredWebsiteEnabledOverride === "boolean") {
-        session.websiteEnabledOverride = restoredWebsiteEnabledOverride;
       }
       session.hostRestartRestore = {
         restart_id: restartId || null,

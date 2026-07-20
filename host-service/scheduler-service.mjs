@@ -7,7 +7,6 @@ import {
   PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER,
   PORTABLE_SCHEDULER_STORAGE_OWNER,
   PortableSchedulerDefinitionStore,
-  normalizePortableSetupSnapshot,
 } from "./portable-scheduler-definitions.mjs";
 import {
   computeNextScheduleRunAt,
@@ -290,7 +289,7 @@ function normalizeScheduleTargetBinding(
     };
   }
   if (kind === "setup_snapshot") {
-    const setupSnapshot = normalizePortableSetupSnapshot(
+    const setupSnapshot = normalizeSessionSetupPayload(
       value.setup_snapshot || value.session_setup_payload
     );
     return {
@@ -654,7 +653,8 @@ export class SchedulerService {
     store = new SchedulerStore(),
     mailStore = null,
     getHostOrigin = () => null,
-    getKnownAgentFolders = () => [],
+    getBrowserRootProjects = () => [],
+    getProjectIndexGeneration = () => null,
     portableDefinitionStore = null,
     clock = () => new Date(),
     recheckMs = SCHEDULER_BUSY_RECHECK_MS,
@@ -668,7 +668,8 @@ export class SchedulerService {
       portableDefinitionStore ||
       new PortableSchedulerDefinitionStore({
         runtimeStore: store,
-        getKnownAgentFolders,
+        getBrowserRootProjects,
+        getProjectIndexGeneration,
         clock,
       });
     this.mailStore = mailStore;
@@ -1012,21 +1013,25 @@ export class SchedulerService {
       timezone,
       enabled,
     });
-    const schedule = this.portableDefinitionStore.createSchedule({
-      host_session_id: normalized.hostSessionId,
-      agentId: normalized.agentId,
-      agent_id: normalized.agentId,
-      created_by: createdBy,
-      command_text: normalized.inputText,
-      normalized_command: normalized.normalizedCommand,
-      next_run_at: normalized.nextRunAt,
-      status: normalized.status,
-      enabled: normalized.status === "active",
-      schedule_rule: normalized.metadata.schedule_rule,
-      timezone: normalized.metadata.timezone,
-      setup_snapshot: normalized.metadata.target_binding.setup_snapshot,
-      metadata: normalized.metadata,
-    });
+    const runtimeSetupSnapshot = normalized.metadata.target_binding.setup_snapshot;
+    const schedule = this.portableDefinitionStore.createSchedule(
+      {
+        host_session_id: normalized.hostSessionId,
+        agentId: normalized.agentId,
+        agent_id: normalized.agentId,
+        created_by: createdBy,
+        command_text: normalized.inputText,
+        normalized_command: normalized.normalizedCommand,
+        next_run_at: normalized.nextRunAt,
+        status: normalized.status,
+        enabled: normalized.status === "active",
+        schedule_rule: normalized.metadata.schedule_rule,
+        timezone: normalized.metadata.timezone,
+        setup_snapshot: runtimeSetupSnapshot,
+        metadata: normalized.metadata,
+      },
+      { agentFolder: runtimeSetupSnapshot.agent_folder }
+    );
     return {
       status: "created",
       schedule: this.serializeHostScheduleForDashboardUi(schedule),
@@ -1115,53 +1120,6 @@ export class SchedulerService {
       .map((schedule) => this.serializeHostScheduleForDashboardUi(schedule));
   }
 
-  registerCopiedDemoAgentSchedules({ agentFolder } = {}) {
-    this.initialize();
-    const realFolder = this.portableDefinitionStore.assertHostKnownAgentFolder(
-      normalizeRequiredString(agentFolder, "agentFolder"),
-      { includeMemory: false, requireKnown: true }
-    );
-    const definitions =
-      this.portableDefinitionStore.readDefinitionsForFolder(realFolder);
-    const registered = [];
-    for (const definition of definitions) {
-      const portableHash =
-        this.portableDefinitionStore.buildPortableHash(definition);
-      this.store.markPortableScheduleOwnerToggle({
-        scheduleId: definition.id,
-        agentFolder: realFolder,
-        portableHash,
-        enabled: definition.enabled === true,
-      });
-      const schedule = this.portableDefinitionStore.definitionToSchedule(
-        definition,
-        { agentFolder: realFolder, ownerManaged: true }
-      );
-      registered.push(this.serializeHostScheduleForDashboardUi(schedule));
-    }
-    return {
-      status: "demo_agent_schedulers_registered",
-      agent_folder: realFolder,
-      registered_count: registered.length,
-      schedules: registered,
-      storage_owner: PORTABLE_SCHEDULER_STORAGE_OWNER,
-      runtime_state_owner: PORTABLE_SCHEDULER_RUNTIME_STATE_OWNER,
-    };
-  }
-
-  validateCopiedDemoAgentScheduleDefinitions({ agentFolder } = {}) {
-    this.initialize();
-    const definitions = this.portableDefinitionStore.readDefinitionsForFolder(
-      normalizeRequiredString(agentFolder, "agentFolder")
-    );
-    return {
-      status: "demo_agent_schedulers_validated",
-      agent_folder: normalizeRequiredString(agentFolder, "agentFolder"),
-      scheduler_count: definitions.length,
-      definitions,
-    };
-  }
-
   getHostScheduleForDashboard(scheduleId) {
     return this.serializeHostScheduleForDashboardUi(
       this.requireHostSchedule(scheduleId)
@@ -1228,25 +1186,29 @@ export class SchedulerService {
       timezone,
       enabled: true,
     });
-    const schedule = this.portableDefinitionStore.createSchedule({
-      host_session_id: normalized.hostSessionId,
-      agent_id: normalized.agentId,
-      createdBy,
-      created_by: createdBy,
-      command_text: normalized.inputText,
-      normalized_command: normalized.normalizedCommand,
-      next_run_at: normalized.nextRunAt,
-      status: normalized.status,
-      enabled: true,
-      schedule_rule: normalized.metadata.schedule_rule,
-      timezone: normalized.metadata.timezone,
-      setup_snapshot: normalized.metadata.target_binding.setup_snapshot,
-      metadata: {
-        ...normalized.metadata,
-        source: "p72_portable_host_scheduler_model",
-        p12_5_ui_pending: true,
+    const runtimeSetupSnapshot = normalized.metadata.target_binding.setup_snapshot;
+    const schedule = this.portableDefinitionStore.createSchedule(
+      {
+        host_session_id: normalized.hostSessionId,
+        agent_id: normalized.agentId,
+        createdBy,
+        created_by: createdBy,
+        command_text: normalized.inputText,
+        normalized_command: normalized.normalizedCommand,
+        next_run_at: normalized.nextRunAt,
+        status: normalized.status,
+        enabled: true,
+        schedule_rule: normalized.metadata.schedule_rule,
+        timezone: normalized.metadata.timezone,
+        setup_snapshot: runtimeSetupSnapshot,
+        metadata: {
+          ...normalized.metadata,
+          source: "browser_root_portable_host_scheduler_model",
+          p12_5_ui_pending: true,
+        },
       },
-    });
+      { agentFolder: runtimeSetupSnapshot.agent_folder }
+    );
     return {
       status: "created",
       schedule: this.serializeHostScheduleForApi(schedule),
@@ -2557,8 +2519,6 @@ export class SchedulerService {
       setup_snapshot_copied: metadata.setup_snapshot_copied === true,
       source_session_references_present:
         metadata.source_session_references_present === true,
-      cloned_first_discovery_disabled:
-        metadata.cloned_first_discovery_disabled === true,
       browser_local_storage_owner: false,
       matrix_db_owner: false,
       p12_5_scheduler_tab: true,

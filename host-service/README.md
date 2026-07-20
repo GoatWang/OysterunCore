@@ -674,7 +674,6 @@ Current Host-local state is split between config data and asset data.
 These use `OYSTERUN_CONFIG_DIR` when set, otherwise `~/.oysterun/`:
 
 - `config.json`
-- `agent-registry.json`
 - `session-history.json`
 
 ### Asset-like state
@@ -699,7 +698,7 @@ host-service/
   server.mjs                         # HTTP server, WebSocket server, route handlers
   session-manager.mjs                # Agent session lifecycle and stable Host session IDs
   host-authz.mjs                     # Capability-based Host authorization helpers
-  agent-registry.mjs                 # Host-local agent_id -> folder registry
+  browser-root-project-index.mjs     # In-memory Browser Root project discovery
   agent-config.mjs                   # Shared/local/default config layering and workspace policy
   session-history.mjs                # Persisted recent session summary records
   session-assets.mjs                 # Shared transcript/upload bucket helpers

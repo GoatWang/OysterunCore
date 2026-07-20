@@ -22,8 +22,9 @@ This command should:
 
 - read the configured repositories;
 - fetch GitHub releases and commits;
-- write `data/latest_report.html`;
-- send the `.html` report to the Host owner with Oysterun Mail.
+- write `.oysterun/site/reports/latest_report.html`;
+- update `.oysterun/site/index.html` to link the report;
+- send that same `.html` report to the Host owner with Oysterun Mail.
 
 Do not edit source code, scheduler configuration, commands, prompts, README
 files, or `config.json` during a scheduled report run. If the report cannot be
@@ -52,7 +53,7 @@ Do not print or expose:
 Allowed report output:
 
 ```text
-data/latest_report.html
+.oysterun/site/reports/latest_report.html
 ```
 
 ## Final Check
@@ -60,12 +61,13 @@ data/latest_report.html
 Before finishing, verify:
 
 ```bash
-test -s data/latest_report.html
+test -s .oysterun/site/reports/latest_report.html
+test -s .oysterun/site/index.html
 ```
 
 Then report only:
 
-- HTML report written;
+- Website report published;
 - Mail send status from the tracker command;
 - brief report stats;
 - any blocker encountered.

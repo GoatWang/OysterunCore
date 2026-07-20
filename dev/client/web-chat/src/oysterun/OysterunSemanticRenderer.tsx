@@ -1,5 +1,5 @@
 import React, { CSSProperties, ReactNode, useEffect, useRef, useState } from 'react';
-import { Box, Button, Text, config } from 'folds';
+import { Box, Button, Spinner, Text, config } from 'folds';
 
 import {
   classifyOysterunSemanticRowReadout,
@@ -8,6 +8,7 @@ import {
   recordOysterunProviderControlProof,
   recordOysterunSemanticDiagnostic,
   respondOysterunProviderControl,
+  type OysterunMcpElicitationResponse,
   type OysterunProviderControlAction,
   type OysterunToolEventDetailResponse,
   type OysterunToolLifecycleInvocation,
@@ -64,6 +65,7 @@ export type OysterunSemanticPayload = {
   control_kind?: string;
   control_family?: string;
   control_origin?: string;
+  control_payload?: unknown;
   outcome?: string;
   actor?: string;
   matrix_event_sender?: string;
@@ -148,11 +150,11 @@ function normalizeOysterunSemanticString(value: unknown): string {
 }
 
 export function isOysterunProviderCompletionMarkerPayload(
-  payload: OysterunSemanticPayload | undefined
+  payload: OysterunSemanticPayload | undefined,
 ): boolean {
   if (!payload) return false;
   const semanticType = normalizeOysterunSemanticString(
-    payload.semantic_type ?? payload.semantic_category
+    payload.semantic_type ?? payload.semantic_category,
   );
   if (semanticType !== 'session_lifecycle') return false;
   if (
@@ -375,7 +377,7 @@ function isProjectedToolResultSummaryDetail(detail: OysterunToolCompressionDetai
 
 function projectedToolPreviewSuppressionScope(
   detail: OysterunToolCompressionDetail,
-  isToolOutputBatch: boolean
+  isToolOutputBatch: boolean,
 ): string {
   if (isToolOutputBatch) return 'tool_output_batch_summary_only';
   if (isProjectedToolResultSummaryDetail(detail)) {
@@ -398,7 +400,7 @@ function hasToolDetailIdentity(detail: OysterunToolCompressionDetail | undefined
     detail?.detailAvailable === true &&
       detail.hostSessionId &&
       detail.matrixRoomId &&
-      detail.eventId
+      detail.eventId,
   );
 }
 
@@ -410,7 +412,7 @@ function isPreferredLazyToolDetail(detail: OysterunToolCompressionDetail | undef
 }
 
 function getPreferredLazyToolDetail(
-  details: OysterunToolCompressionDetail[]
+  details: OysterunToolCompressionDetail[],
 ): OysterunToolCompressionDetail | undefined {
   for (let index = details.length - 1; index >= 0; index -= 1) {
     if (isPreferredLazyToolDetail(details[index])) {
@@ -450,14 +452,14 @@ function getLazyToolDetailFetchIdentity({
     };
   }
   const groupIdentity = details.find(
-    (detail) => detail.hostSessionId && detail.matrixRoomId && detail.eventId
+    (detail) => detail.hostSessionId && detail.matrixRoomId && detail.eventId,
   );
   if (groupIdentity) {
     return { detail: groupIdentity, source: 'compressed-group-identity-fallback' };
   }
   return {
     detail: retainedMatrixDetails.find(
-      (detail) => detail.hostSessionId && detail.matrixRoomId && detail.eventId
+      (detail) => detail.hostSessionId && detail.matrixRoomId && detail.eventId,
     ),
     source: 'retained-matrix-identity-fallback',
   };
@@ -465,7 +467,7 @@ function getLazyToolDetailFetchIdentity({
 
 function getPrimaryToolSummaryDetail(
   details: OysterunToolCompressionDetail[],
-  fallback: OysterunToolCompressionDetail
+  fallback: OysterunToolCompressionDetail,
 ): OysterunToolCompressionDetail {
   const preferredLazyDetail = getPreferredLazyToolDetail(details);
   if (preferredLazyDetail) {
@@ -489,7 +491,7 @@ function getPrimaryToolSummaryDetail(
 
 function getFirstToolMessageSummaryDetail(
   details: OysterunToolCompressionDetail[],
-  fallback: OysterunToolCompressionDetail
+  fallback: OysterunToolCompressionDetail,
 ): OysterunToolCompressionDetail {
   return details[0] ?? fallback;
 }
@@ -591,7 +593,7 @@ function OysterunToolDetailView({
     : details;
   const retainedMatrixPageDetails = details.slice(
     0,
-    OYSTERUN_ROUTE_C_TOOL_EXPANSION_EVENT_PAGE_SIZE
+    OYSTERUN_ROUTE_C_TOOL_EXPANSION_EVENT_PAGE_SIZE,
   );
   const lazyDetailFetchIdentity = getLazyToolDetailFetchIdentity({
     details,
@@ -605,7 +607,7 @@ function OysterunToolDetailView({
   const [toolEventDetailPage, setToolEventDetailPage] = useState(1);
   const [knownToolEventDetailPageCount, setKnownToolEventDetailPageCount] = useState(1);
   const [toolEventDetail, setToolEventDetail] = useState<OysterunToolEventDetailResponse | null>(
-    null
+    null,
   );
   const [toolEventDetailLoading, setToolEventDetailLoading] = useState(false);
   const [toolEventDetailError, setToolEventDetailError] = useState('');
@@ -613,7 +615,7 @@ function OysterunToolDetailView({
     retainedHostSessionId &&
       retainedMatrixRoomId &&
       retainedMatrixEventId &&
-      retainedToolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE
+      retainedToolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE,
   );
   const toolEventDetailRequestKey = canLoadToolEventDetail
     ? JSON.stringify([
@@ -626,10 +628,10 @@ function OysterunToolDetailView({
     : '';
   const activeToolEventDetailRequestKeyRef = useRef('');
   const toolEventDetailResponseCacheRef = useRef(
-    new Map<string, OysterunToolEventDetailResponse>()
+    new Map<string, OysterunToolEventDetailResponse>(),
   );
   const toolEventDetailRequestCacheRef = useRef(
-    new Map<string, Promise<OysterunToolEventDetailResponse>>()
+    new Map<string, Promise<OysterunToolEventDetailResponse>>(),
   );
 
   useEffect(() => {
@@ -669,7 +671,7 @@ function OysterunToolDetailView({
             if (toolEventDetailRequestCacheRef.current.get(toolEventDetailRequestKey) === request) {
               toolEventDetailRequestCacheRef.current.delete(toolEventDetailRequestKey);
             }
-          }
+          },
         );
       }
       request
@@ -719,8 +721,7 @@ function OysterunToolDetailView({
     detailMatchesRequestedPage && !toolEventDetailError ? toolEventDetail?.invocations ?? [] : [];
   const toolEventDetailPageCount = knownToolEventDetailPageCount;
   const showToolEventDetailControls =
-    canLoadToolEventDetail &&
-    (toolEventDetailPageCount > 1 || toolEventDetailPage > 1);
+    canLoadToolEventDetail && (toolEventDetailPageCount > 1 || toolEventDetailPage > 1);
   const toolEventDetailFallbackReason =
     invocations.length > 0
       ? 'logical_invocations_loaded'
@@ -734,23 +735,23 @@ function OysterunToolDetailView({
       ? 'lazy_endpoint_pending_without_retained_summary_fallback'
       : 'no_detail_available_fetch_identity';
   const toolEventDetailFallbackAllowed = !canLoadToolEventDetail;
-  const toolEventDetailDisplaySource = invocations.length > 0
-    ? 'p011_unified_tool_lifecycle_detail_endpoint'
-    : toolEventDetailFallbackAllowed
-    ? 'retained_matrix_without_lazy_detail'
-    : toolEventDetailLoading
-    ? 'p131_tool_event_detail_loading'
-    : toolEventDetailError
-    ? 'p131_tool_event_detail_error'
-    : toolEventDetail && invocations.length === 0
-    ? 'p131_tool_event_detail_empty'
-    : 'p131_tool_event_detail_pending';
-  const p153FlatPageEntrySource =
+  const toolEventDetailDisplaySource =
     invocations.length > 0
-      ? 'p011_logical_invocation_page'
-      : 'retained_matrix_flat_tool_page';
+      ? 'p011_unified_tool_lifecycle_detail_endpoint'
+      : toolEventDetailFallbackAllowed
+      ? 'retained_matrix_without_lazy_detail'
+      : toolEventDetailLoading
+      ? 'p131_tool_event_detail_loading'
+      : toolEventDetailError
+      ? 'p131_tool_event_detail_error'
+      : toolEventDetail && invocations.length === 0
+      ? 'p131_tool_event_detail_empty'
+      : 'p131_tool_event_detail_pending';
+  const p153FlatPageEntrySource =
+    invocations.length > 0 ? 'p011_logical_invocation_page' : 'retained_matrix_flat_tool_page';
   const selectedDetailLimitBytes =
-    toolEventDetail?.selected_detail_limit_bytes ?? OYSTERUN_ROUTE_C_SELECTED_DETAIL_TOP_LIMIT_BYTES;
+    toolEventDetail?.selected_detail_limit_bytes ??
+    OYSTERUN_ROUTE_C_SELECTED_DETAIL_TOP_LIMIT_BYTES;
   const selectedDetailTruncated = toolEventDetail?.selected_detail_truncated === true;
   const debugToolDetailSourceUiEnabled =
     toolEventDetail?.debug_tool_detail_source_ui_enabled === true;
@@ -796,13 +797,13 @@ function OysterunToolDetailView({
       data-oysterun-p011-logical-detail-page={String(toolEventDetailPage)}
       data-oysterun-p011-logical-detail-page-count={String(toolEventDetailPageCount)}
       data-oysterun-p011-logical-invocation-count={String(
-        toolEventDetail?.logical_invocation_count ?? invocations.length
+        toolEventDetail?.logical_invocation_count ?? invocations.length,
       )}
       data-oysterun-p011-physical-event-count={String(
-        toolEventDetail?.physical_event_count ?? retainedMatrixDetails.length
+        toolEventDetail?.physical_event_count ?? retainedMatrixDetails.length,
       )}
       data-oysterun-p011-local-tool-paths-preserved={String(
-        toolEventDetail?.tool_payload_local_paths_preserved === true
+        toolEventDetail?.tool_payload_local_paths_preserved === true,
       )}
       data-oysterun-p131-tool-detail-available={String(canLoadToolEventDetail)}
       data-oysterun-p131-tool-detail-loading={String(toolEventDetailLoading)}
@@ -813,12 +814,14 @@ function OysterunToolDetailView({
       data-oysterun-p131-tool-detail-fetch-identity-source={lazyDetailFetchIdentity.source}
       data-oysterun-p131-tool-detail-fetch-storage-kind={retainedIdentity?.detailStorageKind}
       data-oysterun-p131-tool-detail-fetched-row-count={String(invocations.length)}
-      data-oysterun-p131-tool-detail-retained-fallback-row-count={String(retainedMatrixDetails.length)}
+      data-oysterun-p131-tool-detail-retained-fallback-row-count={String(
+        retainedMatrixDetails.length,
+      )}
       data-oysterun-p131-tool-detail-fallback-allowed={String(toolEventDetailFallbackAllowed)}
       data-oysterun-p131-tool-detail-fallback-reason={toolEventDetailFallbackReason}
       data-oysterun-p131-tool-detail-display-source={toolEventDetailDisplaySource}
       data-oysterun-p143-expansion-event-page-size={String(
-        OYSTERUN_ROUTE_C_TOOL_EXPANSION_EVENT_PAGE_SIZE
+        OYSTERUN_ROUTE_C_TOOL_EXPANSION_EVENT_PAGE_SIZE,
       )}
       data-oysterun-p143-detail-source-selection={toolEventDetailDisplaySource}
       data-oysterun-p143-retained-summary-fallback-masking="false"
@@ -836,7 +839,9 @@ function OysterunToolDetailView({
             </Text>
             <Text as="span" size="T200" priority="300">
               {toolEventDetail
-                ? `${toolEventDetail.logical_invocation_count ?? invocations.length} tool invocations / ${
+                ? `${
+                    toolEventDetail.logical_invocation_count ?? invocations.length
+                  } tool invocations / ${
                     toolEventDetail.physical_event_count ?? displayRows.length
                   } events`
                 : `${displayRows.length} tool messages`}
@@ -913,7 +918,7 @@ function OysterunToolDetailView({
                     data-oysterun-tool-name={invocation.tool_name ?? undefined}
                     data-oysterun-tool-invocation-state={invocation.state}
                     data-oysterun-tool-physical-event-count={String(
-                      invocation.physical_event_count
+                      invocation.physical_event_count,
                     )}
                     data-oysterun-tool-late-update-count={String(invocation.late_update_count)}
                   >
@@ -954,54 +959,54 @@ function OysterunToolDetailView({
                 );
               })
             : displayRows.map((detail, index) => {
-            const fullCode = formatToolPayload(getToolDetailRenderablePayload(detail));
-            return (
-              <article
-                key={detail.eventId ?? detail.semanticId ?? `${detail.semanticType}-${index}`}
-                style={toolDetailEntryStyle}
-                data-testid="oysterun-routec-tool-detail-entry"
-                data-oysterun-clean-session-testid="oysterun-clean-session-tool-detail-entry"
-                data-oysterun-tool-detail-entry-index={String(index)}
-                data-oysterun-p131-tool-detail-entry-source={p153FlatPageEntrySource}
-                data-oysterun-p153-flat-page-entry-source={p153FlatPageEntrySource}
-                data-oysterun-tool-semantic-type={detail.semanticType}
-                data-oysterun-host-session-id={detail.hostSessionId}
-                data-oysterun-target-turn-id={detail.targetTurnId}
-                data-oysterun-provider-turn-id={detail.providerTurnId}
-                data-oysterun-provider-turn-id-kind={detail.providerTurnIdKind}
-                data-oysterun-tool-name={detail.toolName}
-                data-oysterun-tool-call-id={detail.toolCallId}
-                data-oysterun-matrix-event-id={detail.eventId}
-                data-oysterun-matrix-room-id={detail.matrixRoomId}
-                data-oysterun-matrix-event-sender={detail.matrixEventSender}
-                data-oysterun-matrix-event-sender-actor-key={detail.matrixEventSenderActorKey}
-                data-oysterun-matrix-event-sender-actor-kind={detail.matrixEventSenderActorKind}
-              >
-                <Box direction="Column" gap="200">
-                  <Box alignItems="Center" gap="200" wrap="Wrap">
-                    <Text as="strong" size="T300">
-                      {toolTitleForSemanticType(detail.semanticType, detail.toolIsError)}
-                    </Text>
-                    {detail.toolName && (
-                      <Text as="code" size="T200">
-                        {detail.toolName}
-                      </Text>
-                    )}
-                    {detail.toolCallId && (
-                      <Text as="span" size="T200" priority="300">
-                        {detail.toolCallId}
-                      </Text>
-                    )}
-                  </Box>
-                  {fullCode && (
-                    <pre style={toolDetailCodeStyle}>
-                      <code>{fullCode}</code>
-                    </pre>
-                  )}
-                </Box>
-              </article>
-            );
-          })}
+                const fullCode = formatToolPayload(getToolDetailRenderablePayload(detail));
+                return (
+                  <article
+                    key={detail.eventId ?? detail.semanticId ?? `${detail.semanticType}-${index}`}
+                    style={toolDetailEntryStyle}
+                    data-testid="oysterun-routec-tool-detail-entry"
+                    data-oysterun-clean-session-testid="oysterun-clean-session-tool-detail-entry"
+                    data-oysterun-tool-detail-entry-index={String(index)}
+                    data-oysterun-p131-tool-detail-entry-source={p153FlatPageEntrySource}
+                    data-oysterun-p153-flat-page-entry-source={p153FlatPageEntrySource}
+                    data-oysterun-tool-semantic-type={detail.semanticType}
+                    data-oysterun-host-session-id={detail.hostSessionId}
+                    data-oysterun-target-turn-id={detail.targetTurnId}
+                    data-oysterun-provider-turn-id={detail.providerTurnId}
+                    data-oysterun-provider-turn-id-kind={detail.providerTurnIdKind}
+                    data-oysterun-tool-name={detail.toolName}
+                    data-oysterun-tool-call-id={detail.toolCallId}
+                    data-oysterun-matrix-event-id={detail.eventId}
+                    data-oysterun-matrix-room-id={detail.matrixRoomId}
+                    data-oysterun-matrix-event-sender={detail.matrixEventSender}
+                    data-oysterun-matrix-event-sender-actor-key={detail.matrixEventSenderActorKey}
+                    data-oysterun-matrix-event-sender-actor-kind={detail.matrixEventSenderActorKind}
+                  >
+                    <Box direction="Column" gap="200">
+                      <Box alignItems="Center" gap="200" wrap="Wrap">
+                        <Text as="strong" size="T300">
+                          {toolTitleForSemanticType(detail.semanticType, detail.toolIsError)}
+                        </Text>
+                        {detail.toolName && (
+                          <Text as="code" size="T200">
+                            {detail.toolName}
+                          </Text>
+                        )}
+                        {detail.toolCallId && (
+                          <Text as="span" size="T200" priority="300">
+                            {detail.toolCallId}
+                          </Text>
+                        )}
+                      </Box>
+                      {fullCode && (
+                        <pre style={toolDetailCodeStyle}>
+                          <code>{fullCode}</code>
+                        </pre>
+                      )}
+                    </Box>
+                  </article>
+                );
+              })}
         </Box>
       </Box>
     </div>
@@ -1059,7 +1064,7 @@ function OysterunToolSemanticBox({
     primaryDetail.hostSessionId &&
       primaryDetail.matrixRoomId &&
       primaryDetail.eventId &&
-      primaryDetail.toolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE
+      primaryDetail.toolStorageGeneration === OYSTERUN_TOOL_STORAGE_GENERATION_SQLITE,
   );
   const hasDetailView =
     isCompressedGroup ||
@@ -1081,14 +1086,12 @@ function OysterunToolSemanticBox({
       data-oysterun-tool-preview-clipped={String(preview.clipped)}
       data-oysterun-tool-preview-row-count={String(preview.rowCount)}
       data-oysterun-tool-preview-suppressed={String(previewSuppressed)}
-      data-oysterun-tool-output-batch-preview-suppressed={String(
-        toolOutputBatchPreviewSuppressed
-      )}
+      data-oysterun-tool-output-batch-preview-suppressed={String(toolOutputBatchPreviewSuppressed)}
       data-oysterun-projected-tool-result-preview-suppressed={String(
-        previewSuppressionScope === 'projected_tool_result_summary_only'
+        previewSuppressionScope === 'projected_tool_result_summary_only',
       )}
       data-oysterun-projected-tool-failure-preview-suppressed={String(
-        previewSuppressionScope === 'projected_tool_failure_summary_only'
+        previewSuppressionScope === 'projected_tool_failure_summary_only',
       )}
       data-oysterun-tool-preview-suppression-scope={previewSuppressionScope}
       data-oysterun-tool-code-block-width="full"
@@ -1241,7 +1244,9 @@ function OysterunToolSemanticBox({
 }
 
 function terminalTitleForSemanticType(semanticType: string): string {
-  return semanticType === 'terminal.command.started' ? 'Terminal Command Started' : 'Terminal Result';
+  return semanticType === 'terminal.command.started'
+    ? 'Terminal Command Started'
+    : 'Terminal Result';
 }
 
 function terminalStatusForPayload(semanticType: string, payload: OysterunSemanticPayload): string {
@@ -1303,12 +1308,12 @@ function OysterunTerminalSemanticBox({
         typeof payload.stderr_truncated === 'boolean' ? String(payload.stderr_truncated) : undefined
       }
       data-oysterun-provider-delivery-attempted={String(
-        payload.provider_delivery_attempted === true
+        payload.provider_delivery_attempted === true,
       )}
       data-oysterun-normal-message-user-sent={String(payload.normal_message_user_sent === true)}
       data-oysterun-browser-shell-execution={String(payload.browser_shell_execution === true)}
       data-oysterun-host-db-transcript-product-truth={String(
-        payload.host_db_transcript_product_truth === true
+        payload.host_db_transcript_product_truth === true,
       )}
       data-oysterun-terminal-matrix-message-user-sent="false"
       data-oysterun-terminal-provider-delivery-attempted="false"
@@ -1372,7 +1377,7 @@ function OysterunTerminalSemanticBox({
 
 function isOysterunSemanticControlOutcome(
   value: OysterunSemanticControlOutcome | undefined,
-  requestId: string | undefined
+  requestId: string | undefined,
 ): value is OysterunSemanticControlOutcome {
   return Boolean(value && requestId && value.controlRequestId === requestId);
 }
@@ -1380,6 +1385,563 @@ function isOysterunSemanticControlOutcome(
 function requiredSemanticPayloadString(value: string | undefined, field: string): string {
   if (typeof value === 'string' && value.trim()) return value.trim();
   throw new Error(`Oysterun semantic renderer payload missing required field: ${field}.`);
+}
+
+type OysterunMcpElicitationPayload = {
+  serverName: string;
+  mode: 'form' | 'openai/form' | 'url';
+  message: string;
+  requestedSchema?: Record<string, unknown>;
+  url?: string;
+  meta: unknown;
+};
+
+type OysterunPluginInstallSuggestion = {
+  toolId: string;
+  toolName: string;
+  reason: string;
+  marketplace: string;
+};
+
+function normalizeMcpElicitationPayload(value: unknown): OysterunMcpElicitationPayload | undefined {
+  if (!isOysterunRecord(value)) return undefined;
+  const { mode } = value;
+  if (mode !== 'form' && mode !== 'openai/form' && mode !== 'url') return undefined;
+  const serverName = typeof value.serverName === 'string' ? value.serverName.trim() : '';
+  const message = typeof value.message === 'string' ? value.message.trim() : '';
+  if (!serverName || !message) return undefined;
+  return {
+    serverName,
+    mode,
+    message,
+    requestedSchema: isOysterunRecord(value.requestedSchema) ? value.requestedSchema : undefined,
+    url: typeof value.url === 'string' ? value.url.trim() : undefined,
+    meta: value._meta ?? null,
+  };
+}
+
+function safeMcpElicitationUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requiredPluginSuggestionMetaString(
+  meta: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = meta[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizePluginInstallSuggestion(
+  payload: OysterunMcpElicitationPayload,
+): OysterunPluginInstallSuggestion | undefined {
+  if (payload.serverName !== 'codex_apps' || payload.mode !== 'form') return undefined;
+  if (!isOysterunRecord(payload.meta)) return undefined;
+  if (
+    payload.meta.codex_approval_kind !== 'tool_suggestion' ||
+    payload.meta.tool_type !== 'plugin' ||
+    payload.meta.suggest_type !== 'install'
+  ) {
+    return undefined;
+  }
+  const toolId = requiredPluginSuggestionMetaString(payload.meta, 'tool_id');
+  const toolName = requiredPluginSuggestionMetaString(payload.meta, 'tool_name');
+  const reason = requiredPluginSuggestionMetaString(payload.meta, 'suggest_reason');
+  if (!toolId || !toolName || !reason) return undefined;
+  const separatorIndex = toolId.lastIndexOf('@');
+  const marketplace = separatorIndex >= 0 ? toolId.slice(separatorIndex + 1) : 'Codex';
+  return { toolId, toolName, reason, marketplace };
+}
+
+function OysterunPluginSuggestionPanel({
+  requestId,
+  payload,
+  suggestion,
+  disabled,
+  finalOutcome,
+  controlError,
+  onDecline,
+}: {
+  requestId: string;
+  payload: OysterunMcpElicitationPayload;
+  suggestion: OysterunPluginInstallSuggestion;
+  disabled: boolean;
+  finalOutcome?: string;
+  controlError: string | null;
+  onDecline: (response: OysterunMcpElicitationResponse) => Promise<boolean>;
+}) {
+  const [pendingTerminal, setPendingTerminal] = useState<'oysterun' | 'host' | null>(null);
+
+  useEffect(() => {
+    setPendingTerminal(null);
+  }, [requestId]);
+
+  const declineResponse: OysterunMcpElicitationResponse = {
+    action: 'decline',
+    content: null,
+    _meta: payload.meta,
+  };
+
+  const useTerminal = async (terminal: 'oysterun' | 'host') => {
+    if (disabled || pendingTerminal) return;
+    setPendingTerminal(terminal);
+    const declined = await onDecline(declineResponse);
+    if (!declined) {
+      setPendingTerminal(null);
+      return;
+    }
+    if (terminal === 'oysterun') {
+      window.location.assign(new URL('/app/terminal', window.location.origin).toString());
+    }
+  };
+
+  const actionDisabled = disabled || pendingTerminal !== null;
+
+  return (
+    <Box
+      direction="Column"
+      gap="200"
+      data-testid="oysterun-routec-plugin-suggestion-surface"
+      data-oysterun-control-request-id={requestId}
+      data-oysterun-plugin-suggestion-stage="external-setup-required"
+      data-oysterun-plugin-id={suggestion.toolId}
+    >
+      <Text as="strong" size="T300">
+        Codex suggests installing {suggestion.toolName}
+      </Text>
+      <Text as="span" size="T300">
+        {suggestion.reason}
+      </Text>
+      <Text as="span" size="T200" priority="300">
+        Source: {suggestion.marketplace}
+      </Text>
+      <Text as="span" size="T300">
+        Install and authorize this plugin in the Codex TUI. Open a terminal on the Host, run{' '}
+        <code>codex</code>, enter <code>/plugins</code>, then select the plugin and complete its
+        installation and authorization.
+      </Text>
+      <Text as="span" size="T200" priority="300">
+        On desktop, use the terminal on the Host. On phone, use Oysterun Terminal. The Host
+        Terminal must be opened manually because a web page cannot launch it. Retry the task in a
+        new prompt after setup.
+      </Text>
+
+      {!finalOutcome && (
+        <Box alignItems="Center" gap="200" wrap="Wrap">
+          <Button
+            type="button"
+            size="300"
+            variant="Primary"
+            fill="Soft"
+            radii="300"
+            disabled={actionDisabled}
+            before={
+              pendingTerminal === 'oysterun' ? <Spinner size="100" variant="Primary" /> : undefined
+            }
+            onClick={() => useTerminal('oysterun')}
+            data-testid="oysterun-routec-plugin-open-terminal-button"
+          >
+            <Text as="span" size="T300">
+              {pendingTerminal === 'oysterun'
+                ? 'Opening Oysterun Terminal...'
+                : 'Open Oysterun Terminal'}
+            </Text>
+          </Button>
+          <Button
+            type="button"
+            size="300"
+            variant="Secondary"
+            fill="Soft"
+            radii="300"
+            disabled={actionDisabled}
+            before={
+              pendingTerminal === 'host' ? <Spinner size="100" variant="Primary" /> : undefined
+            }
+            onClick={() => useTerminal('host')}
+            data-testid="oysterun-routec-plugin-use-host-terminal-button"
+          >
+            <Text as="span" size="T300">
+              {pendingTerminal === 'host' ? 'Preparing Host Terminal...' : 'Use Host Terminal'}
+            </Text>
+          </Button>
+          <Button
+            type="button"
+            size="300"
+            variant="Secondary"
+            fill="Soft"
+            radii="300"
+            disabled={actionDisabled}
+            onClick={() => onDecline(declineResponse)}
+            data-testid="oysterun-routec-plugin-continue-without-button"
+          >
+            <Text as="span" size="T300">
+              Continue without plugin
+            </Text>
+          </Button>
+        </Box>
+      )}
+
+      {controlError && (
+        <Text as="span" size="T200" priority="300">
+          {controlError}
+        </Text>
+      )}
+      {finalOutcome && (
+        <Text as="span" size="T200" priority="300">
+          Plugin request closed. In a Host terminal, run codex and use /plugins to complete setup,
+          then retry when ready.
+        </Text>
+      )}
+    </Box>
+  );
+}
+
+function initialMcpFormValues(
+  schema: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!schema || !isOysterunRecord(schema.properties)) return {};
+  return Object.fromEntries(
+    Object.entries(schema.properties).map(([name, rawField]) => {
+      const field = isOysterunRecord(rawField) ? rawField : {};
+      if (field.default !== undefined) return [name, field.default];
+      if (field.type === 'boolean') return [name, false];
+      if (field.type === 'array') return [name, []];
+      return [name, ''];
+    }),
+  );
+}
+
+type OysterunMcpFieldOption = { value: string; label: string };
+
+function mcpFieldOptions(
+  field: Record<string, unknown>,
+  multiple: boolean,
+): OysterunMcpFieldOption[] {
+  const source = multiple && isOysterunRecord(field.items) ? field.items : field;
+  if (Array.isArray(source.enum)) {
+    return source.enum
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => ({ value: entry, label: entry }));
+  }
+  const variants = multiple ? source.anyOf : source.oneOf;
+  if (!Array.isArray(variants)) return [];
+  return variants.flatMap((entry) => {
+    if (!isOysterunRecord(entry) || typeof entry.const !== 'string') return [];
+    return [
+      {
+        value: entry.const,
+        label: typeof entry.title === 'string' ? entry.title : entry.const,
+      },
+    ];
+  });
+}
+
+function mcpFieldInputType(field: Record<string, unknown>): string {
+  if (field.format === 'email') return 'email';
+  if (field.format === 'uri') return 'url';
+  if (field.format === 'date') return 'date';
+  if (field.format === 'date-time') return 'datetime-local';
+  return field.type === 'number' || field.type === 'integer' ? 'number' : 'text';
+}
+
+function OysterunMcpElicitationPanel({
+  requestId,
+  payload,
+  disabled,
+  pendingAction,
+  finalOutcome,
+  error,
+  onSubmit,
+  onReject,
+}: {
+  requestId: string;
+  payload: OysterunMcpElicitationPayload;
+  disabled: boolean;
+  pendingAction: OysterunProviderControlAction | null;
+  finalOutcome?: string;
+  error: string | null;
+  onSubmit: (response: OysterunMcpElicitationResponse) => void;
+  onReject: (response: OysterunMcpElicitationResponse) => void;
+}) {
+  const [values, setValues] = useState<Record<string, unknown>>(() =>
+    initialMcpFormValues(payload.requestedSchema),
+  );
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const schema = payload.requestedSchema;
+  const properties = schema && isOysterunRecord(schema.properties) ? schema.properties : undefined;
+  const requiredFields = new Set(
+    schema && Array.isArray(schema.required)
+      ? schema.required.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+  );
+  const safeUrl = safeMcpElicitationUrl(payload.url);
+  const formSupported = payload.mode === 'url' || Boolean(properties);
+  const fieldStyle: CSSProperties = {
+    width: '100%',
+    minHeight: '36px',
+    boxSizing: 'border-box',
+    border: '1px solid rgba(148, 163, 184, 0.55)',
+    borderRadius: config.radii.R300,
+    padding: `${config.space.S100} ${config.space.S200}`,
+    background: 'transparent',
+    color: 'inherit',
+    font: 'inherit',
+  };
+
+  const submit = () => {
+    setValidationError(null);
+    if (payload.mode === 'url') {
+      if (!safeUrl) {
+        setValidationError('This MCP request contains an invalid URL.');
+        return;
+      }
+      onSubmit({ action: 'accept', content: null, _meta: payload.meta });
+      return;
+    }
+    if (!properties) {
+      setValidationError('This MCP request does not contain a supported form schema.');
+      return;
+    }
+    const content: Record<string, unknown> = {};
+    let fieldError: string | null = null;
+    Object.entries(properties).forEach(([name, rawField]) => {
+      if (fieldError || !isOysterunRecord(rawField)) return;
+      const rawValue = values[name];
+      const title =
+        typeof rawField.title === 'string' && rawField.title.trim() ? rawField.title : name;
+      if (rawField.type === 'boolean') {
+        content[name] = rawValue === true;
+        return;
+      }
+      if (rawField.type === 'array') {
+        const entries = Array.isArray(rawValue) ? rawValue : [];
+        if (requiredFields.has(name) && entries.length === 0) {
+          fieldError = `Answer required for "${title}".`;
+          return;
+        }
+        if (entries.length > 0) content[name] = entries;
+        return;
+      }
+      const text = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue ?? '').trim();
+      if (!text) {
+        if (requiredFields.has(name)) {
+          fieldError = `Answer required for "${title}".`;
+        }
+        return;
+      }
+      if (rawField.type === 'number' || rawField.type === 'integer') {
+        const numeric =
+          rawField.type === 'integer' ? Number.parseInt(text, 10) : Number.parseFloat(text);
+        if (!Number.isFinite(numeric)) {
+          fieldError = `"${title}" must be a valid number.`;
+          return;
+        }
+        content[name] = numeric;
+      } else {
+        content[name] = text;
+      }
+    });
+    if (fieldError) {
+      setValidationError(fieldError);
+      return;
+    }
+    onSubmit({ action: 'accept', content, _meta: payload.meta });
+  };
+
+  let submitLabel = payload.mode === 'url' ? 'Continue' : 'Send response';
+  if (finalOutcome === 'accepted') submitLabel = 'Submitted';
+  if (pendingAction === 'submit') submitLabel = 'Sending...';
+  let rejectLabel = 'Reject';
+  if (finalOutcome === 'rejected') rejectLabel = 'Rejected';
+  if (pendingAction === 'reject') rejectLabel = 'Rejecting...';
+
+  return (
+    <Box
+      direction="Column"
+      gap="200"
+      data-testid="oysterun-routec-mcp-elicitation-surface"
+      data-oysterun-control-request-id={requestId}
+      data-oysterun-mcp-mode={payload.mode}
+    >
+      <Text as="strong" size="T300">
+        {payload.serverName}
+      </Text>
+      <Text as="span" size="T300">
+        {payload.message}
+      </Text>
+      {payload.mode === 'url' && safeUrl && (
+        <a href={safeUrl} target="_blank" rel="noopener noreferrer">
+          Open requested page
+        </a>
+      )}
+      {payload.mode !== 'url' && properties && (
+        <Box direction="Column" gap="300">
+          {Object.entries(properties).map(([name, rawField]) => {
+            if (!isOysterunRecord(rawField)) return null;
+            const title =
+              typeof rawField.title === 'string' && rawField.title.trim() ? rawField.title : name;
+            const description =
+              typeof rawField.description === 'string' ? rawField.description.trim() : '';
+            const options = mcpFieldOptions(rawField, rawField.type === 'array');
+            const value = values[name];
+            const fieldId = `oysterun-mcp-${requestId}-${name.replace(/[^a-z0-9_-]/gi, '-')}`;
+            let fieldControl: ReactNode;
+            if (rawField.type === 'boolean') {
+              fieldControl = (
+                <input
+                  id={fieldId}
+                  type="checkbox"
+                  checked={value === true}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    setValues((current) => ({ ...current, [name]: event.target.checked }))
+                  }
+                />
+              );
+            } else if (rawField.type === 'array' && options.length > 0) {
+              fieldControl = (
+                <Box direction="Column" gap="100">
+                  {options.map((option, optionIndex) => {
+                    const selected = Array.isArray(value) && value.includes(option.value);
+                    const optionId = `${fieldId}-${optionIndex}`;
+                    return (
+                      <label
+                        key={option.value}
+                        htmlFor={optionId}
+                        style={{ display: 'flex', gap: config.space.S100 }}
+                      >
+                        <input
+                          id={optionId}
+                          type="checkbox"
+                          value={option.value}
+                          checked={selected}
+                          disabled={disabled}
+                          onChange={(event) =>
+                            setValues((current) => {
+                              const existing = Array.isArray(current[name])
+                                ? (current[name] as unknown[]).filter(
+                                    (entry): entry is string => typeof entry === 'string',
+                                  )
+                                : [];
+                              return {
+                                ...current,
+                                [name]: event.target.checked
+                                  ? [...existing, option.value]
+                                  : existing.filter((entry) => entry !== option.value),
+                              };
+                            })
+                          }
+                        />
+                        <Text as="span" size="T200">
+                          {option.label}
+                        </Text>
+                      </label>
+                    );
+                  })}
+                </Box>
+              );
+            } else if (options.length > 0) {
+              fieldControl = (
+                <select
+                  id={fieldId}
+                  value={typeof value === 'string' ? value : ''}
+                  disabled={disabled}
+                  style={fieldStyle}
+                  onChange={(event) =>
+                    setValues((current) => ({ ...current, [name]: event.target.value }))
+                  }
+                >
+                  <option value="">Select...</option>
+                  {options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              );
+            } else {
+              fieldControl = (
+                <input
+                  id={fieldId}
+                  type={mcpFieldInputType(rawField)}
+                  value={typeof value === 'string' || typeof value === 'number' ? value : ''}
+                  disabled={disabled}
+                  style={fieldStyle}
+                  onChange={(event) =>
+                    setValues((current) => ({ ...current, [name]: event.target.value }))
+                  }
+                />
+              );
+            }
+            return (
+              <label
+                key={name}
+                htmlFor={fieldId}
+                style={{ display: 'grid', gap: config.space.S100 }}
+              >
+                <Text as="span" size="T200">
+                  {title}
+                  {requiredFields.has(name) ? ' *' : ''}
+                </Text>
+                {description && (
+                  <Text as="span" size="T200" priority="300">
+                    {description}
+                  </Text>
+                )}
+                {fieldControl}
+              </label>
+            );
+          })}
+        </Box>
+      )}
+      {!formSupported && (
+        <Text as="span" size="T200" priority="300">
+          This MCP request does not contain a supported form schema.
+        </Text>
+      )}
+      <Box alignItems="Center" gap="200" wrap="Wrap">
+        <Button
+          type="button"
+          size="300"
+          variant={finalOutcome === 'accepted' ? 'Success' : 'Secondary'}
+          fill="Soft"
+          radii="300"
+          disabled={disabled || !formSupported || (payload.mode === 'url' && !safeUrl)}
+          onClick={submit}
+          data-testid="oysterun-routec-mcp-elicitation-submit-button"
+        >
+          <Text as="span" size="T300">
+            {submitLabel}
+          </Text>
+        </Button>
+        <Button
+          type="button"
+          size="300"
+          variant={finalOutcome === 'rejected' ? 'Critical' : 'Secondary'}
+          fill="Soft"
+          radii="300"
+          disabled={disabled}
+          onClick={() => onReject({ action: 'decline', content: null, _meta: payload.meta })}
+          data-testid="oysterun-routec-mcp-elicitation-reject-button"
+        >
+          <Text as="span" size="T300">
+            {rejectLabel}
+          </Text>
+        </Button>
+      </Box>
+      {(validationError || error) && (
+        <Text as="span" size="T200" priority="300">
+          {validationError || error}
+        </Text>
+      )}
+    </Box>
+  );
 }
 
 export function OysterunSemanticRenderer({
@@ -1401,7 +1963,7 @@ export function OysterunSemanticRenderer({
 }) {
   const [pendingAction, setPendingAction] = useState<OysterunProviderControlAction | null>(null);
   const [submittedAction, setSubmittedAction] = useState<OysterunProviderControlAction | null>(
-    null
+    null,
   );
   const [controlError, setControlError] = useState<string | null>(null);
   const payload = getOysterunSemanticPayload(content);
@@ -1409,7 +1971,7 @@ export function OysterunSemanticRenderer({
   const semanticId = requiredSemanticPayloadString(payload.semantic_id, 'semantic_id');
   const semanticType = requiredSemanticPayloadString(
     payload.semantic_type ?? payload.semantic_category,
-    'semantic_type'
+    'semantic_type',
   );
   const category = requiredSemanticPayloadString(payload.semantic_category, 'semantic_category');
   const toolOrTerminalSemantic =
@@ -1479,9 +2041,7 @@ export function OysterunSemanticRenderer({
         ? payload.normal_message_user_sent
         : null,
     browser_shell_execution:
-      typeof payload.browser_shell_execution === 'boolean'
-        ? payload.browser_shell_execution
-        : null,
+      typeof payload.browser_shell_execution === 'boolean' ? payload.browser_shell_execution : null,
     provider_delivery_attempted:
       typeof payload.provider_delivery_attempted === 'boolean'
         ? payload.provider_delivery_attempted
@@ -1540,9 +2100,16 @@ export function OysterunSemanticRenderer({
       : undefined;
   const allowedActions = Array.isArray(payload.allowed_actions)
     ? payload.allowed_actions.filter(
-        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0
+        (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
       )
     : [];
+  const mcpElicitationPayload =
+    semanticType === 'control.request' && payload.control_kind === 'mcp_elicitation'
+      ? normalizeMcpElicitationPayload(payload.control_payload)
+      : undefined;
+  const pluginInstallSuggestion = mcpElicitationPayload
+    ? normalizePluginInstallSuggestion(mcpElicitationPayload)
+    : undefined;
   const matrixBackedControlRequest =
     semanticType === 'control.request' &&
     Boolean(controlRequestId) &&
@@ -1562,8 +2129,16 @@ export function OysterunSemanticRenderer({
     matrixBackedControlRequest &&
     allowedActions.includes('reject') &&
     semanticType === 'control.request';
-  const handleControlAction = async (action: OysterunProviderControlAction) => {
-    if (!controlRequestId || controlDisabled) return;
+  const canSubmitMcp =
+    matrixBackedControlRequest &&
+    allowedActions.includes('submit') &&
+    Boolean(mcpElicitationPayload) &&
+    semanticType === 'control.request';
+  const handleControlAction = async (
+    action: OysterunProviderControlAction,
+    elicitationResponse?: OysterunMcpElicitationResponse,
+  ): Promise<boolean> => {
+    if (!controlRequestId || controlDisabled) return false;
     setPendingAction(action);
     setControlError(null);
     recordOysterunProviderControlProof(
@@ -1583,7 +2158,7 @@ export function OysterunSemanticRenderer({
         semantic_role_is_sender: false,
         has_matrix_outcome_before_click: Boolean(finalOutcome),
       },
-      'click_requested'
+      'click_requested',
     );
     try {
       const response = await respondOysterunProviderControl({
@@ -1594,6 +2169,7 @@ export function OysterunSemanticRenderer({
         controlKind: payload.control_kind ?? null,
         controlFamily: payload.control_family ?? null,
         controlOrigin: payload.control_origin ?? null,
+        elicitationResponse: elicitationResponse ?? null,
       });
       setSubmittedAction(action);
       recordOysterunProviderControlProof(
@@ -1616,8 +2192,9 @@ export function OysterunSemanticRenderer({
           approval_resolution_persisted: response.approval_resolution_persisted,
           matrix_backed_outcome_truth: response.matrix_backed_outcome_truth,
         },
-        'host_response_accepted'
+        'host_response_accepted',
       );
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setControlError(message);
@@ -1631,8 +2208,9 @@ export function OysterunSemanticRenderer({
           matrix_room_id: payload.matrix_room_id ?? null,
           error: message,
         },
-        'click_failed'
+        'click_failed',
       );
+      return false;
     } finally {
       setPendingAction(null);
     }
@@ -1657,8 +2235,68 @@ export function OysterunSemanticRenderer({
   } else if (pendingAction === 'reject') {
     rejectLabel = 'Rejecting';
   }
-  const controlPanel =
-    canAccept || canReject ? (
+  let controlPanel: ReactNode = null;
+  if (mcpElicitationPayload && pluginInstallSuggestion && canSubmitMcp) {
+    controlPanel = (
+      <Box
+        style={{ marginTop: config.space.S200 }}
+        direction="Column"
+        gap="200"
+        data-testid="oysterun-routec-provider-control-surface"
+        data-oysterun-control-surface="plugin-install-suggestion"
+        data-oysterun-control-request-id={controlRequestId}
+        data-oysterun-control-state={controlState}
+        data-oysterun-browser-local-state-final-truth="false"
+        data-oysterun-direct-matrix-browser-write-used="false"
+      >
+        <OysterunPluginSuggestionPanel
+          requestId={controlRequestId ?? ''}
+          payload={mcpElicitationPayload}
+          suggestion={pluginInstallSuggestion}
+          disabled={controlDisabled}
+          finalOutcome={finalOutcome}
+          controlError={controlError}
+          onDecline={(response) => handleControlAction('reject', response)}
+        />
+        {submittedAction && !finalOutcome && (
+          <Text as="span" size="T200" priority="300">
+            Waiting for Matrix outcome.
+          </Text>
+        )}
+      </Box>
+    );
+  } else if (mcpElicitationPayload && canSubmitMcp) {
+    controlPanel = (
+      <Box
+        style={{ marginTop: config.space.S200 }}
+        direction="Column"
+        gap="200"
+        data-testid="oysterun-routec-provider-control-surface"
+        data-oysterun-control-surface="mcp-elicitation-request"
+        data-oysterun-control-request-id={controlRequestId}
+        data-oysterun-control-state={controlState}
+        data-oysterun-browser-local-state-final-truth="false"
+        data-oysterun-direct-matrix-browser-write-used="false"
+      >
+        <OysterunMcpElicitationPanel
+          requestId={controlRequestId ?? ''}
+          payload={mcpElicitationPayload}
+          disabled={controlDisabled}
+          pendingAction={pendingAction}
+          finalOutcome={finalOutcome}
+          error={controlError}
+          onSubmit={(response) => handleControlAction('submit', response)}
+          onReject={(response) => handleControlAction('reject', response)}
+        />
+        {submittedAction && !finalOutcome && (
+          <Text as="span" size="T200" priority="300">
+            Waiting for Matrix outcome.
+          </Text>
+        )}
+      </Box>
+    );
+  } else if (canAccept || canReject) {
+    controlPanel = (
       <Box
         style={{ marginTop: config.space.S200 }}
         direction="Column"
@@ -1773,7 +2411,8 @@ export function OysterunSemanticRenderer({
           </Text>
         )}
       </Box>
-    ) : null;
+    );
+  }
 
   if (proofClassification.current_source_proof_eligible) {
     recordOysterunProof('semanticRows', {
@@ -1819,6 +2458,8 @@ export function OysterunSemanticRenderer({
         compression={toolCompression}
       />
     );
+  } else if (mcpElicitationPayload) {
+    semanticContent = <strong>MCP request</strong>;
   } else {
     semanticContent = (
       <>

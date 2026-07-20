@@ -8,8 +8,6 @@
       "command_text": "Read and execute .codex/prompts/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, prompt files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
       "normalized_command": "Read and execute .codex/prompts/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, prompt files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
       "enabled": true,
-      "status": "active",
-      "next_run_at": null,
       "schedule_rule": {
         "type": "daily",
         "time": "11:30",
@@ -22,9 +20,7 @@
         "session_name": "GitHub Tracker Daily Scheduler (Codex)",
         "model": "gpt-5.5",
         "reasoning_effort": "max",
-        "approval_policy": "never",
-        "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
-        "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+        "approval_policy": "never"
       },
       "metadata": {
         "source": "oysterun_demo_agent_template",
@@ -38,9 +34,7 @@
             "session_name": "GitHub Tracker Daily Scheduler (Codex)",
             "model": "gpt-5.5",
             "reasoning_effort": "max",
-            "approval_policy": "never",
-            "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
-            "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+            "approval_policy": "never"
           }
         },
         "target_binding_scope": "portable_setup_snapshot",
@@ -64,8 +58,6 @@
       "command_text": "Read and execute .claude/commands/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, command files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
       "normalized_command": "Read and execute .claude/commands/scheduler_task.md from the current project root. Follow that file as the complete scheduler task contract. Do not edit source code, config, scheduler files, command files, README files, or migration notes during the scheduled report run. If the task cannot be completed without editing those files, stop and report the blocker.",
       "enabled": true,
-      "status": "active",
-      "next_run_at": null,
       "schedule_rule": {
         "type": "daily",
         "time": "11:30",
@@ -78,9 +70,7 @@
         "session_name": "GitHub Tracker Daily Scheduler (Claude)",
         "model": "opus",
         "reasoning_effort": "high",
-        "permission_mode": "bypassPermissions",
-        "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
-        "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+        "permission_mode": "bypassPermissions"
       },
       "metadata": {
         "source": "oysterun_demo_agent_template",
@@ -94,9 +84,7 @@
             "session_name": "GitHub Tracker Daily Scheduler (Claude)",
             "model": "opus",
             "reasoning_effort": "high",
-            "permission_mode": "bypassPermissions",
-            "agent_folder": "__OYSTERUN_DEMO_AGENT_FOLDER__",
-            "cwd": "__OYSTERUN_DEMO_AGENT_FOLDER__"
+            "permission_mode": "bypassPermissions"
           }
         },
         "target_binding_scope": "portable_setup_snapshot",

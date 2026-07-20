@@ -71,7 +71,9 @@ export type OysterunRouteCPathMemorySnapshot = {
 };
 
 export type OysterunRouteCActiveRoomTimelineFocusSource =
-  'message_search_open' | 'pinned_message_open' | 'host_owner_neighbor_navigation';
+  | 'message_search_open'
+  | 'pinned_message_open'
+  | 'host_owner_neighbor_navigation';
 
 export type OysterunRouteCActiveRoomTimelineFocusDetail = {
   hostSessionId: string;
@@ -175,7 +177,9 @@ export type OysterunSessionNotificationSettings = {
   is_default?: boolean;
   updated_at?: string | null;
   storage_owner?:
-    'agent_config_notifications_enabled' | 'host_config_session_notification_settings' | string;
+    | 'agent_config_notifications_enabled'
+    | 'host_config_session_notification_settings'
+    | string;
   policy_source?: 'notifications.enabled' | string;
   compatibility_endpoint?: boolean;
   matrix_timeline_owner?: false;
@@ -666,7 +670,9 @@ export type OysterunRouteCRoomEntryBindingProof = {
   matrix_room_id?: string;
   matrix_room_ready: boolean;
   binding_source:
-    'host_scoped_bootstrap' | 'host_session_route_without_bootstrap' | 'missing_host_session_route';
+    | 'host_scoped_bootstrap'
+    | 'host_session_route_without_bootstrap'
+    | 'missing_host_session_route';
   direct_api_substitute_used: false;
   stale_text_selector_required: false;
   screenshot_identity_required: false;
@@ -809,7 +815,8 @@ export function isOysterunRouteCMatrixRecoveryDebugTriggerEnabled(): boolean {
 }
 
 export type OysterunRouteCMatrixRecoveryDebugTriggerKind =
-  'debug_visible_notification_resume_fallback' | 'debug_visible_matrix_facade_recovery';
+  | 'debug_visible_notification_resume_fallback'
+  | 'debug_visible_matrix_facade_recovery';
 
 export type OysterunRouteCMatrixRecoveryDebugDetail = {
   reason: OysterunRouteCMatrixRecoveryDebugTriggerKind;
@@ -937,10 +944,10 @@ function isOysterunCapacitorIOSRuntime(): boolean {
   const capacitor = window.Capacitor;
   return Boolean(
     capacitor &&
-    typeof capacitor.isNativePlatform === 'function' &&
-    capacitor.isNativePlatform() &&
-    typeof capacitor.getPlatform === 'function' &&
-    capacitor.getPlatform() === 'ios',
+      typeof capacitor.isNativePlatform === 'function' &&
+      capacitor.isNativePlatform() &&
+      typeof capacitor.getPlatform === 'function' &&
+      capacitor.getPlatform() === 'ios',
   );
 }
 
@@ -1035,7 +1042,7 @@ export function getOysterunSemanticRowProofIdentityFields(): readonly string[] {
 
 function requiredSemanticRowProofIdentityValue(
   proof: Record<string, unknown>,
-  field: (typeof OYSTERUN_SEMANTIC_ROW_PROOF_IDENTITY_FIELDS)[number],
+  field: typeof OYSTERUN_SEMANTIC_ROW_PROOF_IDENTITY_FIELDS[number],
 ): string {
   const value = proof[field];
   if (field === 'countable_semantic_row') {
@@ -1063,7 +1070,7 @@ function requiredSemanticRowProofIdentityValue(
 
 function optionalSemanticRowProofIdentityValue(
   proof: Record<string, unknown>,
-  field: (typeof OYSTERUN_SEMANTIC_ROW_PROOF_OPTIONAL_IDENTITY_FIELDS)[number],
+  field: typeof OYSTERUN_SEMANTIC_ROW_PROOF_OPTIONAL_IDENTITY_FIELDS[number],
 ): string {
   const value = proof[field];
   if (value === undefined || value === null || value === '') return '';
@@ -1267,8 +1274,8 @@ export function recordOysterunSemanticDiagnostic(proof: Record<string, unknown>)
         typeof existing.first_observed_at === 'string'
           ? existing.first_observed_at
           : typeof existing.at === 'string'
-            ? existing.at
-            : now,
+          ? existing.at
+          : now,
       last_observed_at: now,
       proof_observation_count: existingObservationCount + 1,
     };
@@ -1464,8 +1471,8 @@ export function getOysterunRouteCPathMemory(): OysterunRouteCPathMemorySnapshot 
   const sessionId = getOysterunRouteCPathMemorySessionId();
   const memory = readOysterunRouteCPathMemoryStorage();
   return {
-    explorerPath: sessionId ? (memory.explorer_paths?.[sessionId] ?? '') : '',
-    previewPath: sessionId ? (memory.preview_paths?.[sessionId] ?? '') : '',
+    explorerPath: sessionId ? memory.explorer_paths?.[sessionId] ?? '' : '',
+    previewPath: sessionId ? memory.preview_paths?.[sessionId] ?? '' : '',
   };
 }
 
@@ -1764,7 +1771,8 @@ export async function getOysterunRouteCProviderSkillStatus(
 }
 
 export function getOysterunBootstrappedSessionNotificationSettings():
-  OysterunSessionNotificationSettings | undefined {
+  | OysterunSessionNotificationSettings
+  | undefined {
   return cachedBootstrap?.notification_settings ?? undefined;
 }
 
@@ -1961,19 +1969,13 @@ export async function getOysterunToolEventDetail({
   params.set('matrix_event_id', matrixEventId);
   params.set('tool_storage_generation', toolStorageGeneration);
   params.set('page', String(page));
-  const payload = await hostJson<unknown>(
-    `/session/tool-event-detail?${params.toString()}`,
-    {
-      method: 'GET',
-    },
-  );
-  return assertOysterunToolEventDetailResponseContract<OysterunToolEventDetailResponse>(
-    payload,
-    {
-      toolStorageGeneration,
-      page,
-    },
-  );
+  const payload = await hostJson<unknown>(`/session/tool-event-detail?${params.toString()}`, {
+    method: 'GET',
+  });
+  return assertOysterunToolEventDetailResponseContract<OysterunToolEventDetailResponse>(payload, {
+    toolStorageGeneration,
+    page,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2279,7 +2281,8 @@ function getOysterunAppAttestPlugin(): OysterunAppAttestPlugin | null {
   const capacitor = window.Capacitor;
   if (!capacitor) return null;
   const plugin = capacitor.Plugins?.OysterunAppAttest as
-    Partial<OysterunAppAttestPlugin> | undefined;
+    | Partial<OysterunAppAttestPlugin>
+    | undefined;
   if (
     plugin &&
     typeof plugin.attest === 'function' &&
@@ -2362,7 +2365,9 @@ async function cloudJson<T>(
   const payload = await response.json();
   if (!response.ok) {
     const error = new Error(
-      `Oysterun Cloud request failed ${response.status}: ${payload.detail ?? payload.error ?? path}`,
+      `Oysterun Cloud request failed ${response.status}: ${
+        payload.detail ?? payload.error ?? path
+      }`,
     ) as Error & { status?: number; data?: unknown; path?: string };
     error.status = response.status;
     error.data = payload;
@@ -2516,8 +2521,8 @@ export function recordOysterunProof(
           typeof existing.first_observed_at === 'string'
             ? existing.first_observed_at
             : typeof existing.at === 'string'
-              ? existing.at
-              : now,
+            ? existing.at
+            : now,
         last_observed_at: now,
         at: now,
         proof_observation_count: existingObservationCount + 1,
@@ -3595,7 +3600,13 @@ export async function cancelOysterunHost2Intake({
   });
 }
 
-export type OysterunProviderControlAction = 'accept' | 'reject';
+export type OysterunProviderControlAction = 'accept' | 'submit' | 'reject';
+
+export type OysterunMcpElicitationResponse = {
+  action: 'accept' | 'decline' | 'cancel';
+  content: unknown;
+  _meta: unknown;
+};
 
 export type OysterunHostSessionStopResponse = {
   status: 'stopped' | 'killed';
@@ -3684,6 +3695,7 @@ export async function respondOysterunProviderControl({
   controlKind,
   controlFamily,
   controlOrigin,
+  elicitationResponse,
 }: {
   requestId: string;
   action: OysterunProviderControlAction;
@@ -3692,6 +3704,7 @@ export async function respondOysterunProviderControl({
   controlKind?: string | null;
   controlFamily?: string | null;
   controlOrigin?: string | null;
+  elicitationResponse?: OysterunMcpElicitationResponse | null;
 }): Promise<OysterunProviderControlResponse> {
   const sessionId = requiredOysterunHostSessionId();
   const response = await hostJson<OysterunProviderControlResponse>(
@@ -3701,8 +3714,9 @@ export async function respondOysterunProviderControl({
       body: JSON.stringify({
         session_id: sessionId,
         request_id: requestId,
-        allow: action === 'accept',
+        allow: action !== 'reject',
         action,
+        response: elicitationResponse ?? null,
         matrix_room_id: matrixRoomId ?? null,
         semantic_id: semanticId ?? null,
         control_kind: controlKind ?? null,

@@ -11,7 +11,6 @@ import {
 import { homedir } from "os";
 import { basename, dirname, extname, join, resolve } from "path";
 import { getConfigDir, getHostDbPath } from "./config.mjs";
-import { readAgentRegistry } from "./agent-registry.mjs";
 import { buildLinkAnnotations } from "./link-annotations.mjs";
 import { getAgentFolderBucket, getTranscriptRoot } from "./session-assets.mjs";
 import { getSessionHistory } from "./session-history.mjs";
@@ -985,12 +984,26 @@ function buildPreviewSnippet(
   return snippet;
 }
 
+let resolveIndexedProjectFolderForSite = null;
+
+export function setTranscriptSiteProjectFolderResolver(resolver) {
+  if (resolver !== null && typeof resolver !== "function") {
+    throw new Error("Transcript site project folder resolver must be a function");
+  }
+  resolveIndexedProjectFolderForSite = resolver;
+}
+
 function createSiteFolderResolver(currentAgentId, currentAgentRoot) {
   return (candidateAgentId) => {
     if (candidateAgentId === currentAgentId && currentAgentRoot) {
       return currentAgentRoot;
     }
-    return readAgentRegistry()[candidateAgentId]?.agent_folder || null;
+    if (!resolveIndexedProjectFolderForSite) return null;
+    try {
+      return resolveIndexedProjectFolderForSite(candidateAgentId) || null;
+    } catch {
+      return null;
+    }
   };
 }
 

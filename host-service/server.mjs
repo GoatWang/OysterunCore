@@ -12,6 +12,7 @@ import {
   statSync,
   realpathSync,
   mkdirSync,
+  rmSync,
 } from "fs";
 import { join, dirname, basename, resolve, extname, relative } from "path";
 import { fileURLToPath } from "url";
@@ -77,11 +78,11 @@ import {
   summarizeAgentConfig,
 } from "./agent-config.mjs";
 import {
-  getAgentFolder,
-  setAgentFolder,
-  updateAgentSession,
-  readAgentRegistry,
-} from "./agent-registry.mjs";
+  BrowserRootProjectIndex,
+  deriveBrowserRootProjectId,
+  removeObsoleteAgentRegistry,
+} from "./browser-root-project-index.mjs";
+import { setTranscriptSiteProjectFolderResolver } from "./transcript-store.mjs";
 import { buildLinkAnnotations } from "./link-annotations.mjs";
 import { hasAgentAccess, hasAgentCapability } from "./host-authz.mjs";
 import {
@@ -2707,6 +2708,16 @@ function pickMailBodyString(body, snakeKey, camelKey = null) {
   );
 }
 
+function pickMailBodySource(body, snakeKey, camelKey = null) {
+  const value = Object.prototype.hasOwnProperty.call(body || {}, snakeKey)
+    ? body[snakeKey]
+    : camelKey && Object.prototype.hasOwnProperty.call(body || {}, camelKey)
+      ? body[camelKey]
+      : "";
+  if (value === null || value === undefined) return "";
+  return typeof value === "string" ? value : String(value);
+}
+
 function normalizeMailLinksForStore(value) {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -2782,8 +2793,8 @@ function buildMailCreateInputFromBody(body, grant) {
     title: pickMailBodyString(body, "title"),
     summary: pickMailBodyString(body, "summary"),
     bodyFormat: pickMailBodyString(body, "body_format", "bodyFormat"),
-    bodyMarkdown: pickMailBodyString(body, "body_markdown", "bodyMarkdown"),
-    bodyHtml: pickMailBodyString(body, "body_html", "bodyHtml"),
+    bodyMarkdown: pickMailBodySource(body, "body_markdown", "bodyMarkdown"),
+    bodyHtml: pickMailBodySource(body, "body_html", "bodyHtml"),
     sourceType: pickMailBodyString(body, "source_type", "sourceType"),
     sourceName: pickMailBodyString(body, "source_name", "sourceName"),
     sourceRef: pickMailBodyString(body, "source_ref", "sourceRef"),
@@ -2824,8 +2835,8 @@ function buildDashboardMailCreateInputFromBody(
     title: pickMailBodyString(body, "title"),
     summary: pickMailBodyString(body, "summary"),
     bodyFormat: pickMailBodyString(body, "body_format", "bodyFormat"),
-    bodyMarkdown: pickMailBodyString(body, "body_markdown", "bodyMarkdown"),
-    bodyHtml: pickMailBodyString(body, "body_html", "bodyHtml"),
+    bodyMarkdown: pickMailBodySource(body, "body_markdown", "bodyMarkdown"),
+    bodyHtml: pickMailBodySource(body, "body_html", "bodyHtml"),
     sourceType: pickMailBodyString(body, "source_type", "sourceType") || "cli",
     sourceName:
       pickMailBodyString(body, "source_name", "sourceName") || "Oysterun CLI",
@@ -2855,8 +2866,8 @@ function buildMailUpdateInputFromBody(body) {
     ["title", "title"],
     ["summary", "summary"],
     ["bodyFormat", "body_format", "bodyFormat"],
-    ["bodyMarkdown", "body_markdown", "bodyMarkdown"],
-    ["bodyHtml", "body_html", "bodyHtml"],
+    ["bodyMarkdown", "body_markdown", "bodyMarkdown", true],
+    ["bodyHtml", "body_html", "bodyHtml", true],
     ["sourceName", "source_name", "sourceName"],
     ["sourceRef", "source_ref", "sourceRef"],
     ["agentId", "agent_id", "agentId"],
@@ -2866,12 +2877,14 @@ function buildMailUpdateInputFromBody(body) {
     ["siteUrl", "site_url", "siteUrl"],
     ["severity", "severity"],
   ];
-  for (const [outputKey, snakeKey, camelKey] of fieldMap) {
+  for (const [outputKey, snakeKey, camelKey, preserveSource = false] of fieldMap) {
     if (
       Object.prototype.hasOwnProperty.call(body, snakeKey) ||
       (camelKey && Object.prototype.hasOwnProperty.call(body, camelKey))
     ) {
-      update[outputKey] = pickMailBodyString(body, snakeKey, camelKey);
+      update[outputKey] = preserveSource
+        ? pickMailBodySource(body, snakeKey, camelKey)
+        : pickMailBodyString(body, snakeKey, camelKey);
     }
   }
   if (Object.prototype.hasOwnProperty.call(body, "tags")) {
@@ -3127,6 +3140,10 @@ function resolveSchedulerTargetToDirectProviderRun({ targetBinding }) {
 }
 
 const sessionManager = new SessionManager();
+const browserRootProjectIndex = new BrowserRootProjectIndex({ logger: console });
+setTranscriptSiteProjectFolderResolver((projectId) =>
+  browserRootProjectIndex.resolveProjectFolder(projectId, { allowInvalid: true })
+);
 const apnsDeviceStore = new ApnsDeviceStore({ configDir: getConfigDir() });
 const apnsCompleteMessageDispatcher = new ApnsCompleteMessageDispatcher({
   configDir: getConfigDir(),
@@ -3151,7 +3168,9 @@ const toolEventDetailStore = createToolEventDetailStore({
 const schedulerService = new SchedulerService({
   mailStore,
   getHostOrigin: getSchedulerMailHostOrigin,
-  getKnownAgentFolders: listHostKnownSchedulerAgentFolders,
+  getBrowserRootProjects: listBrowserRootSchedulerProjects,
+  getProjectIndexGeneration: () =>
+    browserRootProjectIndex.getLifecycleState().generation,
 });
 let routeCMatrixFacade = null;
 routeCMatrixFacade = createRouteCMatrixFacade({
@@ -8080,6 +8099,64 @@ function normalizeAgentWebEnabled(value) {
   return value === true;
 }
 
+function hasWebsiteConfigUpdate(body = {}) {
+  return (
+    hasAgentWebEnabledRequest(body) ||
+    Object.prototype.hasOwnProperty.call(body, "web_access") ||
+    Object.prototype.hasOwnProperty.call(body, "webAccess") ||
+    Object.prototype.hasOwnProperty.call(body, "web_password") ||
+    Object.prototype.hasOwnProperty.call(body, "webPassword") ||
+    Object.prototype.hasOwnProperty.call(body, "web_root") ||
+    Object.prototype.hasOwnProperty.call(body, "webRoot")
+  );
+}
+
+function normalizeWebsiteConfigUpdates(body = {}) {
+  const updates = {};
+  if (hasAgentWebEnabledRequest(body)) {
+    updates.web_enabled = normalizeAgentWebEnabled(
+      body.web_enabled ?? body.webEnabled
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "web_access") ||
+    Object.prototype.hasOwnProperty.call(body, "webAccess")
+  ) {
+    updates.web_access = normalizeAgentWebAccess(
+      body.web_access ?? body.webAccess
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "web_password") ||
+    Object.prototype.hasOwnProperty.call(body, "webPassword")
+  ) {
+    const password = normalizeString(body.web_password ?? body.webPassword);
+    if (password) updates.web_password = password;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "web_root") ||
+    Object.prototype.hasOwnProperty.call(body, "webRoot")
+  ) {
+    const root = normalizeString(body.web_root ?? body.webRoot);
+    if (!root) throw new Error("web_root required");
+    updates.web_root = root;
+  }
+  return updates;
+}
+
+function splitWebsiteConfigUpdates(body = {}) {
+  const website = {};
+  const remaining = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (["web_enabled", "web_access", "web_password", "web_root"].includes(key)) {
+      website[key] = value;
+    } else {
+      remaining[key] = value;
+    }
+  }
+  return { website, remaining };
+}
+
 function requireConfiguredProvider(providerId = "claude") {
   return requireProvider(providerId || "claude", { config: readConfig() });
 }
@@ -8192,6 +8269,14 @@ function buildNormalizedConfigPayload(body = {}, runtime) {
     if (password) {
       normalized.web_password = password;
     }
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "web_root") ||
+    Object.prototype.hasOwnProperty.call(body, "webRoot")
+  ) {
+    const root = normalizeString(body.web_root ?? body.webRoot);
+    if (!root) throw new Error("web_root required");
+    normalized.web_root = root;
   }
   Object.assign(normalized, normalizeNotificationConfigPayload(body));
   if (Object.prototype.hasOwnProperty.call(body, "local_allowed_paths")) {
@@ -8349,6 +8434,10 @@ function applySharedConfigUpdates(config, body = {}) {
     ensureConfigBranch(config, "web").enabled = body.web_enabled === true;
     changed = true;
   }
+  if (Object.prototype.hasOwnProperty.call(body, "web_root")) {
+    ensureConfigBranch(config, "web").root = body.web_root;
+    changed = true;
+  }
   if (Object.prototype.hasOwnProperty.call(body, "notifications_enabled")) {
     ensureConfigBranch(config, "notifications").enabled =
       body.notifications_enabled !== false;
@@ -8471,7 +8560,6 @@ function persistAgentConfigUpdates(folder, body = {}) {
       mergeConfigObjects(sharedConfig, localConfig)
     );
     mkdirSync(layers.configDirPath, { recursive: true });
-    mkdirSync(layers.sitePath, { recursive: true });
 
     if (sharedChanged) {
       const cleanShared = JSON.parse(JSON.stringify(sharedConfig));
@@ -8503,6 +8591,28 @@ function persistAgentConfigUpdates(folder, body = {}) {
     configPath: layers.configPath,
     localConfigPath: layers.localConfigPath,
   };
+}
+
+function assertWebsiteConfigPersisted(
+  folder,
+  { enabled = null, access = null, password = null } = {}
+) {
+  const layers = readAgentConfigLayers(folder);
+  if (typeof enabled === "boolean" && layers.web.enabled !== enabled) {
+    throw new Error(
+      `Website config persistence verification failed: expected web.enabled=${enabled}`
+    );
+  }
+  if (access && layers.web.access !== access) {
+    throw new Error(
+      `Website config persistence verification failed: expected web.access=${access}`
+    );
+  }
+  if (password && layers.web.password !== password) {
+    throw new Error(
+      "Website config persistence verification failed: web.password was not saved"
+    );
+  }
 }
 
 function serializeProvider(provider, config = readConfig()) {
@@ -9287,10 +9397,6 @@ function getRuntimeCapabilityAuditActorId(auth, claims, fallback = "dashboard-ad
   return buildRuntimeCapabilityAuditActor(auth, claims, fallback).actorId;
 }
 
-function requireRuntimeWebsiteFolderMatchesSession(auth, body, res) {
-  return true;
-}
-
 const WEBSITE_PASSWORD_NOT_CONFIGURED_OWNER_COPY = [
   "Website Access: password",
   "Password status: Not configured on this Host",
@@ -9300,6 +9406,8 @@ const WEBSITE_PASSWORD_NOT_CONFIGURED_OWNER_COPY = [
 
 const WEBSITE_UNAVAILABLE_MESSAGES = Object.freeze({
   agent_folder_missing: "Agent folder is not known to this Host.",
+  browser_root_project_not_found:
+    "No matching project exists in the first level of Default Browse Root.",
   web_config_missing: "Agent website config is missing.",
   invalid_web_config: "Agent website config is invalid.",
   web_root_outside_agent_folder:
@@ -9307,10 +9415,38 @@ const WEBSITE_UNAVAILABLE_MESSAGES = Object.freeze({
   web_root_missing: "Configured website root does not exist.",
   web_root_not_directory: "Configured website root is not a directory.",
   website_disabled: "Agent website is disabled.",
+  project_id_conflict:
+    "Multiple Browser Root folders resolve to this project id. Rename one folder.",
   index_missing: "Configured website entry index.html does not exist.",
   password_not_configured: WEBSITE_PASSWORD_NOT_CONFIGURED_OWNER_COPY,
   unavailable: "Website is unavailable.",
 });
+
+function resolveSessionWebsiteProjectFolder(session) {
+  const agentId = normalizeString(session?.agentId);
+  if (!agentId) {
+    throw new Error("Session agent_id is required for Website settings");
+  }
+  try {
+    return browserRootProjectIndex.resolveProjectFolder(agentId);
+  } catch (err) {
+    if (err?.code === "browser_root_project_not_found") {
+      const wrapped = new Error(
+        `Website settings require a first-level Default Browse Root project for ${agentId}. Move or copy the project into Default Browse Root, then retry.`
+      );
+      wrapped.code = err.code;
+      throw wrapped;
+    }
+    if (err?.code === "browser_root_project_id_collision") {
+      const wrapped = new Error(
+        `Website settings cannot resolve ${agentId} because multiple Default Browse Root folders use that project id. Rename one folder, then retry.`
+      );
+      wrapped.code = err.code;
+      throw wrapped;
+    }
+    throw err;
+  }
+}
 
 function buildUnavailableWebsiteMetadata(
   agentId,
@@ -9385,7 +9521,7 @@ function buildAvailableWebsiteMetadata(agentId, webConfig) {
   };
 }
 
-function buildAgentCatalogBaseEntry(agentId, record = {}, source = "registry") {
+function buildAgentCatalogBaseEntry(agentId, record = {}, source = "browser_root") {
   const folderPath = record?.agent_folder || null;
   return {
     agent_id: agentId,
@@ -9395,6 +9531,10 @@ function buildAgentCatalogBaseEntry(agentId, record = {}, source = "registry") {
     last_known_session_id: record?.last_known_session_id || null,
     last_used_at: record?.last_used_at || null,
     source,
+    project_status: record?.project_status || null,
+    project_diagnostics: Array.isArray(record?.project_diagnostics)
+      ? record.project_diagnostics
+      : [],
     active: false,
     ready: false,
     alive: false,
@@ -9464,7 +9604,13 @@ function hydrateAgentCatalogEntryFromConfig(base, record = {}) {
 
 function buildAgentWebsiteCatalog(agents) {
   return agents
-    .filter((entry) => entry.website?.configured === true)
+    .filter(
+      (entry) =>
+        entry.source === "browser_root" &&
+        entry.project_status !== "conflict" &&
+        entry.website?.configured === true &&
+        entry.website?.enabled === true
+    )
     .map((entry) => ({
       agent_id: entry.agent_id,
       display_name: entry.display_name,
@@ -9478,36 +9624,76 @@ function buildAgentWebsiteCatalog(agents) {
     }));
 }
 
+function buildBrowserRootProjectRegistrationIssues() {
+  const snapshot = browserRootProjectIndex.getSnapshot();
+  return (snapshot.diagnostics || [])
+    .filter((diagnostic) => diagnostic?.code === "project_id_collision")
+    .map((diagnostic) => ({
+      code: "project_id_collision",
+      project_id: diagnostic.project_id,
+      folders: Array.isArray(diagnostic.folders)
+        ? diagnostic.folders.filter(
+            (folder) => typeof folder === "string" && folder.trim()
+          )
+        : [],
+      message: diagnostic.message,
+      resolution: "rename_one_browser_root_folder",
+    }));
+}
+
 function buildAgentCatalog(claims) {
-  const registry = readAgentRegistry();
   const entries = new Map();
 
-  for (const [agentId, record] of Object.entries(registry)) {
-    const base = buildAgentCatalogBaseEntry(agentId, record, "registry");
-    entries.set(agentId, hydrateAgentCatalogEntryFromConfig(base, record));
-  }
-
-  for (const record of getSessionHistory()) {
-    const agentId =
-      typeof record?.agent_id === "string" ? record.agent_id.trim() : "";
-    if (!agentId || entries.has(agentId)) continue;
+  for (const project of browserRootProjectIndex.listProjects()) {
+    const agentId = project.project_id;
     const base = buildAgentCatalogBaseEntry(
       agentId,
       {
-        agent_folder: record.agent_folder || null,
-        display_name: record.session_name || null,
-        last_known_session_id: record.session_id || null,
-        last_used_at: record.last_active_at || record.created_at || null,
+        agent_folder: project.agent_folder,
+        display_name: project.display_name,
+        project_status: project.status,
+        project_diagnostics: project.diagnostics,
       },
-      "history"
+      "browser_root"
     );
-    entries.set(agentId, hydrateAgentCatalogEntryFromConfig(base, {}));
+    if (project.conflict === true) {
+      const existing = entries.get(agentId);
+      const configured =
+        base.website?.configured === true ||
+        existing?.website?.configured === true;
+      const enabled =
+        base.website?.enabled === true || existing?.website?.enabled === true;
+      base.website = buildUnavailableWebsiteMetadata(agentId, {
+        reason: "project_id_conflict",
+        configured,
+        enabled,
+      });
+      entries.set(agentId, {
+        ...(existing || base),
+        project_status: "conflict",
+        project_diagnostics: [
+          ...(existing?.project_diagnostics || []),
+          ...(project.diagnostics || []),
+        ],
+        website: base.website,
+      });
+      continue;
+    }
+    entries.set(agentId, hydrateAgentCatalogEntryFromConfig(base, project));
   }
 
   for (const session of sessionManager.list()) {
     const providerId = session.provider || "claude";
     const providerInfo = serializeConfiguredProvider(providerId);
     const existing = entries.get(session.agentId);
+    if (
+      existing?.source === "browser_root" &&
+      existing.agent_folder &&
+      session.cwd &&
+      realpathSync(existing.agent_folder) !== realpathSync(session.cwd)
+    ) {
+      continue;
+    }
     const folderPath = session.cwd || existing?.agent_folder || null;
     const overlay = {
       agent_id: session.agentId,
@@ -9518,7 +9704,7 @@ function buildAgentCatalog(claims) {
       last_known_session_id:
         session.sessionId || existing?.last_known_session_id || null,
       last_used_at: existing?.last_used_at || null,
-      source: existing?.source || "live",
+      source: existing?.source || "live_session",
       active: true,
       ready: session.ready === true,
       alive: session.alive === true,
@@ -9581,27 +9767,13 @@ function buildAgentCatalog(claims) {
   return result;
 }
 
-function listHostKnownSchedulerAgentFolders() {
-  const entries = [];
-  const pushEntry = (agentId, agentFolder) => {
-    const normalizedFolder = normalizeString(agentFolder);
-    if (!normalizedFolder) return;
-    entries.push({
-      agent_id: normalizeString(agentId) || null,
-      agent_folder: normalizedFolder,
-    });
-  };
-  const registry = readAgentRegistry();
-  for (const [agentId, record] of Object.entries(registry)) {
-    pushEntry(agentId, record?.agent_folder);
-  }
-  for (const record of getSessionHistory()) {
-    pushEntry(record?.agent_id, record?.agent_folder);
-  }
-  for (const session of sessionManager.list()) {
-    pushEntry(session?.agentId || session?.agent_id, session?.cwd);
-  }
-  return entries;
+function listBrowserRootSchedulerProjects() {
+  return browserRootProjectIndex
+    .listProjects({ includeConflicts: false })
+    .map((project) => ({
+      project_id: project.project_id,
+      agent_folder: project.agent_folder,
+    }));
 }
 
 function resolveDevFilePath(rawPath) {
@@ -10042,10 +10214,11 @@ function parseAgentSiteRoute(pathname) {
 }
 
 function resolveAgentFolderForSite(agentId) {
-  const registeredFolder = getAgentFolder(agentId);
-  if (registeredFolder) return registeredFolder;
-  const liveSession = sessionManager.getAgentSession(agentId);
-  return liveSession?.cwd || null;
+  try {
+    return browserRootProjectIndex.resolveProjectFolder(agentId);
+  } catch {
+    return null;
+  }
 }
 
 function resolveSiteRoot(agentFolder, agentId, options = {}) {
@@ -10268,47 +10441,41 @@ function buildAgentWebsiteMetadata(agentId, folderPath = null) {
 }
 
 function buildSessionWebsiteMetadata(session) {
-  const metadata = buildAgentWebsiteMetadata(
-    session?.agentId || null,
-    session?.cwd || null
-  );
-  const accessOverride = normalizeString(session?.websiteAccessOverride);
-  const enabledOverride =
-    typeof session?.websiteEnabledOverride === "boolean"
-      ? session.websiteEnabledOverride
-      : null;
-  const base = {
-    ...metadata,
-    current_session_only: Boolean(accessOverride || enabledOverride !== null),
-    live_session_access_override: Boolean(accessOverride),
-    live_session_enabled_override: enabledOverride !== null,
-    config_backed_access: metadata.access || null,
-    config_backed_enabled: metadata.enabled === true,
-  };
-  const withAccess = accessOverride ? { ...base, access: accessOverride } : base;
-  if (enabledOverride === false) {
-    return {
-      ...withAccess,
-      enabled: false,
-      available: false,
-      availability: "disabled",
-      reason: "website_disabled",
-      reason_message: WEBSITE_UNAVAILABLE_MESSAGES.website_disabled,
-    };
+  let websiteProjectFolder = null;
+  let metadata = null;
+  try {
+    websiteProjectFolder = resolveSessionWebsiteProjectFolder(session);
+    metadata = buildAgentWebsiteMetadata(
+      session?.agentId || null,
+      websiteProjectFolder
+    );
+  } catch (err) {
+    metadata = buildUnavailableWebsiteMetadata(session?.agentId || null, {
+      reason:
+        err?.code === "browser_root_project_id_collision"
+          ? "project_id_conflict"
+          : err?.code === "browser_root_project_not_found"
+          ? "browser_root_project_not_found"
+          : "unavailable",
+    });
   }
-  if (enabledOverride === true) {
-    return {
-      ...withAccess,
-      enabled: true,
-      reason: withAccess.available === true ? null : withAccess.reason,
-    };
+  return metadata;
+}
+
+function buildBrowserRootWebsiteMetadataForClaims(agentId, claims = null) {
+  try {
+    const folder = browserRootProjectIndex.resolveProjectFolder(agentId);
+    return buildAgentWebsiteMetadataForClaims(agentId, folder, claims);
+  } catch (err) {
+    return buildUnavailableWebsiteMetadata(agentId, {
+      reason:
+        err?.code === "browser_root_project_id_collision"
+          ? "project_id_conflict"
+          : err?.code === "browser_root_project_not_found"
+          ? "browser_root_project_not_found"
+          : "unavailable",
+    });
   }
-  if (!accessOverride) {
-    return base;
-  }
-  return {
-    ...withAccess,
-  };
 }
 
 function resolveWebsitePasswordFolder(agentId, folderPath = null) {
@@ -10362,7 +10529,17 @@ function buildAgentWebsiteMetadataForClaims(agentId, folderPath = null, claims =
 
 function buildSessionWebsiteMetadataForClaims(session, claims = null) {
   const metadata = buildSessionWebsiteMetadata(session);
-  return withOwnerVisibleWebsitePassword(metadata, session?.cwd || null, claims);
+  let websiteProjectFolder = null;
+  try {
+    websiteProjectFolder = resolveSessionWebsiteProjectFolder(session);
+  } catch {
+    // The unavailable metadata above carries the actionable Browser Root reason.
+  }
+  return withOwnerVisibleWebsitePassword(
+    metadata,
+    websiteProjectFolder,
+    claims
+  );
 }
 
 const P86_PRODUCT_CLI_ENDPOINT_CONTRACT = "p86_product_cli_host_endpoint_v1";
@@ -10373,74 +10550,49 @@ const P94_AGENT_SITE_TEMPLATE_PATH = join(
   "index.html"
 );
 
-function readJsonObjectIfPresent(path) {
-  if (!existsSync(path) || !statSync(path).isFile()) return {};
-  const parsed = JSON.parse(readFileSync(path, "utf-8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Expected JSON object at ${path}`);
-  }
-  return parsed;
-}
-
-function collectCopiedDemoAgentIds(
-  demoId = null,
-  schedulerDefinitions = []
-) {
-  const ids = new Set();
-  for (const schedule of schedulerDefinitions) {
-    const agentId = normalizeString(schedule?.agent_id);
-    if (agentId) ids.add(agentId);
-  }
-  const fallbackDemoId = normalizeString(demoId);
-  if (ids.size === 0 && fallbackDemoId) ids.add(fallbackDemoId);
-  return [...ids].sort();
-}
-
-function registerCopiedDemoAgentFolders({
-  copiedPath,
-  demoId = null,
-  schedulerDefinitions = [],
-} = {}) {
-  const normalizedCopiedPath = normalizeString(copiedPath);
-  if (!normalizedCopiedPath) throw new Error("copiedPath required");
-  const realFolder = realpathSync(normalizedCopiedPath);
-  const agents = collectCopiedDemoAgentIds(
-    demoId,
-    schedulerDefinitions
-  ).map((agentId) => {
-    setAgentFolder(agentId, realFolder);
-    return {
-      agent_id: agentId,
-      agent_folder: realFolder,
-    };
-  });
-  return {
-    status: "demo_agent_folder_registered",
-    agent_folder: realFolder,
-    registered_count: agents.length,
-    agents,
-  };
-}
-
-function resolveP86WebsiteAgentFolder(agentId, body = {}) {
+function resolveP86WebsiteAgentFolder(agentId, body = null) {
   const requestedFolder =
-    normalizeString(body.agent_folder) || normalizeString(body.agentFolder);
-  const session = sessionManager.getAgentSession(agentId);
-  const folder = requestedFolder || session?.cwd || getAgentFolder(agentId);
-  if (!folder) {
-    throw new Error(
-      "agent_folder is required when no running session or registered folder exists"
-    );
-  }
-  return folder;
-}
-
-function persistP86WebsiteAgentFolder(agentId, body = {}) {
-  const requestedFolder =
-    normalizeString(body.agent_folder) || normalizeString(body.agentFolder);
+    normalizeString(body?.agent_folder) || normalizeString(body?.agentFolder);
+  const projectFolder = browserRootProjectIndex.resolveProjectFolder(agentId);
   if (requestedFolder) {
-    setAgentFolder(agentId, requestedFolder);
+    if (realpathSync(requestedFolder) !== realpathSync(projectFolder)) {
+      throw new Error("Requested website folder does not match target authority");
+    }
   }
+  return projectFolder;
+}
+
+function resolveAgentOperationFolder({
+  agentId,
+  sessionId = null,
+  requestedFolder = null,
+  auth = null,
+  allowExplicitDashboardFolder = false,
+} = {}) {
+  const normalizedAgentId = normalizeString(agentId);
+  if (!normalizedAgentId) throw new Error("agent_id required");
+  const normalizedSessionId = normalizeString(sessionId);
+  if (normalizedSessionId) {
+    const session = sessionManager.getSession(normalizedSessionId);
+    if (!session) throw new Error("Session not found");
+    if (session.agentId !== normalizedAgentId) {
+      throw new Error("Session agent does not match requested agent");
+    }
+    return session.cwd;
+  }
+  const runtimeSession = auth?.session || auth?.actorSession || null;
+  if (
+    auth?.mode === "runtime_capability" &&
+    runtimeSession?.agentId === normalizedAgentId &&
+    runtimeSession.cwd
+  ) {
+    return runtimeSession.cwd;
+  }
+  const normalizedRequestedFolder = normalizeString(requestedFolder);
+  if (normalizedRequestedFolder && allowExplicitDashboardFolder) {
+    return realpathSync(normalizedRequestedFolder);
+  }
+  return browserRootProjectIndex.resolveProjectFolder(normalizedAgentId);
 }
 
 function buildP86WebsiteStatusPayload(agentId, folder) {
@@ -10495,7 +10647,6 @@ function ensureP94AgentWebsiteScaffold({
   agentId,
   folder,
   access = "owner_only",
-  persistConfig = false,
   createAssetsDir = false,
   dryRun = false,
   status = dryRun ? "website_scaffold_dry_run" : "website_scaffolded",
@@ -10530,16 +10681,6 @@ function ensureP94AgentWebsiteScaffold({
     writeFileSync(indexPath, readP94AgentSiteTemplate(), "utf-8");
     indexCreated = true;
   }
-  if (persistConfig === true) {
-    const config = readJsonObjectIfPresent(configPath);
-    config.web = {
-      ...(config.web || {}),
-      root: ".oysterun/site",
-      access: normalizedAccess,
-      enabled: true,
-    };
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
-  }
   return {
     ...plan,
     index_created: indexCreated,
@@ -10547,21 +10688,159 @@ function ensureP94AgentWebsiteScaffold({
   };
 }
 
-function applyP86WebsiteScaffold({ agentId, folder, access, dryRun = false }) {
-  const result = ensureP94AgentWebsiteScaffold({
-    agentId,
-    folder,
-    access,
-    persistConfig: !dryRun,
-    createAssetsDir: true,
-    dryRun,
-    status: dryRun ? "website_init_dry_run" : "website_initialized",
-    contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-  });
-  if (!dryRun) {
-    setAgentFolder(agentId, folder);
+function restoreOptionalFile(filePath, snapshot) {
+  if (snapshot.existed) {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, snapshot.content);
+  } else {
+    rmSync(filePath, { force: true });
   }
-  return result;
+}
+
+function snapshotOptionalFile(filePath) {
+  return existsSync(filePath)
+    ? { existed: true, content: readFileSync(filePath) }
+    : { existed: false, content: null };
+}
+
+function isMissingProjectWebsiteNoop(updates = {}) {
+  return (
+    updates.web_enabled !== true &&
+    !updates.web_password &&
+    (!updates.web_access || updates.web_access === "owner_only") &&
+    !updates.web_root
+  );
+}
+
+function persistBrowserRootWebsiteSettings({
+  agentId,
+  body = {},
+  requestedFolder = null,
+  initialize = false,
+  requireInitialized = false,
+  allowMissingDisabledNoop = false,
+  createAssetsDir = false,
+  dryRun = false,
+  status = dryRun ? "website_settings_dry_run" : "website_settings_updated",
+  contract = null,
+} = {}) {
+  const normalizedAgentId = normalizeString(agentId);
+  if (!normalizedAgentId) throw new Error("agent_id required");
+  const updates = normalizeWebsiteConfigUpdates(body);
+  let folder;
+  try {
+    folder = browserRootProjectIndex.resolveProjectFolder(normalizedAgentId);
+  } catch (err) {
+    if (
+      allowMissingDisabledNoop &&
+      err?.code === "browser_root_project_not_found" &&
+      isMissingProjectWebsiteNoop(updates)
+    ) {
+      return {
+        status: "website_settings_not_applicable",
+        agent_id: normalizedAgentId,
+        agent_folder: null,
+        config_mutated: false,
+        website: buildUnavailableWebsiteMetadata(normalizedAgentId, {
+          reason: "browser_root_project_not_found",
+        }),
+      };
+    }
+    throw err;
+  }
+  if (
+    requestedFolder &&
+    realpathSync(requestedFolder) !== realpathSync(folder)
+  ) {
+    throw new Error("Requested website folder does not match Browser Root authority");
+  }
+
+  const existing = readAgentConfigLayers(folder);
+  const effectiveAccess = updates.web_access || existing.web.access || "owner_only";
+  const effectivePassword = updates.web_password || existing.web.password || "";
+  const effectiveEnabled =
+    typeof updates.web_enabled === "boolean"
+      ? updates.web_enabled
+      : existing.web.enabled === true;
+  if (effectiveEnabled && effectiveAccess === "password" && !effectivePassword) {
+    throw new Error("Website Password is required when Website Access is Password.");
+  }
+  if (requireInitialized) {
+    resolveInitializedWebsiteForToggle(normalizedAgentId, folder);
+  }
+
+  const shouldInitialize = initialize || updates.web_enabled === true;
+  const effectiveUpdates = {
+    ...updates,
+    ...(shouldInitialize && !updates.web_root
+      ? { web_root: ".oysterun/site" }
+      : {}),
+  };
+  const siteDir = join(folder, ".oysterun", "site");
+  const indexPath = join(siteDir, "index.html");
+  const configSnapshot = snapshotOptionalFile(existing.configPath);
+  const localSnapshot = snapshotOptionalFile(existing.localConfigPath);
+  const siteExisted = existsSync(siteDir);
+  const indexExisted = existsSync(indexPath);
+  const plan = {
+    status,
+    ...(contract ? { contract } : {}),
+    agent_id: normalizedAgentId,
+    agent_folder: folder,
+    config_path: existing.configPath,
+    site_root: ".oysterun/site",
+    index_path: indexPath,
+    access: effectiveAccess,
+    web_enabled:
+      typeof effectiveUpdates.web_enabled === "boolean"
+        ? effectiveUpdates.web_enabled
+        : existing.web.enabled === true,
+    overwrite_existing_index: false,
+    delete_existing_site_files: false,
+  };
+  if (dryRun) return { ...plan, config_mutated: false };
+
+  try {
+    const result = persistAgentConfigUpdates(folder, effectiveUpdates);
+    let scaffold = null;
+    if (shouldInitialize) {
+      scaffold = ensureP94AgentWebsiteScaffold({
+        agentId: normalizedAgentId,
+        folder,
+        access: effectiveAccess,
+        createAssetsDir,
+      });
+    }
+    assertWebsiteConfigPersisted(folder, {
+      enabled:
+        typeof effectiveUpdates.web_enabled === "boolean"
+          ? effectiveUpdates.web_enabled
+          : null,
+      access: effectiveUpdates.web_access || null,
+      password: effectiveUpdates.web_password || null,
+    });
+    browserRootProjectIndex.refresh({
+      reason: "browser_root_website_settings_persisted",
+    });
+    return {
+      ...plan,
+      config_mutated: result.changed === true,
+      index_created: scaffold?.index_created === true,
+      website: buildAgentWebsiteMetadata(normalizedAgentId, folder),
+    };
+  } catch (err) {
+    restoreOptionalFile(existing.configPath, configSnapshot);
+    restoreOptionalFile(existing.localConfigPath, localSnapshot);
+    if (!siteExisted) {
+      rmSync(siteDir, { recursive: true, force: true });
+    } else if (!indexExisted) {
+      rmSync(indexPath, { force: true });
+    }
+    browserRootProjectIndex.refresh({
+      reason: "browser_root_website_settings_rolled_back",
+    });
+    throw err;
+  }
 }
 
 function buildP86TelegramStatusPayload() {
@@ -10583,131 +10862,6 @@ function buildP86TelegramStatusPayload() {
     telegram_enabled_default: false,
     sessions,
   };
-}
-
-function listBrowserRootPortableSchedulerFolders(rootPath = resolveDefaultBrowsePath()) {
-  const root = realpathSync(rootPath);
-  const rootStats = statSync(root, { throwIfNoEntry: false });
-  if (!rootStats || !rootStats.isDirectory()) {
-    throw new Error(`Default Browse Root is not a directory: ${rootPath}`);
-  }
-  const candidates = [root];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const candidate = join(root, entry.name);
-    try {
-      const realCandidate = realpathSync(candidate);
-      if (realCandidate === root || !realCandidate.startsWith(`${root}/`)) {
-        continue;
-      }
-      candidates.push(realCandidate);
-    } catch {
-      continue;
-    }
-  }
-  const seen = new Set();
-  return candidates.filter((candidate) => {
-    if (seen.has(candidate)) return false;
-    seen.add(candidate);
-    const schedulerPath = join(candidate, ".oysterun", "schedulers.json");
-    return statSync(schedulerPath, { throwIfNoEntry: false })?.isFile() === true;
-  });
-}
-
-function importBrowserRootPortableSchedulers(rootPath = resolveDefaultBrowsePath()) {
-  const root = realpathSync(rootPath);
-  const folders = listBrowserRootPortableSchedulerFolders(root);
-  const imported = [];
-  const failed = [];
-  let registeredCount = 0;
-  for (const folder of folders) {
-    try {
-      const result = schedulerService.registerCopiedDemoAgentSchedules({
-        agentFolder: folder,
-      });
-      registeredCount += Number(result.registered_count || 0);
-      imported.push({
-        agent_folder: folder,
-        registered_count: result.registered_count || 0,
-        schedule_ids: Array.isArray(result.schedules)
-          ? result.schedules.map((schedule) => schedule.id).filter(Boolean)
-          : [],
-      });
-    } catch (err) {
-      failed.push({
-        agent_folder: folder,
-        error: err.message || String(err),
-      });
-    }
-  }
-  return {
-    status: "scheduler_browser_root_imported",
-    browser_root: root,
-    scanned_folder_count: folders.length,
-    imported_folder_count: imported.length,
-    failed_folder_count: failed.length,
-    registered_count: registeredCount,
-    imported,
-    failed,
-    storage_owner: "agent_folder_oysterun_schedulers_json",
-    scanner_owner: "explicit_owner_refresh_button",
-    scheduler_runner_scans_browser_root: false,
-  };
-}
-
-function applySessionWebsiteAccessRequest(session, body = {}) {
-  if (
-    !session ||
-    (!Object.prototype.hasOwnProperty.call(body, "web_access") &&
-      !Object.prototype.hasOwnProperty.call(body, "webAccess") &&
-      !hasAgentWebEnabledRequest(body))
-  ) {
-    return;
-  }
-  const hasAccessRequest =
-    Object.prototype.hasOwnProperty.call(body, "web_access") ||
-    Object.prototype.hasOwnProperty.call(body, "webAccess");
-  const requestedAccess = hasAccessRequest
-    ? normalizeAgentWebAccess(body.web_access ?? body.webAccess)
-    : null;
-  const requestedEnabled = hasAgentWebEnabledRequest(body)
-    ? normalizeAgentWebEnabled(body.web_enabled ?? body.webEnabled)
-    : null;
-  const configAlreadyUpdated =
-    body.update_config === true ||
-    body.persist_config === true ||
-    body.persist_shared_config === true;
-  if (configAlreadyUpdated) {
-    if (hasAccessRequest) delete session.websiteAccessOverride;
-    if (requestedEnabled !== null) delete session.websiteEnabledOverride;
-    return;
-  }
-  if (hasAccessRequest) session.websiteAccessOverride = requestedAccess;
-  if (requestedEnabled !== null) {
-    session.websiteEnabledOverride = requestedEnabled;
-  }
-}
-
-function ensureRequestedWebsiteScaffoldBeforeSession({
-  agentId,
-  folder,
-  body = {},
-  resolved,
-}) {
-  const requestedWebsiteEnabled = hasAgentWebEnabledRequest(body)
-    ? normalizeAgentWebEnabled(body.web_enabled ?? body.webEnabled)
-    : resolved?.layers?.web?.enabled === true;
-  if (requestedWebsiteEnabled !== true) return null;
-  return ensureP94AgentWebsiteScaffold({
-    agentId,
-    folder,
-    access:
-      body.web_access ??
-      body.webAccess ??
-      resolved?.layers?.web?.access ??
-      "owner_only",
-    persistConfig: false,
-  });
 }
 
 function getDeliverableContentType(realPath, buffer = null) {
@@ -12552,10 +12706,18 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && path === "/agents/catalog") {
       try {
+        if (url.searchParams.get("refresh_browser_root") === "1") {
+          browserRootProjectIndex.refresh({
+            reason: "agent_catalog_page_entry",
+            rebuildWatchers: true,
+          });
+        }
         const agents = buildAgentCatalog(claims);
         return respond(res, 200, {
           agents,
           websites: buildAgentWebsiteCatalog(agents),
+          project_registration_issues:
+            buildBrowserRootProjectRegistrationIssues(),
           roots: buildBrowseRoots(),
         });
       } catch (err) {
@@ -12640,15 +12802,17 @@ const server = createServer(async (req, res) => {
       ) {
         return;
       }
-      const folder =
-        session?.cwd ||
-        (claims._dashboardAuth
-          ? normalizeString(body.agent_folder ?? body.agentFolder)
-          : null) ||
-        getAgentFolder(agentId);
-      if (!folder) {
+      let folder;
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId,
+          sessionId: session?.id,
+          requestedFolder: body.agent_folder ?? body.agentFolder,
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch (err) {
         return respond(res, 400, {
-          error: "agent_folder or live session folder required for Telegram Test Send",
+          error: err.message,
           telegram_test_send: true,
           config_mutated: false,
         });
@@ -12787,7 +12951,6 @@ const server = createServer(async (req, res) => {
           agentId,
         });
         if (!auth) return;
-        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
         const folder = resolveP86WebsiteAgentFolder(agentId, body);
         const metadata = buildAgentWebsiteMetadata(agentId, folder);
         return respond(res, 200, {
@@ -12818,14 +12981,20 @@ const server = createServer(async (req, res) => {
           agentId,
         });
         if (!auth) return;
-        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
-        const folder = resolveP86WebsiteAgentFolder(agentId, body);
         const dryRun = body.dry_run === true;
-        const result = applyP86WebsiteScaffold({
+        const result = persistBrowserRootWebsiteSettings({
           agentId,
-          folder,
-          access: body.access || body.web_access,
+          body: {
+            web_enabled: true,
+            web_access: body.access || body.web_access || "owner_only",
+            web_root: ".oysterun/site",
+          },
+          requestedFolder: body.agent_folder || body.agentFolder || null,
+          initialize: true,
+          createAssetsDir: true,
           dryRun,
+          status: dryRun ? "website_init_dry_run" : "website_initialized",
+          contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
         });
         if (!dryRun) {
           recordTelemetryCounter("website_init_count");
@@ -12855,50 +13024,28 @@ const server = createServer(async (req, res) => {
           agentId,
         });
         if (!auth) return;
-        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
-        const folder = resolveP86WebsiteAgentFolder(agentId, body);
         const enabling = path === "/website/enable";
-        let initialized = null;
-        if (enabling) {
-          initialized = resolveInitializedWebsiteForToggle(agentId, folder);
-        }
-        if (body.dry_run === true) {
-          return respond(res, 200, {
-            status: enabling ? "website_enable_dry_run" : "website_disable_dry_run",
-            contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-            agent_id: agentId,
-            agent_folder: folder,
-            web_enabled: enabling,
-            ...(initialized
-              ? {
-                  site_root: relative(folder, initialized.rootPath) || ".",
-                  index_path: relative(folder, initialized.indexPath),
-                }
-              : {}),
-          });
-        }
-        const result = persistAgentConfigUpdates(folder, {
-          web_enabled: enabling,
-        });
-        persistP86WebsiteAgentFolder(agentId, body);
-        recordTelemetryCounter("website_access_changed_count");
-        recordTelemetryFeature("website_settings");
-        return respond(res, 200, {
-          status: enabling ? "website_enabled" : "website_disabled",
+        const dryRun = body.dry_run === true;
+        const result = persistBrowserRootWebsiteSettings({
+          agentId,
+          body: { web_enabled: enabling },
+          requestedFolder: body.agent_folder || body.agentFolder || null,
+          requireInitialized: enabling,
+          dryRun,
+          status: enabling
+            ? dryRun
+              ? "website_enable_dry_run"
+              : "website_enabled"
+            : dryRun
+            ? "website_disable_dry_run"
+            : "website_disabled",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-          agent_id: agentId,
-          agent_folder: folder,
-          web_enabled: enabling,
-          config_mutated: result.changed === true,
-          delete_existing_site_files: false,
-          ...(initialized
-            ? {
-                site_root: relative(folder, initialized.rootPath) || ".",
-                index_path: relative(folder, initialized.indexPath),
-              }
-            : {}),
-          website: buildAgentWebsiteMetadata(agentId, folder),
         });
+        if (!dryRun) {
+          recordTelemetryCounter("website_access_changed_count");
+          recordTelemetryFeature("website_settings");
+        }
+        return respond(res, 200, result);
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
@@ -12919,31 +13066,21 @@ const server = createServer(async (req, res) => {
           agentId,
         });
         if (!auth) return;
-        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
-        const folder = resolveP86WebsiteAgentFolder(agentId, body);
         const access = normalizeAgentWebAccess(body.access || body.web_access);
-        if (body.dry_run === true) {
-          return respond(res, 200, {
-            status: "website_access_dry_run",
-            contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-            agent_id: agentId,
-            agent_folder: folder,
-            access,
-          });
-        }
-        const result = persistAgentConfigUpdates(folder, { web_access: access });
-        persistP86WebsiteAgentFolder(agentId, body);
-        recordTelemetryCounter("website_access_changed_count");
-        recordTelemetryFeature("website_settings");
-        return respond(res, 200, {
-          status: "website_access_updated",
+        const dryRun = body.dry_run === true;
+        const result = persistBrowserRootWebsiteSettings({
+          agentId,
+          body: { web_access: access },
+          requestedFolder: body.agent_folder || body.agentFolder || null,
+          dryRun,
+          status: dryRun ? "website_access_dry_run" : "website_access_updated",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-          agent_id: agentId,
-          agent_folder: folder,
-          access,
-          config_mutated: result.changed === true,
-          website: buildAgentWebsiteMetadata(agentId, folder),
         });
+        if (!dryRun) {
+          recordTelemetryCounter("website_access_changed_count");
+          recordTelemetryFeature("website_settings");
+        }
+        return respond(res, 200, result);
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
@@ -12965,34 +13102,27 @@ const server = createServer(async (req, res) => {
           agentId,
         });
         if (!auth) return;
-        if (!requireRuntimeWebsiteFolderMatchesSession(auth, body, res)) return;
         if (!password) {
           return respond(res, 400, { error: "password required" });
         }
-        const folder = resolveP86WebsiteAgentFolder(agentId, body);
-        if (body.dry_run === true) {
-          return respond(res, 200, {
-            status: "website_password_dry_run",
-            contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-            agent_id: agentId,
-            agent_folder: folder,
-            raw_password_returned: false,
-          });
-        }
-        const result = persistAgentConfigUpdates(folder, {
-          web_password: password,
-        });
-        persistP86WebsiteAgentFolder(agentId, body);
-        recordTelemetryCounter("website_password_set_count");
-        recordTelemetryFeature("website_settings");
-        return respond(res, 200, {
-          status: "website_password_updated",
+        const dryRun = body.dry_run === true;
+        const result = persistBrowserRootWebsiteSettings({
+          agentId,
+          body: { web_password: password },
+          requestedFolder: body.agent_folder || body.agentFolder || null,
+          dryRun,
+          status: dryRun
+            ? "website_password_dry_run"
+            : "website_password_updated",
           contract: P86_PRODUCT_CLI_ENDPOINT_CONTRACT,
-          agent_id: agentId,
-          agent_folder: folder,
-          config_mutated: result.changed === true,
+        });
+        if (!dryRun) {
+          recordTelemetryCounter("website_password_set_count");
+          recordTelemetryFeature("website_settings");
+        }
+        return respond(res, 200, {
+          ...result,
           raw_password_returned: false,
-          website: buildAgentWebsiteMetadata(agentId, folder),
         });
       } catch (err) {
         return respond(res, 400, {
@@ -13293,24 +13423,24 @@ const server = createServer(async (req, res) => {
           demoId: body.demo_id,
         });
         if (payload?.copied_path) {
-          const schedulerValidation =
-            schedulerService.validateCopiedDemoAgentScheduleDefinitions({
-              agentFolder: payload.copied_path,
-            });
-          payload.scheduler_validation = {
-            status: schedulerValidation.status,
-            agent_folder: schedulerValidation.agent_folder,
-            scheduler_count: schedulerValidation.scheduler_count,
-          };
-          payload.agent_registration = registerCopiedDemoAgentFolders({
-            copiedPath: payload.copied_path,
-            demoId: payload.demo_id,
-            schedulerDefinitions: schedulerValidation.definitions,
+          const snapshot = browserRootProjectIndex.refresh({
+            reason: "demo_agent_copied",
+            rebuildWatchers: true,
           });
-          payload.scheduler_registration =
-            schedulerService.registerCopiedDemoAgentSchedules({
-              agentFolder: payload.copied_path,
-            });
+          const copiedFolder = realpathSync(payload.copied_path);
+          const discoveredProject = snapshot.projects.find(
+            (project) => project.agent_folder === copiedFolder
+          );
+          payload.project_discovery = discoveredProject
+            ? {
+                status: "browser_root_project_discovered",
+                project_id: discoveredProject.project_id,
+                agent_folder: discoveredProject.agent_folder,
+              }
+            : {
+                status: "outside_browser_root",
+                agent_folder: copiedFolder,
+              };
         }
         recordTelemetryCounter("demo_agent_created_count");
         recordTelemetryFeature("file_explorer");
@@ -13782,6 +13912,12 @@ const server = createServer(async (req, res) => {
         }
 
         writeConfig(updates);
+        if (Object.prototype.hasOwnProperty.call(updates, "default_browse_path")) {
+          browserRootProjectIndex.refresh({
+            reason: "default_browse_path_changed",
+            rebuildWatchers: true,
+          });
+        }
         recordTelemetryFeature("host_preferences");
         return respond(res, 200, {
           status: "updated",
@@ -13876,6 +14012,13 @@ const server = createServer(async (req, res) => {
           folderPath,
           providerOverride ? { provider: providerOverride } : {}
         );
+        const websiteAgentId = deriveBrowserRootProjectId(
+          basename(summary.folderPath)
+        );
+        const website = buildBrowserRootWebsiteMetadataForClaims(
+          websiteAgentId,
+          claims
+        );
         return respond(res, 200, {
           agent_folder: summary.folderPath,
           hasConfig: summary.hasConfig,
@@ -13897,8 +14040,8 @@ const server = createServer(async (req, res) => {
             resolved.runtime.allowDangerouslySkipPermissions === true,
           searchEnabled: resolved.runtime.searchEnabled === true,
           imageInputEnabled: resolved.runtime.imageInputEnabled === true,
-          webAccess: resolved.layers.web.access,
-          webEnabled: resolved.layers.web.enabled === true,
+          webAccess: website.access || "owner_only",
+          webEnabled: website.enabled === true,
           notifications: serializeAgentNotificationConfig(
             resolved.layers.notifications
           ),
@@ -13906,11 +14049,7 @@ const server = createServer(async (req, res) => {
             resolveAgentTelegramConfigFromLayers(resolved.layers),
             claims
           ),
-          website: buildAgentWebsiteMetadataForClaims(
-            "preview",
-            summary.folderPath,
-            claims
-          ),
+          website,
           runtime_capabilities: serializeRuntimeCapabilities(
             resolveConfiguredRuntimeCapabilities(resolved.config)
           ),
@@ -13934,8 +14073,23 @@ const server = createServer(async (req, res) => {
         return respond(res, 400, { error: "agent_id query param required" });
       }
 
-      const session = sessionManager.getAgentSession(agent_id);
-      const folder = session?.cwd || getAgentFolder(agent_id);
+      const requestedSessionId = normalizeString(
+        url.searchParams.get("session_id")
+      );
+      const session = requestedSessionId
+        ? sessionManager.getSession(requestedSessionId)
+        : null;
+      let folder = null;
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId: requestedSessionId,
+          requestedFolder: url.searchParams.get("agent_folder"),
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch {
+        folder = null;
+      }
       if (!folder) {
         if (!checkAgentAccess(claims, agent_id, res)) return;
         return respond(res, 200, {
@@ -13956,6 +14110,10 @@ const server = createServer(async (req, res) => {
         if (!checkAgentAccess(claims, agent_id, res)) return;
         const summary = summarizeAgentConfig(folder);
         const resolved = resolveAgentRuntimeConfig(folder);
+        const website = buildBrowserRootWebsiteMetadataForClaims(
+          agent_id,
+          claims
+        );
         return respond(res, 200, {
           agent_id,
           agent_folder: summary.folderPath,
@@ -13978,8 +14136,8 @@ const server = createServer(async (req, res) => {
           dangerousMode: resolved.runtime.dangerousMode === true,
           searchEnabled: resolved.runtime.searchEnabled === true,
           imageInputEnabled: resolved.runtime.imageInputEnabled === true,
-          webAccess: resolved.layers.web.access,
-          webEnabled: resolved.layers.web.enabled === true,
+          webAccess: website.access || "owner_only",
+          webEnabled: website.enabled === true,
           notifications: serializeAgentNotificationConfig(
             resolved.layers.notifications
           ),
@@ -13987,11 +14145,7 @@ const server = createServer(async (req, res) => {
             resolveAgentTelegramConfigFromLayers(resolved.layers),
             claims
           ),
-          website: buildAgentWebsiteMetadataForClaims(
-            agent_id,
-            summary.folderPath,
-            claims
-          ),
+          website,
           runtime_capabilities: serializeRuntimeCapabilities(
             resolveConfiguredRuntimeCapabilities(resolved.config)
           ),
@@ -14030,13 +14184,17 @@ const server = createServer(async (req, res) => {
       if (!requireAgentCapability(claims, agent_id, "can_manage_config", res))
         return;
 
-      const session = sessionManager.getAgentSession(agent_id);
-      const folder =
-        session?.cwd || getAgentFolder(agent_id) || body.agent_folder || null;
-      if (!folder) {
+      let folder;
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId: body.session_id || body.sessionId,
+          requestedFolder: body.agent_folder,
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch (err) {
         return respond(res, 404, {
-          error:
-            "No folder mapping found for this agent. Provide agent_folder or start a session first.",
+          error: err.message,
         });
       }
 
@@ -14076,6 +14234,7 @@ const server = createServer(async (req, res) => {
       }
       let normalizedConfigPayload;
       let result;
+      let websiteMutation = null;
       try {
         normalizedConfigPayload = buildNormalizedConfigPayload(
           body,
@@ -14089,14 +14248,38 @@ const server = createServer(async (req, res) => {
             )
           );
         }
-        result = persistAgentConfigUpdates(folder, normalizedConfigPayload);
+        const splitConfig = splitWebsiteConfigUpdates(normalizedConfigPayload);
+        result =
+          Object.keys(splitConfig.remaining).length > 0
+            ? persistAgentConfigUpdates(folder, splitConfig.remaining)
+            : {
+                changed: false,
+                config: resolveAgentRuntimeConfig(folder).config,
+              };
+        if (Object.keys(splitConfig.website).length > 0) {
+          browserRootProjectIndex.refresh({
+            reason: "agent_config_before_website_persist",
+          });
+          websiteMutation = persistBrowserRootWebsiteSettings({
+            agentId: agent_id,
+            body: splitConfig.website,
+            initialize: splitConfig.website.web_enabled === true,
+            allowMissingDisabledNoop: true,
+          });
+        }
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
           config_mutated: false,
         });
       }
-      return respond(res, 200, { status: "updated", config: result.config });
+      return respond(res, 200, {
+        status: "updated",
+        config: result.config,
+        website: websiteMutation?.website ||
+          buildBrowserRootWebsiteMetadataForClaims(agent_id, claims),
+        website_config_mutated: websiteMutation?.config_mutated === true,
+      });
     }
 
     // ── GET /agent/commands?agent_id=… ──────────────────────
@@ -14108,8 +14291,17 @@ const server = createServer(async (req, res) => {
       }
       if (!requireAgentCapability(claims, agent_id, "can_chat", res)) return;
 
-      const session = sessionManager.getAgentSession(agent_id);
-      const folder = session?.cwd || getAgentFolder(agent_id);
+      const sessionId = normalizeString(url.searchParams.get("session_id"));
+      const session = sessionId ? sessionManager.getSession(sessionId) : null;
+      let folder = null;
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId,
+        });
+      } catch {
+        folder = null;
+      }
       let providerId = session?.provider || null;
       if (!providerId && folder && existsSync(folder)) {
         try {
@@ -14175,14 +14367,19 @@ const server = createServer(async (req, res) => {
         res
       );
       if (!auth) return;
-      let folder = getAgentFolder(agent_id);
+      let folder;
       const requestedFolder = normalizeString(url.searchParams.get("agent_folder"));
-      if (claims._dashboardAuth && requestedFolder) {
-        folder = requestedFolder;
-      }
-      if (!folder) {
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId: url.searchParams.get("session_id"),
+          requestedFolder,
+          auth,
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch (err) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: err.message,
         });
       }
       const requestedProvider = normalizeString(url.searchParams.get("provider"));
@@ -14225,15 +14422,19 @@ const server = createServer(async (req, res) => {
       }
       if (!requireAgentCapability(claims, agent_id, "can_manage_config", res))
         return;
-      const session = sessionManager.getAgentSession(agent_id);
-      let folder =
-        session?.cwd || getAgentFolder(agent_id) || normalizeString(body.agent_folder);
-      if (claims._dashboardAuth && normalizeString(body.agent_folder)) {
-        folder = normalizeString(body.agent_folder);
-      }
-      if (!folder) {
+      const sessionId = normalizeString(body.session_id || body.sessionId);
+      const session = sessionId ? sessionManager.getSession(sessionId) : null;
+      let folder;
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId,
+          requestedFolder: body.agent_folder,
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch (err) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: err.message,
         });
       }
       const requestedProvider = normalizeString(body.provider);
@@ -14282,14 +14483,19 @@ const server = createServer(async (req, res) => {
         res
       );
       if (!auth) return;
-      let folder = getAgentFolder(agent_id);
+      let folder;
       const requestedFolder = normalizeString(url.searchParams.get("agent_folder"));
-      if (claims._dashboardAuth && requestedFolder) {
-        folder = requestedFolder;
-      }
-      if (!folder) {
+      try {
+        folder = resolveAgentOperationFolder({
+          agentId: agent_id,
+          sessionId: url.searchParams.get("session_id"),
+          requestedFolder,
+          auth,
+          allowExplicitDashboardFolder: claims._dashboardAuth === true,
+        });
+      } catch (err) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: err.message,
         });
       }
       const requestedProvider = normalizeString(url.searchParams.get("provider"));
@@ -14537,10 +14743,18 @@ const server = createServer(async (req, res) => {
         scope: "scheduler:read",
       });
       if (!auth) return;
+      if (url.searchParams.get("refresh_browser_root") === "1") {
+        browserRootProjectIndex.refresh({
+          reason: "scheduler_page_entry",
+          rebuildWatchers: true,
+        });
+      }
       return respond(res, 200, {
         status: "host_scheduler_schedules",
         host_timezone: getHostSystemTimezone(),
         schedules: schedulerService.listHostSchedulesForDashboard(),
+        project_registration_issues:
+          buildBrowserRootProjectRegistrationIssues(),
         serialization_scope: "authenticated_dashboard_host_scheduler_ui",
         storage_owner: "agent_folder_oysterun_schedulers_json",
         browser_local_storage_owner: false,
@@ -14548,26 +14762,30 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    if (req.method === "POST" && path === "/scheduler/schedules/import-browser-root") {
+    if (req.method === "POST" && path === "/scheduler/schedules/refresh-browser-root") {
       const auth = requireDashboardOrRuntimeCapability(claims, res, {
         scope: "scheduler:update",
       });
       if (!auth) return;
       try {
-        const result = importBrowserRootPortableSchedulers();
-        if (result.registered_count > 0) {
-          recordTelemetryCounter("scheduler_schedule_imported_count");
-          recordTelemetryFeature("scheduler");
-        }
+        const projectIndex = browserRootProjectIndex.refresh({
+          reason: "scheduler_owner_refresh",
+          rebuildWatchers: true,
+        });
         return respond(res, 200, {
-          ...result,
+          status: "scheduler_browser_root_refreshed",
+          browser_root: projectIndex.root,
+          project_count: projectIndex.projects.length,
+          diagnostic_count: projectIndex.diagnostics.length,
           schedules: schedulerService.listHostSchedulesForDashboard(),
+          project_registration_issues:
+            buildBrowserRootProjectRegistrationIssues(),
           serialization_scope: "authenticated_dashboard_host_scheduler_ui",
         });
       } catch (err) {
         return respond(res, 400, {
           error: err.message,
-          scheduler_command: "host_scheduler_import_browser_root",
+          scheduler_command: "host_scheduler_refresh_browser_root",
         });
       }
     }
@@ -14799,14 +15017,17 @@ const server = createServer(async (req, res) => {
       );
       if (!auth) return;
 
-      let resolvedFolder = getAgentFolder(agent_id);
-      if (auth.mode === "dashboard" && agent_folder) {
-        resolvedFolder = agent_folder;
-        setAgentFolder(agent_id, resolvedFolder);
-      }
-      if (!resolvedFolder) {
+      let resolvedFolder;
+      try {
+        resolvedFolder = agent_folder
+          ? realpathSync(agent_folder)
+          : browserRootProjectIndex.resolveProjectFolder(agent_id);
+        if (!statSync(resolvedFolder).isDirectory()) {
+          throw new Error(`Agent folder is not a directory: ${resolvedFolder}`);
+        }
+      } catch (err) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: `Agent folder resolution failed: ${err.message}`,
         });
       }
 
@@ -14906,12 +15127,16 @@ const server = createServer(async (req, res) => {
         return respond(res, 400, { error: err.message });
       }
       try {
-        ensureRequestedWebsiteScaffoldBeforeSession({
+        if (hasWebsiteConfigUpdate(body)) {
+          persistBrowserRootWebsiteSettings({
           agentId: agent_id,
-          folder: resolvedFolder,
           body,
-          resolved,
-        });
+            initialize:
+              hasAgentWebEnabledRequest(body) &&
+              normalizeAgentWebEnabled(body.web_enabled ?? body.webEnabled),
+            allowMissingDisabledNoop: true,
+          });
+        }
       } catch (err) {
         return respond(res, 400, { error: err.message });
       }
@@ -15066,7 +15291,6 @@ const server = createServer(async (req, res) => {
         }
         throw err;
       }
-      applySessionWebsiteAccessRequest(session, body);
       session.notificationConfig = buildResolvedSessionNotificationConfig(
         resolved.layers
       );
@@ -15077,20 +15301,6 @@ const server = createServer(async (req, res) => {
       applySessionTelegramConfigRequest(session, telegramSessionConfigRequest);
       void refreshTelegramBridgeSession(session, "session_start");
       const bookkeepingWarnings = [...(session.bookkeepingWarnings || [])];
-      try {
-        setAgentFolder(agent_id, resolvedFolder, session.id);
-      } catch (err) {
-        const warning = `registry.folder_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[session/start] ${agent_id} ${warning}`);
-      }
-      try {
-        updateAgentSession(agent_id, session.id);
-      } catch (err) {
-        const warning = `registry.session_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[session/start] ${agent_id} ${warning}`);
-      }
 
       let summary = null;
       try {
@@ -16654,6 +16864,10 @@ const server = createServer(async (req, res) => {
           Object.prototype.hasOwnProperty.call(body, "web_password") ||
           Object.prototype.hasOwnProperty.call(body, "webPassword");
         const hasWebsiteEnabledRequest = hasAgentWebEnabledRequest(body);
+        const hasWebsiteRequest =
+          hasWebAccessRequest ||
+          hasWebsitePasswordRequest ||
+          hasWebsiteEnabledRequest;
         const notificationConfigRequest = normalizeNotificationConfigPayload(body);
         const hasNotificationRequest = hasNotificationConfigRequest(body);
         const hasRuntimeCapabilityRequest =
@@ -16734,37 +16948,10 @@ const server = createServer(async (req, res) => {
         const nextAllowedPaths = hasAllowedPathsRequest
           ? normalizeSessionProfileAllowedPathsRequest(body)
           : null;
-        if (hasWebAccessRequest || hasWebsitePasswordRequest) {
-          const currentWebsiteMetadata = buildSessionWebsiteMetadata(session);
-          const effectiveWebAccess =
-            nextWebAccess ||
-            session.websiteAccessOverride ||
-            currentWebsiteMetadata.access ||
-            "owner_only";
-          if (
-            hasWebsitePasswordRequest &&
-            effectiveWebAccess === "password" &&
-            !nextWebsitePassword
-          ) {
-            throw new Error(
-              "Website Password is required when Website Access is Password. Switch Website Access away from Password before clearing it."
-            );
-          }
-          if (
-            hasWebAccessRequest &&
-            nextWebAccess === "password" &&
-            !nextWebsitePassword
-          ) {
-            const existingWebPassword =
-              session.cwd && existsSync(session.cwd)
-                ? resolveAgentWebConfig(session.cwd).password
-                : "";
-            if (!existingWebPassword) {
-              throw new Error(
-                "Website Password is required when Website Access is Password."
-              );
-            }
-          }
+        if (hasWebsitePasswordRequest && !nextWebsitePassword) {
+          throw new Error(
+            "Website Password cannot be cleared from Session Profile. Save a replacement password or change Website Access first."
+          );
         }
         if (hasAllowedPathsRequest && !session.cwd) {
           throw new Error(
@@ -16788,23 +16975,33 @@ const server = createServer(async (req, res) => {
             )
           );
         }
-        if (nextWebEnabled === true) {
-          if (!session.cwd) {
-            throw new Error(
-              "session profile website enable requires a session folder"
-            );
-          }
-          ensureP94AgentWebsiteScaffold({
-            agentId: session.agentId,
-            folder: session.cwd,
-            access:
-              nextWebAccess ||
-              session.websiteAccessOverride ||
-              buildSessionWebsiteMetadata(session).access ||
-              "owner_only",
-            persistConfig: false,
-          });
+        if (
+          hasWebsiteRequest &&
+          !isRuntimeCapabilityOnly(claims) &&
+          !requireAgentCapability(
+            claims,
+            session.agentId,
+            "can_manage_config",
+            res
+          )
+        ) {
+          return;
         }
+        const websiteMutation = hasWebsiteRequest
+          ? persistBrowserRootWebsiteSettings({
+              agentId: session.agentId,
+              body: {
+                ...(hasWebAccessRequest ? { web_access: nextWebAccess } : {}),
+                ...(hasWebsiteEnabledRequest
+                  ? { web_enabled: nextWebEnabled }
+                  : {}),
+                ...(nextWebsitePassword
+                  ? { web_password: nextWebsitePassword }
+                  : {}),
+              },
+              initialize: nextWebEnabled === true,
+            })
+          : null;
         if (persistSharedConfig) {
           if (
             !isRuntimeCapabilityOnly(claims) &&
@@ -16817,27 +17014,27 @@ const server = createServer(async (req, res) => {
           ) {
             return;
           }
-          if (!session.cwd) {
+          const hasSessionFolderConfigRequest =
+            hasNotificationRequest ||
+            hasRuntimeCapabilityRequest ||
+            hasAllowedPathsRequest ||
+            hasTelegramRequest;
+          if (hasSessionFolderConfigRequest && !session.cwd) {
             throw new Error(
               "session profile config save requires a session folder"
             );
           }
-          persistAgentConfigUpdates(session.cwd, {
-            ...(hasWebAccessRequest ? { web_access: nextWebAccess } : {}),
-            ...(hasWebsiteEnabledRequest ? { web_enabled: nextWebEnabled } : {}),
-            ...(nextWebsitePassword ? { web_password: nextWebsitePassword } : {}),
-            ...notificationConfigRequest,
-            ...(hasRuntimeCapabilityRequest
-              ? { runtime_capabilities: nextRuntimeCapabilities }
-              : {}),
-            ...(hasAllowedPathsRequest ? { allowed_paths: nextAllowedPaths } : {}),
-            ...telegramConfigRequest,
-          });
-          if (hasWebAccessRequest) {
-            delete session.websiteAccessOverride;
-          }
-          if (hasWebsiteEnabledRequest) {
-            delete session.websiteEnabledOverride;
+          if (hasSessionFolderConfigRequest) {
+            persistAgentConfigUpdates(session.cwd, {
+              ...notificationConfigRequest,
+              ...(hasRuntimeCapabilityRequest
+                ? { runtime_capabilities: nextRuntimeCapabilities }
+                : {}),
+              ...(hasAllowedPathsRequest
+                ? { allowed_paths: nextAllowedPaths }
+                : {}),
+              ...telegramConfigRequest,
+            });
           }
           if (
             hasNotificationRequest ||
@@ -16874,12 +17071,6 @@ const server = createServer(async (req, res) => {
             );
           }
         } else {
-          if (hasWebAccessRequest) {
-            session.websiteAccessOverride = nextWebAccess;
-          }
-          if (hasWebsiteEnabledRequest) {
-            session.websiteEnabledOverride = nextWebEnabled;
-          }
           if (hasNotificationRequest) {
             applySessionNotificationConfigRequest(session, {
               ...notificationConfigRequest,
@@ -16906,8 +17097,9 @@ const server = createServer(async (req, res) => {
         const website = buildSessionWebsiteMetadataForClaims(session, claims);
         const localTelegramConfigMutated =
           persistSharedConfig && hasLocalTelegramConfigUpdate(telegramConfigRequest);
-        const localWebsitePasswordMutated =
-          persistSharedConfig && Boolean(nextWebsitePassword);
+        const localWebsitePasswordMutated = Boolean(
+          nextWebsitePassword && websiteMutation?.config_mutated === true
+        );
         const localConfigMutated =
           localTelegramConfigMutated || localWebsitePasswordMutated;
         recordTelemetryFeature("agent_profile");
@@ -16956,9 +17148,16 @@ const server = createServer(async (req, res) => {
             session.runtimeCapabilities,
             session.runtimeCapabilityGrant || null
           ),
-          current_session_only: !persistSharedConfig,
-          config_mutated: persistSharedConfig,
-          shared_config_mutated: persistSharedConfig,
+          current_session_only:
+            !persistSharedConfig &&
+            (hasNotificationRequest ||
+              hasRuntimeCapabilityRequest ||
+              hasAllowedPathsRequest ||
+              hasTelegramRequest),
+          config_mutated:
+            persistSharedConfig || websiteMutation?.config_mutated === true,
+          shared_config_mutated:
+            persistSharedConfig || websiteMutation?.config_mutated === true,
           local_config_mutated: localConfigMutated,
           private_config_mutated: localConfigMutated,
           private_local_material_serialized: localConfigMutated,
@@ -17500,14 +17699,9 @@ const server = createServer(async (req, res) => {
         });
       }
 
-      let resolvedFolder =
-        sourceRecord.agent_folder || getAgentFolder(agent_id);
-      if (auth.mode === "dashboard" && agent_folder) {
-        resolvedFolder = agent_folder;
-      }
-      if (!resolvedFolder) {
+      if (!sourceRecord.agent_folder) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: "Source session history record has no agent folder",
         });
       }
 
@@ -17515,7 +17709,9 @@ const server = createServer(async (req, res) => {
       let requestedCanonicalFolder;
       try {
         sourceCanonicalFolder = realpathSync(sourceRecord.agent_folder);
-        requestedCanonicalFolder = realpathSync(resolvedFolder);
+        requestedCanonicalFolder = agent_folder
+          ? realpathSync(agent_folder)
+          : sourceCanonicalFolder;
       } catch (err) {
         return respond(res, 400, {
           error: `Resume folder validation failed: ${err.message}`,
@@ -17526,6 +17722,7 @@ const server = createServer(async (req, res) => {
           error: "Resume source folder does not match requested folder",
         });
       }
+      const resolvedFolder = sourceCanonicalFolder;
 
       const explicitProvider = readExplicitRequestedProvider(body);
       if (explicitProvider.error) {
@@ -17668,12 +17865,16 @@ const server = createServer(async (req, res) => {
       const sessionRuntimeCapabilities =
         resolveRuntimeCapabilitiesForSessionStart(resolved.config, body);
       try {
-        ensureRequestedWebsiteScaffoldBeforeSession({
-          agentId: agent_id,
-          folder: resolvedFolder,
-          body,
-          resolved,
-        });
+        if (hasWebsiteConfigUpdate(body)) {
+          persistBrowserRootWebsiteSettings({
+            agentId: agent_id,
+            body,
+            initialize:
+              hasAgentWebEnabledRequest(body) &&
+              normalizeAgentWebEnabled(body.web_enabled ?? body.webEnabled),
+            allowMissingDisabledNoop: true,
+          });
+        }
       } catch (err) {
         return respond(res, 400, { error: err.message });
       }
@@ -17725,7 +17926,6 @@ const server = createServer(async (req, res) => {
         }
         throw err;
       }
-      applySessionWebsiteAccessRequest(session, body);
       session.notificationConfig = buildResolvedSessionNotificationConfig(
         resolved.layers
       );
@@ -17735,20 +17935,6 @@ const server = createServer(async (req, res) => {
       );
       void refreshTelegramBridgeSession(session, "sessions_resume");
       const bookkeepingWarnings = [...(session.bookkeepingWarnings || [])];
-      try {
-        setAgentFolder(agent_id, resolvedFolder, session.id);
-      } catch (err) {
-        const warning = `registry.folder_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[sessions/resume] ${agent_id} ${warning}`);
-      }
-      try {
-        updateAgentSession(agent_id, session.id);
-      } catch (err) {
-        const warning = `registry.session_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[sessions/resume] ${agent_id} ${warning}`);
-      }
       let childMatrixBinding;
       let childMatrixStorageProof;
       let matrixTimelineReplayProof;
@@ -17970,14 +18156,9 @@ const server = createServer(async (req, res) => {
         });
       }
 
-      let resolvedFolder =
-        sourceRecord.agent_folder || getAgentFolder(agent_id);
-      if (auth.mode === "dashboard" && agent_folder) {
-        resolvedFolder = agent_folder;
-      }
-      if (!resolvedFolder) {
+      if (!sourceRecord.agent_folder) {
         return respond(res, 400, {
-          error: "No local folder mapping configured for this agent",
+          error: "Source session history record has no agent folder",
         });
       }
 
@@ -17985,7 +18166,9 @@ const server = createServer(async (req, res) => {
       let requestedCanonicalFolder;
       try {
         sourceCanonicalFolder = realpathSync(sourceRecord.agent_folder);
-        requestedCanonicalFolder = realpathSync(resolvedFolder);
+        requestedCanonicalFolder = agent_folder
+          ? realpathSync(agent_folder)
+          : sourceCanonicalFolder;
       } catch (err) {
         return respond(res, 400, {
           error: `Resume folder validation failed: ${err.message}`,
@@ -17996,6 +18179,7 @@ const server = createServer(async (req, res) => {
           error: "Resume source folder does not match requested folder",
         });
       }
+      const resolvedFolder = sourceCanonicalFolder;
 
       const explicitProvider = readExplicitRequestedProvider(body);
       if (explicitProvider.error) {
@@ -18161,12 +18345,16 @@ const server = createServer(async (req, res) => {
       const sessionRuntimeCapabilities =
         resolveRuntimeCapabilitiesForSessionStart(resolved.config, body);
       try {
-        ensureRequestedWebsiteScaffoldBeforeSession({
-          agentId: agent_id,
-          folder: resolvedFolder,
-          body,
-          resolved,
-        });
+        if (hasWebsiteConfigUpdate(body)) {
+          persistBrowserRootWebsiteSettings({
+            agentId: agent_id,
+            body,
+            initialize:
+              hasAgentWebEnabledRequest(body) &&
+              normalizeAgentWebEnabled(body.web_enabled ?? body.webEnabled),
+            allowMissingDisabledNoop: true,
+          });
+        }
       } catch (err) {
         return respond(res, 400, { error: err.message });
       }
@@ -18234,7 +18422,6 @@ const server = createServer(async (req, res) => {
         });
       }
 
-      applySessionWebsiteAccessRequest(session, body);
       session.notificationConfig = buildResolvedSessionNotificationConfig(
         resolved.layers
       );
@@ -18244,20 +18431,6 @@ const server = createServer(async (req, res) => {
       );
       void refreshTelegramBridgeSession(session, "session_resume");
       const bookkeepingWarnings = [...(session.bookkeepingWarnings || [])];
-      try {
-        setAgentFolder(agent_id, resolvedFolder, session.id);
-      } catch (err) {
-        const warning = `registry.folder_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[session/resume] ${agent_id} ${warning}`);
-      }
-      try {
-        updateAgentSession(agent_id, session.id);
-      } catch (err) {
-        const warning = `registry.session_write_failed: ${err.message}`;
-        bookkeepingWarnings.push(warning);
-        console.error(`[session/resume] ${agent_id} ${warning}`);
-      }
 
       emitSessionLifecycleEvent(session, "resume", {
         source_session_id: sourceSessionId,
@@ -19120,6 +19293,8 @@ function reconcileHostRestartRestoreOnBoot() {
 }
 
 reconcileHostRestartRestoreOnBoot();
+removeObsoleteAgentRegistry(getConfigDir());
+browserRootProjectIndex.start();
 schedulerRunner.start();
 
 await ensureHostCloudRegistration();
@@ -19279,6 +19454,7 @@ process.on("SIGINT", () => {
   console.log("\n[oysterun-host] Shutting down...");
   if (tunnelAgent) tunnelAgent.stop();
   hostTelemetryScheduler?.stop?.();
+  browserRootProjectIndex.stop();
   schedulerRunner.stop();
   providerModelRefreshRunner.stop();
   schedulerService.close();
@@ -19294,6 +19470,7 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   if (tunnelAgent) tunnelAgent.stop();
   hostTelemetryScheduler?.stop?.();
+  browserRootProjectIndex.stop();
   schedulerRunner.stop();
   providerModelRefreshRunner.stop();
   schedulerService.close();

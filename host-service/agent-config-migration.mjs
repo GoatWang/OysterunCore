@@ -48,16 +48,6 @@ function readOptionalObjectFile(filePath, label) {
   return readObjectFile(filePath, label);
 }
 
-function readRegistryAgentFolders(configDir) {
-  const registryPath = join(configDir, "agent-registry.json");
-  if (!existsSync(registryPath)) return [];
-  const parsed = readObjectFile(registryPath, "agent registry");
-  return Object.values(parsed)
-    .map((entry) => (entry && typeof entry === "object" ? entry.agent_folder : null))
-    .filter((folderPath) => typeof folderPath === "string" && folderPath.trim())
-    .map((folderPath) => resolve(folderPath.trim()));
-}
-
 function readSessionHistoryAgentFolders(configDir) {
   const historyPath = join(configDir, "session-history.json");
   if (!existsSync(historyPath)) return [];
@@ -98,36 +88,21 @@ function deriveDefaultBrowseRootPathForHome(configDir, homePath) {
   return resolve(join(resolvedHomePath, "OysterAgents"));
 }
 
-function shouldSkipBrowseScanDirectory(name) {
-  if (!name) return true;
-  if (name === "node_modules" || name === ".git" || name === AGENT_CONFIG_DIRNAME) return true;
-  return name.startsWith(".");
-}
-
 function scanBrowseRootForLegacyAgentFolders(rootPath) {
   if (!rootPath || !existsSync(rootPath)) return [];
   if (pathKind(rootPath) !== "directory") return [];
 
-  const discovered = new Set();
-  const queue = [resolve(rootPath)];
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const sharedKind = pathKind(join(current, AGENT_CONFIG_DIRNAME));
-    const localKind = pathKind(join(current, LEGACY_AGENT_LOCAL_CONFIG_FILENAME));
-    if (sharedKind === "file" || localKind === "file") {
-      discovered.add(current);
-    }
-
-    const entries = readdirSync(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (shouldSkipBrowseScanDirectory(entry.name)) continue;
-      queue.push(join(current, entry.name));
+  const discovered = [];
+  for (const entry of readdirSync(resolve(rootPath), { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const folderPath = resolve(rootPath, entry.name);
+    const sharedKind = pathKind(join(folderPath, AGENT_CONFIG_DIRNAME));
+    const localKind = pathKind(join(folderPath, LEGACY_AGENT_LOCAL_CONFIG_FILENAME));
+    if (sharedKind === "directory" || sharedKind === "file" || localKind === "file") {
+      discovered.push(folderPath);
     }
   }
-
-  return [...discovered];
+  return discovered;
 }
 
 export function discoverHostConfigDirs({ homePath = homedir() } = {}) {
@@ -157,11 +132,6 @@ export function discoverAgentFoldersForMigration({ homePath = homedir() } = {}) 
   const configDirs = discoverHostConfigDirs({ homePath });
 
   for (const configDir of configDirs) {
-    for (const folderPath of readRegistryAgentFolders(configDir)) {
-      if (pathKind(folderPath) === "directory") {
-        discovered.add(folderPath);
-      }
-    }
     for (const folderPath of readSessionHistoryAgentFolders(configDir)) {
       if (pathKind(folderPath) === "directory") {
         discovered.add(folderPath);

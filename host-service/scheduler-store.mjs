@@ -154,11 +154,11 @@ function mapPortableRuntimeStateRow(row) {
     agent_folder: row.agent_folder,
     portable_hash: row.portable_hash,
     first_discovered_at: row.first_discovered_at,
-    owner_enabled_at: row.owner_enabled_at,
-    owner_disabled_at: row.owner_disabled_at,
     last_triggered_at: row.last_triggered_at,
     last_dispatched_message_id: row.last_dispatched_message_id,
     last_skipped_at: row.last_skipped_at,
+    next_run_at: row.next_run_at,
+    runtime_status: row.runtime_status,
     skip_count: row.skip_count,
     dispatch_count: row.dispatch_count,
     last_error: row.last_error,
@@ -275,11 +275,11 @@ export class SchedulerStore {
         agent_folder TEXT NOT NULL,
         portable_hash TEXT NOT NULL,
         first_discovered_at TEXT NOT NULL,
-        owner_enabled_at TEXT,
-        owner_disabled_at TEXT,
         last_triggered_at TEXT,
         last_dispatched_message_id TEXT,
         last_skipped_at TEXT,
+        next_run_at TEXT,
+        runtime_status TEXT,
         skip_count INTEGER NOT NULL DEFAULT 0,
         dispatch_count INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -337,6 +337,16 @@ export class SchedulerStore {
     if (!hasColumn(this.db, "schedule_run_logs", "source_owner")) {
       this.db.exec(
         "ALTER TABLE schedule_run_logs ADD COLUMN source_owner TEXT NOT NULL DEFAULT 'host_runtime'"
+      );
+    }
+    if (!hasColumn(this.db, "portable_schedule_runtime_state", "next_run_at")) {
+      this.db.exec(
+        "ALTER TABLE portable_schedule_runtime_state ADD COLUMN next_run_at TEXT"
+      );
+    }
+    if (!hasColumn(this.db, "portable_schedule_runtime_state", "runtime_status")) {
+      this.db.exec(
+        "ALTER TABLE portable_schedule_runtime_state ADD COLUMN runtime_status TEXT"
       );
     }
     if (hasForeignKeys(this.db, "schedule_runs")) {
@@ -616,24 +626,19 @@ export class SchedulerStore {
       insertPortableScheduleRuntimeState: this.db.prepare(`
         INSERT INTO portable_schedule_runtime_state (
           schedule_id, agent_folder, portable_hash, first_discovered_at,
-          owner_enabled_at, owner_disabled_at, updated_at
+          updated_at
         )
         VALUES (
           @schedule_id, @agent_folder, @portable_hash, @first_discovered_at,
-          @owner_enabled_at, @owner_disabled_at, @updated_at
+          @updated_at
         )
       `),
       updatePortableScheduleRuntimeHash: this.db.prepare(`
         UPDATE portable_schedule_runtime_state
         SET portable_hash = @portable_hash,
-            updated_at = @updated_at
-        WHERE schedule_id = @schedule_id AND agent_folder = @agent_folder
-      `),
-      markPortableScheduleOwnerToggle: this.db.prepare(`
-        UPDATE portable_schedule_runtime_state
-        SET portable_hash = @portable_hash,
-            owner_enabled_at = @owner_enabled_at,
-            owner_disabled_at = @owner_disabled_at,
+            first_discovered_at = @first_discovered_at,
+            next_run_at = NULL,
+            runtime_status = NULL,
             updated_at = @updated_at
         WHERE schedule_id = @schedule_id AND agent_folder = @agent_folder
       `),
@@ -642,6 +647,8 @@ export class SchedulerStore {
         SET portable_hash = @portable_hash,
             last_triggered_at = @triggered_at,
             last_dispatched_message_id = @message_id,
+            next_run_at = @next_run_at,
+            runtime_status = @runtime_status,
             dispatch_count = dispatch_count + 1,
             last_error = NULL,
             updated_at = @updated_at
@@ -652,6 +659,8 @@ export class SchedulerStore {
         SET portable_hash = @portable_hash,
             last_triggered_at = @triggered_at,
             last_skipped_at = @triggered_at,
+            next_run_at = @next_run_at,
+            runtime_status = @runtime_status,
             skip_count = skip_count + 1,
             last_error = @last_error,
             updated_at = @updated_at
@@ -1041,7 +1050,6 @@ export class SchedulerStore {
     scheduleId,
     agentFolder,
     portableHash,
-    ownerManaged = false,
   }) {
     this.initialize();
     const normalizedScheduleId = normalizeRequiredString(
@@ -1067,8 +1075,6 @@ export class SchedulerStore {
         agent_folder: normalizedAgentFolder,
         portable_hash: normalizedHash,
         first_discovered_at: updatedAt,
-        owner_enabled_at: ownerManaged ? updatedAt : null,
-        owner_disabled_at: ownerManaged ? null : updatedAt,
         updated_at: updatedAt,
       });
       return this.getPortableScheduleRuntimeState({
@@ -1081,6 +1087,7 @@ export class SchedulerStore {
         schedule_id: normalizedScheduleId,
         agent_folder: normalizedAgentFolder,
         portable_hash: normalizedHash,
+        first_discovered_at: updatedAt,
         updated_at: updatedAt,
       });
     }
@@ -1090,53 +1097,28 @@ export class SchedulerStore {
     });
   }
 
-  markPortableScheduleOwnerToggle({
-    scheduleId,
-    agentFolder,
-    portableHash,
-    enabled,
-  }) {
-    this.initialize();
-    const state = this.ensurePortableScheduleRuntimeState({
-      scheduleId,
-      agentFolder,
-      portableHash,
-      ownerManaged: enabled === true,
-    });
-    const updatedAt = nowIso(this.clock);
-    this.statements.markPortableScheduleOwnerToggle.run({
-      schedule_id: state.schedule_id,
-      agent_folder: state.agent_folder,
-      portable_hash: normalizeRequiredString(portableHash, "portableHash"),
-      owner_enabled_at: enabled === true ? updatedAt : state.owner_enabled_at,
-      owner_disabled_at: enabled === true ? null : updatedAt,
-      updated_at: updatedAt,
-    });
-    return this.getPortableScheduleRuntimeState({
-      scheduleId: state.schedule_id,
-      agentFolder: state.agent_folder,
-    });
-  }
-
   recordPortableScheduleDispatch({
     scheduleId,
     agentFolder,
     portableHash,
     triggeredAt,
+    nextRunAt = null,
     dispatchedMessageId,
+    status = null,
   }) {
     this.initialize();
     this.ensurePortableScheduleRuntimeState({
       scheduleId,
       agentFolder,
       portableHash,
-      ownerManaged: true,
     });
     this.statements.recordPortableScheduleDispatch.run({
       schedule_id: normalizeRequiredString(scheduleId, "scheduleId"),
       agent_folder: normalizeRequiredString(agentFolder, "agentFolder"),
       portable_hash: normalizeRequiredString(portableHash, "portableHash"),
       triggered_at: normalizeRequiredString(triggeredAt, "triggeredAt"),
+      next_run_at: normalizeOptionalString(nextRunAt),
+      runtime_status: normalizeOptionalString(status),
       message_id: normalizeRequiredString(
         dispatchedMessageId,
         "dispatchedMessageId"
@@ -1151,6 +1133,8 @@ export class SchedulerStore {
     agentFolder,
     portableHash,
     triggeredAt,
+    nextRunAt = null,
+    status = null,
     lastError = null,
   }) {
     this.initialize();
@@ -1158,13 +1142,14 @@ export class SchedulerStore {
       scheduleId,
       agentFolder,
       portableHash,
-      ownerManaged: true,
     });
     this.statements.recordPortableScheduleSkip.run({
       schedule_id: normalizeRequiredString(scheduleId, "scheduleId"),
       agent_folder: normalizeRequiredString(agentFolder, "agentFolder"),
       portable_hash: normalizeRequiredString(portableHash, "portableHash"),
       triggered_at: normalizeRequiredString(triggeredAt, "triggeredAt"),
+      next_run_at: normalizeOptionalString(nextRunAt),
+      runtime_status: normalizeOptionalString(status),
       last_error: normalizeOptionalString(lastError),
       updated_at: nowIso(this.clock),
     });

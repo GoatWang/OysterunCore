@@ -2927,6 +2927,7 @@ export class CodexAppServerSession extends EventEmitter {
       this._pendingControls.set(requestId, {
         kind: "command",
         params,
+        providerRequestId: msg.id,
         itemId,
         commandText:
           extractCodexCommandTextFromParams(params) ||
@@ -2947,6 +2948,7 @@ export class CodexAppServerSession extends EventEmitter {
       this._pendingControls.set(requestId, {
         kind: "patch",
         params,
+        providerRequestId: msg.id,
         itemId: extractCodexControlItemId(params),
       });
       this.emit("event", {
@@ -2960,7 +2962,11 @@ export class CodexAppServerSession extends EventEmitter {
     }
 
     if (msg.method === "item/permissions/requestApproval") {
-      this._pendingControls.set(requestId, { kind: "permissions", params });
+      this._pendingControls.set(requestId, {
+        kind: "permissions",
+        params,
+        providerRequestId: msg.id,
+      });
       this.emit("event", {
         type: "control.request",
         provider: this.provider,
@@ -2972,7 +2978,11 @@ export class CodexAppServerSession extends EventEmitter {
     }
 
     if (msg.method === "item/tool/requestUserInput") {
-      this._pendingControls.set(requestId, { kind: "user_input", params });
+      this._pendingControls.set(requestId, {
+        kind: "user_input",
+        params,
+        providerRequestId: msg.id,
+      });
       this.emit("event", {
         type: "control.request",
         provider: this.provider,
@@ -2984,7 +2994,11 @@ export class CodexAppServerSession extends EventEmitter {
     }
 
     if (msg.method === "mcpServer/elicitation/request") {
-      this._pendingControls.set(requestId, { kind: "mcp_elicitation", params });
+      this._pendingControls.set(requestId, {
+        kind: "mcp_elicitation",
+        params,
+        providerRequestId: msg.id,
+      });
       this.emit("event", {
         type: "control.request",
         provider: this.provider,
@@ -3535,12 +3549,17 @@ export class CodexAppServerSession extends EventEmitter {
     if (!pending) {
       throw new Error(`Unknown Codex approval request: ${requestId}`);
     }
+    const providerRequestId =
+      typeof pending.providerRequestId === "number" ||
+      typeof pending.providerRequestId === "string"
+        ? pending.providerRequestId
+        : requestId;
 
     if (pending.kind === "user_input") {
       const answers = normalizeCodexUserInputAnswers(pending.params.questions, payload.answers);
       CodexAppServerSession.prototype.writeControlResponse.call(this, requestId, pending, {
         jsonrpc: "2.0",
-        id: requestId,
+        id: providerRequestId,
         result: {
           answers,
         },
@@ -3553,7 +3572,7 @@ export class CodexAppServerSession extends EventEmitter {
       const response = normalizeCodexElicitationResponse(pending.params, payload.response);
       CodexAppServerSession.prototype.writeControlResponse.call(this, requestId, pending, {
         jsonrpc: "2.0",
-        id: requestId,
+        id: providerRequestId,
         result: response,
       });
       CodexAppServerSession.prototype.clearPendingControl.call(this, requestId);
@@ -3567,7 +3586,7 @@ export class CodexAppServerSession extends EventEmitter {
     if (pending.kind === "permissions") {
       CodexAppServerSession.prototype.writeControlResponse.call(this, requestId, pending, {
         jsonrpc: "2.0",
-        id: requestId,
+        id: providerRequestId,
         result: {
           scope: "turn",
           permissions: payload.allow ? (pending.params.permissions || {}) : {},
@@ -3586,7 +3605,7 @@ export class CodexAppServerSession extends EventEmitter {
     try {
       CodexAppServerSession.prototype.writeControlResponse.call(this, requestId, pending, {
         jsonrpc: "2.0",
-        id: requestId,
+        id: providerRequestId,
         result: {
           decision: payload.allow ? "accept" : "decline",
         },

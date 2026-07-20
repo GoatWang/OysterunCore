@@ -1,7 +1,7 @@
 # Oysterun GitHub Tracker
 
-This sample agent checks public GitHub repositories, builds a daily HTML report,
-and sends the report to Oysterun Mail.
+This sample agent checks public GitHub repositories, publishes a daily HTML
+report through its Oysterun Website, and sends the same file to Oysterun Mail.
 
 It is safe to copy. The sample contains no GitHub token, Mail credential,
 capability token, generated report, runtime state, or machine-local path.
@@ -24,7 +24,7 @@ uv run tasks/repo_crawler_rich.py --no-mail --days 1
 The command writes:
 
 ```text
-data/latest_report.html
+.oysterun/site/reports/latest_report.html
 ```
 
 ## Scheduled Run
@@ -45,8 +45,9 @@ Both scheduled tasks run:
 uv run tasks/repo_crawler_rich.py --days 1
 ```
 
-When the scheduler run has Oysterun Mail capability, the tracker command sends
-the generated HTML report through the injected Oysterun product CLI internally.
+The command also updates `.oysterun/site/index.html` to link the latest report.
+When the scheduler run has Oysterun Mail capability, it sends that same report
+file through the injected Oysterun product CLI internally.
 Do not run a second `oysterun mail send` command after the tracker command
 completes.
 

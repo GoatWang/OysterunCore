@@ -37,6 +37,11 @@ function normalizeOptionalString(value, fallback = "") {
   return value.trim() || fallback;
 }
 
+function preserveOptionalBodySource(value) {
+  if (value === null || value === undefined) return "";
+  return typeof value === "string" ? value : String(value);
+}
+
 function normalizeTimestamp(value, fieldName) {
   const normalized = normalizeRequiredString(value, fieldName);
   const parsed = Date.parse(normalized);
@@ -566,11 +571,11 @@ export class MailStore {
     const updatedAt = nowIso(this.clock);
     const bodyMarkdown =
       input.bodyMarkdown !== undefined
-        ? normalizeOptionalString(input.bodyMarkdown)
+        ? preserveOptionalBodySource(input.bodyMarkdown)
         : "";
     const bodyHtml =
       input.bodyHtml !== undefined
-        ? normalizeOptionalString(input.bodyHtml)
+        ? preserveOptionalBodySource(input.bodyHtml)
         : current.body_html;
     const bodyFormat = normalizeBodyFormat(
       input.bodyFormat || "html",
@@ -865,8 +870,8 @@ export class MailStore {
       DEFAULT_HOST_APP_USER_ID
     );
     this.requireHostAppUser(recipientUserId);
-    const bodyMarkdown = normalizeOptionalString(input.bodyMarkdown);
-    const bodyHtml = normalizeOptionalString(input.bodyHtml);
+    const bodyMarkdown = preserveOptionalBodySource(input.bodyMarkdown);
+    const bodyHtml = preserveOptionalBodySource(input.bodyHtml);
     const createdAt = nowIso(this.clock);
     return {
       id: normalizeOptionalString(input.id, `mail_${randomUUID()}`),
