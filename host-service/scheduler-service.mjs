@@ -515,7 +515,7 @@ function getHostScheduleTargetProvider(targetBinding) {
   );
 }
 
-function hostScheduleUsesSessionRuntime(targetBinding) {
+function hostScheduleUsesTransientAcp(targetBinding) {
   return (
     targetBinding?.kind === "setup_snapshot" &&
     getHostScheduleTargetProvider(targetBinding) === "claude"
@@ -523,31 +523,31 @@ function hostScheduleUsesSessionRuntime(targetBinding) {
 }
 
 function getHostScheduleDispatchPlan(targetBinding) {
-  const sessionRuntime = hostScheduleUsesSessionRuntime(targetBinding);
+  const transientAcp = hostScheduleUsesTransientAcp(targetBinding);
   return {
-    sessionRuntime,
-    methodName: sessionRuntime
-      ? "dispatchHostScheduleSessionRuntime"
+    transientAcp,
+    methodName: transientAcp
+      ? "dispatchHostScheduleAcpTransient"
       : "dispatchHostScheduleDirect",
-    pendingPath: sessionRuntime
-      ? "schedulerSessionRuntime.pending"
+    pendingPath: transientAcp
+      ? "schedulerAcpProviderRunner.pending"
       : "schedulerDirectProviderRunner.pending",
-    defaultPath: sessionRuntime
-      ? "schedulerSessionRuntime.acp-session"
+    defaultPath: transientAcp
+      ? "schedulerAcpProviderRunner.transient"
       : "schedulerDirectProviderRunner.direct",
-    unavailableReason: sessionRuntime
-      ? "scheduler_session_runtime_dispatcher_unavailable"
+    unavailableReason: transientAcp
+      ? "scheduler_acp_transient_dispatcher_unavailable"
       : "scheduler_direct_provider_runner_unavailable",
-    unavailableLogSummary: sessionRuntime
-      ? "Host scheduler ACP session runtime dispatcher unavailable; no immediate retry"
+    unavailableLogSummary: transientAcp
+      ? "Host scheduler transient ACP provider runner unavailable; no immediate retry"
       : "Host scheduler direct provider runner unavailable; no immediate retry",
   };
 }
 
 function getHostScheduleDispatchMetadata(plan, extra = {}) {
   return {
-    ...(plan.sessionRuntime
-      ? { session_runtime_run: true, direct_provider_run: false }
+    ...(plan.transientAcp
+      ? { transient_acp_run: true, direct_provider_run: false }
       : { direct_provider_run: true }),
     ...extra,
   };
@@ -677,6 +677,8 @@ export class SchedulerService {
     this.getHostOrigin = getHostOrigin;
     this.clock = clock;
     this.recheckMs = recheckMs;
+    this.lastBrowserRootTimezoneReconciliation = null;
+    this.lastBrowserRootTimezoneCorrection = null;
   }
 
   initialize() {
@@ -1120,6 +1122,94 @@ export class SchedulerService {
       .map((schedule) => this.serializeHostScheduleForDashboardUi(schedule));
   }
 
+  normalizeBrowserRootPortableSchedules({
+    hostTimezone = null,
+    source = "browser_root_portable_scheduler_import",
+  } = {}) {
+    this.initialize();
+    const timezoneNormalization =
+      this.portableDefinitionStore.normalizeBrowserRootPortableSchedulersToHostTimezone(
+        {
+          hostTimezone: hostTimezone || getHostSystemTimezone(),
+          source,
+        }
+      );
+    return {
+      status: timezoneNormalization.status,
+      host_timezone: timezoneNormalization.host_timezone,
+      project_count: timezoneNormalization.project_count,
+      scheduler_count: timezoneNormalization.scheduler_count,
+      timezone_correction_count: timezoneNormalization.corrected_count,
+      timezone_corrections: timezoneNormalization.corrections,
+      timezone_correction_notifications: timezoneNormalization.corrections.map(
+        (correction) => correction.message
+      ),
+      results: timezoneNormalization.results,
+    };
+  }
+
+  reconcileBrowserRootPortableSchedulesForGeneration({
+    generation,
+    refreshReason = "unknown",
+    hostTimezone = null,
+  } = {}) {
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new Error("Browser Root project-index generation must be a positive integer");
+    }
+    if (
+      this.lastBrowserRootTimezoneReconciliation?.project_index_generation ===
+      generation
+    ) {
+      return {
+        ...this.lastBrowserRootTimezoneReconciliation,
+        reconciliation_performed: false,
+        reconciliation_reused: true,
+      };
+    }
+    if (
+      Number.isInteger(
+        this.lastBrowserRootTimezoneReconciliation?.project_index_generation
+      ) &&
+      generation <
+        this.lastBrowserRootTimezoneReconciliation.project_index_generation
+    ) {
+      throw new Error(
+        `Browser Root project-index generation moved backwards from ${this.lastBrowserRootTimezoneReconciliation.project_index_generation} to ${generation}`
+      );
+    }
+    const result = this.normalizeBrowserRootPortableSchedules({
+      hostTimezone,
+      source: `browser_root_project_index:${refreshReason}`,
+    });
+    this.lastBrowserRootTimezoneReconciliation = {
+      ...result,
+      project_index_generation: generation,
+      project_index_refresh_reason: refreshReason,
+      reconciliation_performed: true,
+      reconciliation_reused: false,
+    };
+    if (result.timezone_correction_count > 0) {
+      this.lastBrowserRootTimezoneCorrection = {
+        ...this.lastBrowserRootTimezoneReconciliation,
+      };
+    }
+    return { ...this.lastBrowserRootTimezoneReconciliation };
+  }
+
+  getBrowserRootTimezoneReconciliationState() {
+    const retained =
+      this.lastBrowserRootTimezoneCorrection ||
+      this.lastBrowserRootTimezoneReconciliation;
+    if (!retained) return null;
+    return {
+      ...retained,
+      latest_project_index_generation:
+        this.lastBrowserRootTimezoneReconciliation
+          ?.project_index_generation || null,
+      retained_correction: Boolean(this.lastBrowserRootTimezoneCorrection),
+    };
+  }
+
   getHostScheduleForDashboard(scheduleId) {
     return this.serializeHostScheduleForDashboardUi(
       this.requireHostSchedule(scheduleId)
@@ -1253,10 +1343,10 @@ export class SchedulerService {
     if (
       hasHostSchedules &&
       typeof dispatcher.dispatchHostScheduleDirect !== "function" &&
-      typeof dispatcher.dispatchHostScheduleSessionRuntime !== "function"
+      typeof dispatcher.dispatchHostScheduleAcpTransient !== "function"
     ) {
       throw new Error(
-        "Host scheduler dispatch requires a provider runner or ACP session runtime dispatcher"
+        "Host scheduler dispatch requires a direct provider runner or transient ACP runner"
       );
     }
     const result = {
@@ -1493,8 +1583,8 @@ export class SchedulerService {
         const reason =
           safeProviderRun?.log_summary ||
           safeProviderRun?.error_summary ||
-          (dispatchPlan.sessionRuntime
-            ? "scheduler_session_runtime_run_failed"
+          (dispatchPlan.transientAcp
+            ? "scheduler_acp_transient_run_failed"
             : "scheduler_direct_provider_run_failed");
         const nextRunAt = this.computeNextHostScheduleRun(schedule, triggeredAt);
         const statusAfter = nextRunAt ? "active" : "stopped";
@@ -1519,8 +1609,8 @@ export class SchedulerService {
               dispatchAuthority,
               hostDispatchPath: dispatchPlan.defaultPath,
               fallbackLogSummary:
-                dispatchPlan.sessionRuntime
-                  ? "Host scheduler ACP session runtime dispatch failed; no spin retry"
+                dispatchPlan.transientAcp
+                  ? "Host scheduler transient ACP run failed; no spin retry"
                   : "Host scheduler direct provider run failed; no spin retry",
               extra: {
                 ...getHostScheduleDispatchMetadata(dispatchPlan),
@@ -1574,8 +1664,8 @@ export class SchedulerService {
             dispatchAuthority,
             hostDispatchPath: dispatchPlan.defaultPath,
             fallbackLogSummary:
-              dispatchPlan.sessionRuntime
-                ? "Dispatched Host schedule through ACP session runtime"
+              dispatchPlan.transientAcp
+                ? "Completed Host schedule through transient ACP provider runner"
                 : "Dispatched Host schedule through direct provider runner",
             extra: {
               ...getHostScheduleDispatchMetadata(dispatchPlan),
@@ -1670,8 +1760,8 @@ export class SchedulerService {
     const dispatchHostSchedule = dispatcher?.[dispatchPlan.methodName];
     if (typeof dispatchHostSchedule !== "function") {
       throw new Error(
-        dispatchPlan.sessionRuntime
-          ? "Scheduler test run requires ACP session runtime dispatcher"
+        dispatchPlan.transientAcp
+          ? "Scheduler test run requires transient ACP provider runner"
           : "Scheduler test run requires direct provider runner"
       );
     }
@@ -1733,8 +1823,8 @@ export class SchedulerService {
         const reason =
           safeProviderRun?.log_summary ||
           safeProviderRun?.error_summary ||
-          (dispatchPlan.sessionRuntime
-            ? "scheduler_session_runtime_run_failed"
+          (dispatchPlan.transientAcp
+            ? "scheduler_acp_transient_run_failed"
             : "scheduler_direct_provider_run_failed");
         const failedRun = this.store.updateScheduleRun(run.id, {
           completedAt: safeProviderRun?.completed_at || triggeredAt,
@@ -1759,8 +1849,8 @@ export class SchedulerService {
               dispatchAuthority,
               hostDispatchPath: dispatchPlan.defaultPath,
               fallbackLogSummary:
-                dispatchPlan.sessionRuntime
-                  ? "Host scheduler dashboard test run ACP session runtime dispatch failed; no spin retry"
+                dispatchPlan.transientAcp
+                  ? "Host scheduler dashboard transient ACP run failed; no spin retry"
                   : "Host scheduler dashboard test run direct provider run failed; no spin retry",
               extra: {
                 ...getHostScheduleDispatchMetadata(dispatchPlan),
@@ -1821,8 +1911,8 @@ export class SchedulerService {
             dispatchAuthority,
             hostDispatchPath: dispatchPlan.defaultPath,
             fallbackLogSummary:
-              dispatchPlan.sessionRuntime
-                ? "Dashboard test run dispatched Host schedule through ACP session runtime"
+              dispatchPlan.transientAcp
+                ? "Dashboard test run completed through transient ACP provider runner"
                 : "Dashboard test run dispatched Host schedule through direct provider runner",
             extra: {
               ...getHostScheduleDispatchMetadata(dispatchPlan),

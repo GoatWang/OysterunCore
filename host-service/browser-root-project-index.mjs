@@ -291,6 +291,7 @@ export class BrowserRootProjectIndex {
     this.debounceTimer = null;
     this.reconcileTimer = null;
     this.watchers = [];
+    this.refreshListeners = new Set();
     this.reportedCollisionSignatures = new Set();
     this.generation = 0;
     this.lastReason = null;
@@ -342,6 +343,33 @@ export class BrowserRootProjectIndex {
     this.debounceTimer?.unref?.();
   }
 
+  subscribeToRefresh(listener) {
+    if (typeof listener !== "function") {
+      throw new Error("Browser Root refresh listener must be a function");
+    }
+    this.refreshListeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.refreshListeners.delete(listener);
+    };
+  }
+
+  notifyRefreshListeners() {
+    const snapshot = this.getSnapshot();
+    for (const listener of [...this.refreshListeners]) {
+      try {
+        listener(snapshot);
+      } catch (err) {
+        this.logger.error?.(
+          "[browser-root-project-index] refresh listener failed",
+          err
+        );
+      }
+    }
+  }
+
   refresh({ reason = "explicit_refresh", rebuildWatchers = true } = {}) {
     if (this.refreshing) {
       this.refreshQueued = true;
@@ -379,6 +407,7 @@ export class BrowserRootProjectIndex {
       };
       if (this.running) this.closeWatchers();
     } finally {
+      this.notifyRefreshListeners();
       this.refreshing = false;
       if (this.refreshQueued) {
         this.refreshQueued = false;
@@ -477,6 +506,7 @@ export class BrowserRootProjectIndex {
       root: this.snapshot.root,
       project_count: this.snapshot.projects.length,
       watcher_count: this.watchers.length,
+      refresh_listener_count: this.refreshListeners.size,
       debounce_pending: Boolean(this.debounceTimer),
       reconcile_timer_active: Boolean(this.reconcileTimer),
       reconcile_interval_ms: this.reconcileMs,

@@ -117,6 +117,7 @@ import {
   listFolderPage,
   validateFolderPath,
 } from "./folder-browser.mjs";
+import { clonePublicGitHubAgent } from "./agent-store-demo.mjs";
 import { attachRuntimeTurnId } from "./runtime-turn-events.mjs";
 import { TerminalSessionManager } from "./terminal-session-manager.mjs";
 import {
@@ -185,6 +186,7 @@ import {
   readMatrixTranscriptMessagesAfter,
   readMatrixTranscriptPage,
 } from "./matrix-transcript-read-adapter.mjs";
+import { SessionListPreviewService } from "./session-list-preview-service.mjs";
 import {
   checkRouteCMatrixStorageHealth,
   copyRouteCMatrixRoomTimeline,
@@ -239,6 +241,7 @@ import {
 } from "./unified-tool-lifecycle-detail.mjs";
 import { SchedulerRunner } from "./scheduler-runner.mjs";
 import { runSchedulerDirectProviderCommand } from "./scheduler-direct-provider-runner.mjs";
+import { SchedulerAcpProviderRunner } from "./scheduler-acp-provider-runner.mjs";
 import { getHostSystemTimezone } from "./scheduler-rule-model.mjs";
 import {
   DEFAULT_HOST_APP_USER_ID,
@@ -778,54 +781,8 @@ function isRouteCMatrixBindingNotFoundError(err) {
   );
 }
 
-const LAST_MESSAGE_PREVIEW_MAX_LENGTH = 80;
-const LAST_MESSAGE_PREVIEW_MATRIX_PAGE_LIMIT = 20;
-const LAST_MESSAGE_PREVIEW_SKIPPED_MESSAGE_TYPES = new Set([
-  "control_status",
-  "runtime_error",
-  "session_lifecycle",
-  "transport_error",
-]);
-
-function formatLastMessagePreviewText(raw) {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.replace(/\s+/g, " ").trim();
-  if (!trimmed) return null;
-  return trimmed.length > LAST_MESSAGE_PREVIEW_MAX_LENGTH
-    ? trimmed.slice(0, LAST_MESSAGE_PREVIEW_MAX_LENGTH) + "…"
-    : trimmed;
-}
-
-function previewTextFromTranscriptMessage(msg) {
-  const raw =
-    typeof msg?.content === "string" && msg.content.trim()
-      ? msg.content
-      : typeof msg?.tool_summary === "string" && msg.tool_summary.trim()
-      ? msg.tool_summary
-      : typeof msg?.text === "string" && msg.text.trim()
-      ? msg.text
-      : null;
-  return formatLastMessagePreviewText(raw);
-}
-
 function getLastMatrixMessagePreviewForBinding(binding) {
-  const page = readMatrixTranscriptPage({
-    binding,
-    limit: LAST_MESSAGE_PREVIEW_MATRIX_PAGE_LIMIT,
-  });
-  const messages = Array.isArray(page?.messages) ? page.messages : [];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const msg = messages[index];
-    if (LAST_MESSAGE_PREVIEW_SKIPPED_MESSAGE_TYPES.has(msg?.message_type)) {
-      continue;
-    }
-    if (msg?.role === "control-status") {
-      continue;
-    }
-    const preview = previewTextFromTranscriptMessage(msg);
-    if (preview) return preview;
-  }
-  return null;
+  return sessionListPreviewService.readForBinding(binding).last_message_preview;
 }
 
 function getLastMessagePreview(agentFolder, agentId, sessionId) {
@@ -839,6 +796,11 @@ function getLastMessagePreview(agentFolder, agentId, sessionId) {
     }
   }
   return null;
+}
+
+function shouldIncludeSessionListPreviews(url) {
+  const raw = normalizeString(url.searchParams.get("include_previews"));
+  return raw !== "0" && raw !== "false" && raw !== "no";
 }
 
 function parseTranscriptPageLimit(rawLimit) {
@@ -2053,22 +2015,9 @@ function logPersistableEvent(event) {
 
 // ── State ─────────────────────────────────────────────────────
 
-function buildSchedulerManagedSessionName({ schedule, target, messageId }) {
-  const sourceName = normalizeSessionName(target?.sessionPayload?.session_name);
-  const scheduleId = normalizeString(schedule?.id) || "schedule";
-  const suffix =
-    String(messageId || "")
-      .replace(/[^a-z0-9]/gi, "")
-      .slice(-8) || randomUUID().slice(0, 8);
-  return (
-    normalizeSessionName(
-      `${sourceName || `Scheduler ${scheduleId.slice(0, 8)}`} ${suffix}`
-    ) || `Scheduler ${suffix}`
-  );
-}
-
-async function dispatchHostScheduleThroughSessionRuntime(
+async function dispatchHostScheduleThroughTransientAcp(
   activeSessionManager,
+  acpProviderRunner,
   { schedule, targetBinding, text, messageId, mailCapability = null }
 ) {
   const target = resolveSchedulerTargetToDirectProviderRun({
@@ -2078,62 +2027,28 @@ async function dispatchHostScheduleThroughSessionRuntime(
   const runtime = target.resolved.runtime;
   if (runtime.provider !== "claude") {
     throw new Error(
-      "Scheduler ACP session runtime dispatch requires a Claude setup snapshot target"
+      "Scheduler transient ACP dispatch requires a Claude setup snapshot target"
     );
   }
-  const startedAt = new Date().toISOString();
-  const sessionId = randomUUID();
-  const session = activeSessionManager.start({
-    agentId: target.agentId,
+  const preparedRuntimeWorkspace =
+    activeSessionManager.prepareProviderRuntimeWorkspace({
+      cwd: target.agentFolder,
+      provider: runtime.provider,
+      requiredProductSkills: target.sessionPayload?.required_product_skills,
+      installOysterunSkills:
+        target.sessionPayload?.install_oysterun_skills === true,
+      runtimeCapabilityEnv: mailCapability?.env || {},
+    });
+  const result = await acpProviderRunner.run({
+    runtime,
     cwd: target.agentFolder,
-    sessionId,
-    sessionName: buildSchedulerManagedSessionName({
-      schedule,
-      target,
-      messageId,
-    }),
-    provider: runtime.provider,
-    model: runtime.model,
-    reasoningEffort: runtime.reasoningEffort,
-    reasoningEffortSource: runtime.reasoningEffortSource,
-    permissionMode: runtime.permissionMode,
-    approvalPolicy: runtime.approvalPolicy,
-    sandboxMode: runtime.sandboxMode,
-    dangerousMode: runtime.dangerousMode,
-    allowDangerouslySkipPermissions: runtime.allowDangerouslySkipPermissions,
-    searchEnabled: runtime.searchEnabled,
-    imageInputEnabled: runtime.imageInputEnabled,
-    native: runtime.native,
-    workspacePolicy: runtime.workspacePolicy,
-    runtimeCapabilities: mailCapability ? { [MAIL_CREATE_SCOPE]: true } : {},
-    runtimeCapabilityEnv: mailCapability?.env || {},
-    runtimeCapabilityGrant: mailCapability?.metadata || null,
-    runtimeCapabilityRedactionValues: mailCapability?.redactionValues || [],
-    requiredProductSkills: target.sessionPayload?.required_product_skills,
-    installOysterunSkills:
-      target.sessionPayload?.install_oysterun_skills === true,
+    prompt: text,
+    messageId,
+    env: preparedRuntimeWorkspace.normalizedRuntimeEnv,
+    redactionValues: mailCapability?.redactionValues || [],
   });
-  const queuedMessage = activeSessionManager.sendToSession(
-    session.id,
-    "oysterun-scheduler",
-    "Oysterun Scheduler",
-    text,
-    { messageId }
-  );
-  const completedAt = new Date().toISOString();
   return {
-    ok: true,
-    message_id: queuedMessage?.id || messageId,
-    provider: runtime.provider,
-    command_label: "acp session runtime",
-    host_dispatch_path: "schedulerSessionRuntime.acp-session",
-    exit_code: 0,
-    signal: null,
-    started_at: startedAt,
-    completed_at: completedAt,
-    stdout: "Scheduler prompt queued to managed ACP session runtime\n",
-    stderr: "",
-    log_summary: "Scheduler prompt queued to managed ACP session runtime",
+    ...result,
     target_source: target.source,
     agent_id: target.agentId,
   };
@@ -2141,8 +2056,11 @@ async function dispatchHostScheduleThroughSessionRuntime(
 
 function createSchedulerSessionDispatcher(
   activeSessionManager,
-  { getMatrixFacade = () => null } = {}
+  { acpProviderRunner } = {}
 ) {
+  if (!acpProviderRunner || typeof acpProviderRunner.run !== "function") {
+    throw new Error("Scheduler dispatcher requires transient ACP provider runner");
+  }
   return {
     async dispatchHostScheduleDirect({
       schedule,
@@ -2169,15 +2087,16 @@ function createSchedulerSessionDispatcher(
         agent_id: target.agentId,
       };
     },
-    async dispatchHostScheduleSessionRuntime({
+    async dispatchHostScheduleAcpTransient({
       schedule,
       targetBinding,
       text,
       messageId,
       mailCapability = null,
     }) {
-      return await dispatchHostScheduleThroughSessionRuntime(
+      return await dispatchHostScheduleThroughTransientAcp(
         activeSessionManager,
+        acpProviderRunner,
         {
           schedule,
           targetBinding,
@@ -3140,6 +3059,7 @@ function resolveSchedulerTargetToDirectProviderRun({ targetBinding }) {
 }
 
 const sessionManager = new SessionManager();
+const sessionListPreviewService = new SessionListPreviewService();
 const browserRootProjectIndex = new BrowserRootProjectIndex({ logger: console });
 setTranscriptSiteProjectFolderResolver((projectId) =>
   browserRootProjectIndex.resolveProjectFolder(projectId, { allowInvalid: true })
@@ -3172,6 +3092,20 @@ const schedulerService = new SchedulerService({
   getProjectIndexGeneration: () =>
     browserRootProjectIndex.getLifecycleState().generation,
 });
+browserRootProjectIndex.subscribeToRefresh((projectIndex) => {
+  const timezoneReconciliation =
+    schedulerService.reconcileBrowserRootPortableSchedulesForGeneration({
+      generation: projectIndex.generation,
+      refreshReason: projectIndex.refresh_reason,
+      hostTimezone: getHostSystemTimezone(),
+    });
+  if (timezoneReconciliation.timezone_correction_count > 0) {
+    console.info(
+      `[scheduler] normalized ${timezoneReconciliation.timezone_correction_count} portable schedule timezone(s) for Browser Root generation ${projectIndex.generation}`
+    );
+  }
+});
+const schedulerAcpProviderRunner = new SchedulerAcpProviderRunner();
 let routeCMatrixFacade = null;
 routeCMatrixFacade = createRouteCMatrixFacade({
   sessionManager,
@@ -3189,6 +3123,7 @@ routeCMatrixFacade = createRouteCMatrixFacade({
     }
   },
   onCommittedMatrixEvent: async (matrixEvent) => {
+    sessionListPreviewService.invalidateRoom(matrixEvent?.room_id);
     const result =
       await apnsCompleteMessageDispatcher.dispatchCommittedMatrixEvent(matrixEvent);
     if (result?.notificationReleased === true && result?.candidate) {
@@ -3199,7 +3134,7 @@ routeCMatrixFacade = createRouteCMatrixFacade({
 const schedulerSessionDispatcher = createSchedulerSessionDispatcher(
   sessionManager,
   {
-    getMatrixFacade: () => routeCMatrixFacade,
+    acpProviderRunner: schedulerAcpProviderRunner,
   }
 );
 const schedulerRunner = new SchedulerRunner({
@@ -9770,6 +9705,7 @@ function buildAgentCatalog(claims) {
 function listBrowserRootSchedulerProjects() {
   return browserRootProjectIndex
     .listProjects({ includeConflicts: false })
+    .filter((project) => project.markers?.schedulers?.present === true)
     .map((project) => ({
       project_id: project.project_id,
       agent_folder: project.agent_folder,
@@ -10915,6 +10851,7 @@ function classifyRouteCRequestTrafficEndpoint(method, requestPath) {
   if (requestPath === "/session/start") return "session_start";
   if (requestPath === "/session/send") return "session_send";
   if (requestPath === "/session/stop") return "session_stop";
+  if (requestPath === "/sessions/previews") return "sessions_previews";
   if (requestPath === "/sessions/history") return "sessions_history";
   if (requestPath === "/sessions") return "sessions";
   if (/^\/app\/sessions\/[^/]+\/chat\/?$/.test(requestPath)) {
@@ -13454,6 +13391,44 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    if (req.method === "POST" && path === "/agent-store/demo/clone") {
+      if (!requireDashboardMode(claims, res)) return;
+      try {
+        const body = await readBody(req);
+        const payload = await clonePublicGitHubAgent({
+          repositoryUrl: body.repository_url,
+        });
+        const snapshot = browserRootProjectIndex.refresh({
+          reason: "agent_store_demo_clone",
+          rebuildWatchers: true,
+        });
+        const discoveredProject = snapshot.projects.find(
+          (project) => project.agent_folder === payload.agent_folder
+        );
+        return respond(res, 201, {
+          ...payload,
+          project_discovery: discoveredProject
+            ? {
+                status: "browser_root_project_discovered",
+                project_id: discoveredProject.project_id,
+                agent_folder: discoveredProject.agent_folder,
+              }
+            : {
+                status: "browser_root_folder_unmarked",
+                project_id: payload.agent_id,
+                agent_folder: payload.agent_folder,
+              },
+        });
+      } catch (err) {
+        const response = {
+          error: err.message || "Could not clone the GitHub repository",
+          code: err.code || "agent_store_clone_failed",
+        };
+        if (err.detail) response.detail = err.detail;
+        return respond(res, err.status || 500, response);
+      }
+    }
+
     if (req.method === "POST" && path === "/dev/open-permissions-settings") {
       if (!requireDashboardMode(claims, res)) return;
       if (!supportsMacFolderAccessPermissions()) {
@@ -14753,6 +14728,8 @@ const server = createServer(async (req, res) => {
         status: "host_scheduler_schedules",
         host_timezone: getHostSystemTimezone(),
         schedules: schedulerService.listHostSchedulesForDashboard(),
+        timezone_reconciliation:
+          schedulerService.getBrowserRootTimezoneReconciliationState(),
         project_registration_issues:
           buildBrowserRootProjectRegistrationIssues(),
         serialization_scope: "authenticated_dashboard_host_scheduler_ui",
@@ -14772,11 +14749,38 @@ const server = createServer(async (req, res) => {
           reason: "scheduler_owner_refresh",
           rebuildWatchers: true,
         });
+        const timezoneNormalization =
+          schedulerService.reconcileBrowserRootPortableSchedulesForGeneration({
+            generation: projectIndex.generation,
+            refreshReason: projectIndex.refresh_reason,
+            hostTimezone: getHostSystemTimezone(),
+          });
         return respond(res, 200, {
           status: "scheduler_browser_root_refreshed",
           browser_root: projectIndex.root,
           project_count: projectIndex.projects.length,
           diagnostic_count: projectIndex.diagnostics.length,
+          timezone_normalization: {
+            status: timezoneNormalization.status,
+            host_timezone: timezoneNormalization.host_timezone,
+            project_index_generation:
+              timezoneNormalization.project_index_generation,
+            project_index_refresh_reason:
+              timezoneNormalization.project_index_refresh_reason,
+            reconciliation_performed:
+              timezoneNormalization.reconciliation_performed,
+            reconciliation_reused:
+              timezoneNormalization.reconciliation_reused,
+            project_count: timezoneNormalization.project_count,
+            scheduler_count: timezoneNormalization.scheduler_count,
+            corrected_count:
+              timezoneNormalization.timezone_correction_count,
+          },
+          timezone_correction_count:
+            timezoneNormalization.timezone_correction_count,
+          timezone_corrections: timezoneNormalization.timezone_corrections,
+          timezone_correction_notifications:
+            timezoneNormalization.timezone_correction_notifications,
           schedules: schedulerService.listHostSchedulesForDashboard(),
           project_registration_issues:
             buildBrowserRootProjectRegistrationIssues(),
@@ -17476,18 +17480,100 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    // ── GET /sessions/previews ─────────────────────────────
+    if (req.method === "GET" && path === "/sessions/previews") {
+      if (!requireDashboardMode(claims, res)) return;
+      const entriesBySessionId = new Map();
+      for (const session of sessionManager.list()) {
+        const sessionId = session.id || session.sessionId;
+        const agentId = session.agentId || session.agent_id;
+        if (sessionId && agentId) {
+          entriesBySessionId.set(sessionId, { sessionId, agentId });
+        }
+      }
+      for (const record of getSessionHistory()) {
+        if (
+          record.session_id &&
+          record.agent_id &&
+          record.agent_folder &&
+          existsSync(record.agent_folder) &&
+          !entriesBySessionId.has(record.session_id)
+        ) {
+          entriesBySessionId.set(record.session_id, {
+            sessionId: record.session_id,
+            agentId: record.agent_id,
+          });
+        }
+      }
+
+      const bindingBySessionId = new Map();
+      const bindings = [];
+      const seenRoomIds = new Set();
+      for (const entry of entriesBySessionId.values()) {
+        const binding = getRouteCMatrixRoomBinding(entry.sessionId);
+        if (!binding || binding.host_agent_id !== entry.agentId) continue;
+        bindingBySessionId.set(entry.sessionId, binding);
+        if (!seenRoomIds.has(binding.matrix_room_id)) {
+          seenRoomIds.add(binding.matrix_room_id);
+          bindings.push(binding);
+        }
+      }
+      const resultByRoomId =
+        sessionListPreviewService.readForBindings(bindings);
+      const previews = [];
+      for (const entry of entriesBySessionId.values()) {
+        const binding = bindingBySessionId.get(entry.sessionId) || null;
+        if (!binding) {
+          previews.push({
+            session_id: entry.sessionId,
+            status: "no_matrix_binding",
+            last_message_preview: null,
+            latest_committed_seq: 0,
+            cache_status: "not_applicable",
+            error_code: null,
+          });
+          continue;
+        }
+        const result = resultByRoomId.get(binding.matrix_room_id);
+        previews.push({
+          session_id: entry.sessionId,
+          status: result.status,
+          last_message_preview: result.last_message_preview,
+          latest_committed_seq: result.latest_committed_seq,
+          cache_status: result.cache_status,
+          error_code: result.error_code,
+        });
+      }
+      return respond(res, 200, {
+        status: "session_list_previews",
+        previews,
+        session_count: entriesBySessionId.size,
+        unique_room_count: bindings.length,
+        dedicated_preview_query: true,
+        full_transcript_pagination_used: false,
+        room_aggregate_query_used: false,
+        global_sequence_query_used: false,
+        cache_authority: false,
+        committed_transcript_truth: "matrix_room_timeline",
+      });
+    }
+
     // ── GET /sessions/history ──────────────────────────────
     if (req.method === "GET" && path === "/sessions/history") {
+      const includePreviews = shouldIncludeSessionListPreviews(url);
       const history = getSessionHistory()
         .filter((s) => s.agent_folder && existsSync(s.agent_folder))
-        .map((s) => ({
-          ...s,
-          last_message_preview: getLastMessagePreview(
-            s.agent_folder,
-            s.agent_id,
-            s.session_id
-          ),
-        }));
+        .map((s) => {
+          const row = { ...s };
+          if (includePreviews) {
+            row.last_message_preview = getLastMessagePreview(
+              s.agent_folder,
+              s.agent_id,
+              s.session_id
+            );
+          }
+          return row;
+        });
       return respond(res, 200, { sessions: history });
     }
 
@@ -18544,6 +18630,7 @@ const server = createServer(async (req, res) => {
 
     // ── GET /sessions ──────────────────────────────────────
     if (req.method === "GET" && path === "/sessions") {
+      const includePreviews = shouldIncludeSessionListPreviews(url);
       const allSessions = sessionManager.list();
       let accessible;
       if (isRuntimeCapabilityOnly(claims)) {
@@ -18563,7 +18650,7 @@ const server = createServer(async (req, res) => {
           const liveSession = sessionId
             ? sessionManager.getSession(sessionId) || session
             : session;
-          return {
+          const row = {
             ...session,
             runtime_capabilities: serializeRuntimeCapabilities(
               session.runtimeCapabilities,
@@ -18593,12 +18680,15 @@ const server = createServer(async (req, res) => {
                   session.model || null,
                   claims
                 ),
-            lastMessagePreview: getLastMessagePreview(
+          };
+          if (includePreviews) {
+            row.lastMessagePreview = getLastMessagePreview(
               session.cwd,
               session.agentId,
               sessionId
-            ),
-          };
+            );
+          }
+          return row;
         }),
       });
     }
@@ -19450,12 +19540,13 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Graceful shutdown
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
   console.log("\n[oysterun-host] Shutting down...");
   if (tunnelAgent) tunnelAgent.stop();
   hostTelemetryScheduler?.stop?.();
   browserRootProjectIndex.stop();
   schedulerRunner.stop();
+  await schedulerAcpProviderRunner.stopAll();
   providerModelRefreshRunner.stop();
   schedulerService.close();
   sessionManager.stopAll();
@@ -19467,11 +19558,12 @@ process.on("SIGINT", () => {
   });
 });
 
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
   if (tunnelAgent) tunnelAgent.stop();
   hostTelemetryScheduler?.stop?.();
   browserRootProjectIndex.stop();
   schedulerRunner.stop();
+  await schedulerAcpProviderRunner.stopAll();
   providerModelRefreshRunner.stop();
   schedulerService.close();
   sessionManager.stopAll();

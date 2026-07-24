@@ -628,6 +628,47 @@ function normalizeRuntimeEnv(value) {
   return env;
 }
 
+export function prepareProviderRuntimeWorkspace({
+  cwd,
+  provider,
+  requiredProductSkills,
+  productSkillRoots = DEFAULT_PRODUCT_SKILL_ROOTS,
+  installOysterunSkills = false,
+  runtimeCapabilityEnv,
+  ensureTrustedAgentRoot = ensureProviderTrustedAgentRoot,
+}) {
+  const roots = normalizeProductSkillRoots(productSkillRoots);
+  const productSkillCopy = copyRequiredProductSkillsToAgent({
+    cwd,
+    requiredProductSkills,
+    productSkillRoots: roots,
+  });
+  const oysterunProviderSkillInstall =
+    installOysterunSkills === true
+      ? installOysterunProviderSkillSet({
+          cwd,
+          provider,
+          overwrite: true,
+          productSkillRoots: roots,
+        })
+      : null;
+  const normalizedRuntimeEnv = normalizeRuntimeEnv(runtimeCapabilityEnv);
+  const providerTrustedFolder = ensureTrustedAgentRoot({
+    cwd,
+    provider,
+    env: {
+      ...process.env,
+      ...normalizedRuntimeEnv,
+    },
+  });
+  return {
+    normalizedRuntimeEnv,
+    productSkillCopy,
+    oysterunProviderSkillInstall,
+    providerTrustedFolder,
+  };
+}
+
 function normalizeRedactionValues(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1255,6 +1296,15 @@ export class SessionManager extends EventEmitter {
       provider,
       overwrite,
       productSkillRoots: this.productSkillRoots,
+    });
+  }
+
+  prepareProviderRuntimeWorkspace(options) {
+    return prepareProviderRuntimeWorkspace({
+      ...options,
+      productSkillRoots: this.productSkillRoots,
+      ensureTrustedAgentRoot: ({ cwd, provider, env }) =>
+        this.ensureProviderTrustedAgentRoot({ cwd, provider, env }),
     });
   }
 
@@ -3631,28 +3681,19 @@ export class SessionManager extends EventEmitter {
     }
     const adapter = this.getAdapter(provider);
     this.assertConfiguredProviderCommandAvailable(provider, adapter);
-    const productSkillCopy = copyRequiredProductSkillsToAgent({
-      cwd,
-      requiredProductSkills,
-      productSkillRoots: this.productSkillRoots,
-    });
-    const oysterunProviderSkillInstall =
-      installOysterunSkills === true
-        ? this.installOysterunProviderSkillSet({
-            cwd,
-            provider,
-            overwrite: true,
-          })
-        : null;
-    const normalizedRuntimeEnv = normalizeRuntimeEnv(runtimeCapabilityEnv);
-    const providerTrustedFolder = this.ensureProviderTrustedAgentRoot({
+    const preparedRuntimeWorkspace = this.prepareProviderRuntimeWorkspace({
       cwd,
       provider,
-      env: {
-        ...process.env,
-        ...normalizedRuntimeEnv,
-      },
+      requiredProductSkills,
+      installOysterunSkills,
+      runtimeCapabilityEnv,
     });
+    const {
+      normalizedRuntimeEnv,
+      productSkillCopy,
+      oysterunProviderSkillInstall,
+      providerTrustedFolder,
+    } = preparedRuntimeWorkspace;
     const session = adapter.startSession({
       sessionId: id,
       cwd,

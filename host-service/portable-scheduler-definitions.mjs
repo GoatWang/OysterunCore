@@ -12,6 +12,7 @@ import { completeSchedulerSessionSetupPayloadForRuntime } from "./scheduler-setu
 import { deriveBrowserRootProjectId } from "./browser-root-project-index.mjs";
 import {
   computeNextScheduleRunAt,
+  getHostSystemTimezone,
   normalizeScheduleRule,
 } from "./scheduler-rule-model.mjs";
 
@@ -330,6 +331,151 @@ function writePortableFile(filePath, payload) {
   renameSync(tmpPath, filePath);
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function existingTimezoneFields(schedule) {
+  const fields = [];
+  const add = (container, key, field) => {
+    if (!isObjectRecord(container) || !hasOwn(container, key)) return;
+    const timezone = normalizeOptionalString(container[key]);
+    fields.push({ container, key, field, timezone });
+  };
+  add(schedule, "timezone", "definition.timezone");
+  add(schedule.schedule_rule, "timezone", "definition.schedule_rule.timezone");
+  add(schedule.metadata, "timezone", "definition.metadata.timezone");
+  add(
+    schedule.metadata?.schedule_rule,
+    "timezone",
+    "definition.metadata.schedule_rule.timezone"
+  );
+  return fields;
+}
+
+function buildPortableTimezoneCorrection({
+  agentFolder,
+  schedule,
+  fields,
+  filePath,
+  hostTimezone,
+  source,
+}) {
+  const mismatched = fields.find((field) => field.timezone !== hostTimezone);
+  const firstKnown = fields.find((field) => field.timezone);
+  const oldTimezone = mismatched?.timezone || firstKnown?.timezone || null;
+  const timePreserved =
+    normalizeOptionalString(schedule.schedule_rule?.time) ||
+    normalizeOptionalString(schedule.metadata?.schedule_rule?.time) ||
+    normalizeOptionalString(schedule.schedule_rule?.at) ||
+    null;
+  return {
+    agent_folder: agentFolder,
+    schedule_id: normalizeOptionalString(schedule.id) || null,
+    old_timezone: oldTimezone,
+    host_timezone: hostTimezone,
+    time_preserved: timePreserved,
+    portable_file_path: filePath,
+    source,
+    message: `Portable scheduler timezone normalized from ${
+      oldTimezone || "unspecified"
+    } to ${hostTimezone}; scheduled time preserved as ${
+      timePreserved || "absolute timestamp"
+    }.`,
+  };
+}
+
+function recomputePortableNextRunAtForHost(schedule, { hostTimezone, now }) {
+  if (!hasOwn(schedule, "next_run_at")) return schedule.next_run_at;
+  if (!isObjectRecord(schedule.schedule_rule)) return schedule.next_run_at;
+  const hostRule = { ...schedule.schedule_rule, timezone: hostTimezone };
+  const normalizedRule = normalizeScheduleRule(hostRule, {
+    timezone: hostTimezone,
+  });
+  if (normalizedRule.type === "once") {
+    return normalizeOptionalString(schedule.next_run_at) || normalizedRule.at;
+  }
+  return computeNextScheduleRunAt(normalizedRule, {
+    after: now,
+    timezone: hostTimezone,
+  });
+}
+
+export function normalizePortableSchedulerDefinitionsToHostTimezone(
+  agentFolder,
+  {
+    hostTimezone = getHostSystemTimezone(),
+    source = "browser_root_portable_scheduler_import",
+    now = null,
+    clock = () => new Date(),
+  } = {}
+) {
+  const realFolder = realpathSync(
+    normalizeRequiredString(agentFolder, "agentFolder")
+  );
+  const normalizedHostTimezone = normalizeScheduleRule(
+    { type: "daily", time: "00:00", timezone: hostTimezone },
+    { timezone: hostTimezone }
+  ).timezone;
+  const filePath = getPortableSchedulersJsonPath(realFolder);
+  const payload = readPortableFile(filePath);
+  const correctionTime = nowIso(now === null ? clock : () => now);
+  let changed = false;
+  const corrections = [];
+  const schedulers = payload.schedulers.map((entry) => {
+    if (!isObjectRecord(entry)) return entry;
+    const schedule = deepCloneJson(entry, "portable scheduler definition");
+    const fields = existingTimezoneFields(schedule);
+    const mismatched = fields.filter(
+      (field) => field.timezone !== normalizedHostTimezone
+    );
+    if (mismatched.length === 0) return schedule;
+
+    for (const field of fields) {
+      if (field.timezone !== normalizedHostTimezone) {
+        field.container[field.key] = normalizedHostTimezone;
+      }
+    }
+    if (hasOwn(schedule, "next_run_at")) {
+      schedule.next_run_at = recomputePortableNextRunAtForHost(schedule, {
+        hostTimezone: normalizedHostTimezone,
+        now: correctionTime,
+      });
+    }
+    schedule.updated_at = correctionTime;
+    corrections.push(
+      buildPortableTimezoneCorrection({
+        agentFolder: realFolder,
+        schedule,
+        fields,
+        filePath,
+        hostTimezone: normalizedHostTimezone,
+        source,
+      })
+    );
+    changed = true;
+    return schedule;
+  });
+  if (changed) {
+    writePortableFile(filePath, {
+      ...payload,
+      schedulers,
+    });
+  }
+  return {
+    status: changed
+      ? "portable_scheduler_timezone_normalized"
+      : "portable_scheduler_timezone_already_host",
+    agent_folder: realFolder,
+    portable_file_path: filePath,
+    host_timezone: normalizedHostTimezone,
+    scheduler_count: payload.schedulers.length,
+    corrected_count: corrections.length,
+    corrections,
+    changed,
+  };
+}
+
 function normalizeBrowserRootProjectEntry(entry) {
   if (!isObjectRecord(entry)) {
     throw new Error("Browser Root project entry must be an object");
@@ -448,6 +594,66 @@ export class PortableSchedulerDefinitionStore {
     });
     this.invalidateScheduleCache();
     return filePath;
+  }
+
+  normalizeDefinitionsForFolderToHostTimezone(
+    agentFolder,
+    {
+      hostTimezone = getHostSystemTimezone(),
+      source = "browser_root_portable_scheduler_import",
+    } = {}
+  ) {
+    const result = normalizePortableSchedulerDefinitionsToHostTimezone(
+      agentFolder,
+      {
+        hostTimezone,
+        source,
+        clock: this.clock,
+      }
+    );
+    if (result.changed) this.invalidateScheduleCache();
+    return result;
+  }
+
+  normalizeBrowserRootPortableSchedulersToHostTimezone({
+    hostTimezone = getHostSystemTimezone(),
+    source = "browser_root_portable_scheduler_import",
+  } = {}) {
+    const projects = this.getBrowserRootProjectFolders();
+    const results = [];
+    const corrections = [];
+    let schedulerCount = 0;
+    for (const project of projects) {
+      const result = this.normalizeDefinitionsForFolderToHostTimezone(
+        project.agent_folder,
+        { hostTimezone, source }
+      );
+      schedulerCount += result.scheduler_count;
+      corrections.push(...result.corrections);
+      results.push({
+        project_id: project.project_id,
+        agent_folder: project.agent_folder,
+        portable_file_path: result.portable_file_path,
+        scheduler_count: result.scheduler_count,
+        corrected_count: result.corrected_count,
+        status: result.status,
+      });
+    }
+    return {
+      status:
+        corrections.length > 0
+          ? "browser_root_portable_scheduler_timezone_normalized"
+          : "browser_root_portable_scheduler_timezone_already_host",
+      host_timezone: normalizeScheduleRule(
+        { type: "daily", time: "00:00", timezone: hostTimezone },
+        { timezone: hostTimezone }
+      ).timezone,
+      project_count: projects.length,
+      scheduler_count: schedulerCount,
+      corrected_count: corrections.length,
+      corrections,
+      results,
+    };
   }
 
   buildPortableHash(definition) {

@@ -6,7 +6,15 @@ import { fileURLToPath } from "url";
 import { resolveDefaultBrowsePathAsync, resolveDirectoryPathAsync } from "./config.mjs";
 import { completeSchedulerSessionSetupPayloadForRuntime } from "./scheduler-setup-snapshot-contract.mjs";
 import { deriveBrowserRootProjectId } from "./browser-root-project-index.mjs";
-import { normalizePortableSetupSnapshot } from "./portable-scheduler-definitions.mjs";
+import {
+  normalizePortableSchedulerDefinitionsToHostTimezone,
+  normalizePortableSetupSnapshot,
+} from "./portable-scheduler-definitions.mjs";
+import {
+  computeNextScheduleRunAt,
+  getHostSystemTimezone,
+  normalizeScheduleRule,
+} from "./scheduler-rule-model.mjs";
 import { FULL_DISK_ACCESS_SETTINGS_URI as MACOS_FULL_DISK_ACCESS_SETTINGS_URI } from "./macos-permissions.mjs";
 
 const DEFAULT_LIMIT = 100;
@@ -92,47 +100,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function taipeiDateParts(date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Taipei",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)])
-  );
-  return {
-    year: values.year,
-    month: values.month,
-    day: values.day,
-  };
-}
-
-function computeNextTaipeiDailyRunAt(time = "11:30", now = new Date()) {
-  const match = String(time || "11:30").match(/^(\d{1,2}):(\d{2})$/);
-  const hour = match ? Number(match[1]) : 11;
-  const minute = match ? Number(match[2]) : 30;
-  const parts = taipeiDateParts(now);
-  let targetUtc = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    hour - 8,
-    minute,
-    0,
-    0
-  );
-  if (targetUtc <= now.getTime()) targetUtc += 24 * 60 * 60 * 1000;
-  return new Date(targetUtc).toISOString();
-}
-
 async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
   const schedulersPath = join(copiedPath, ".oysterun", "schedulers.json");
   const raw = await readFile(schedulersPath, "utf8");
@@ -145,6 +112,7 @@ async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
     );
   }
   const timestamp = nowIso();
+  const hostTimezone = getHostSystemTimezone();
   const projectId = deriveBrowserRootProjectId(basename(copiedPath));
   const normalizedSchedulers = payload.schedulers.map((entry) => {
     const schedule = JSON.parse(JSON.stringify(entry));
@@ -155,17 +123,23 @@ async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
         "demo_agent_scheduler_invalid"
       );
     }
-    const time =
-      schedule?.schedule_rule?.timezone === "Asia/Taipei"
-        ? schedule.schedule_rule.time
-        : "11:30";
     const id = randomUUID();
     schedule.id = id;
     schedule.agent_id = projectId;
     schedule.created_by = "oysterun-demo-agent-copy";
     schedule.enabled = true;
     schedule.status = "active";
-    schedule.next_run_at = computeNextTaipeiDailyRunAt(time);
+    const hostRule = normalizeScheduleRule(
+      { ...schedule.schedule_rule, timezone: hostTimezone },
+      { timezone: hostTimezone }
+    );
+    schedule.next_run_at =
+      hostRule.type === "once"
+        ? hostRule.at
+        : computeNextScheduleRunAt(hostRule, {
+            after: timestamp,
+            timezone: hostTimezone,
+          });
     schedule.created_at = timestamp;
     schedule.updated_at = timestamp;
     const portableSetupSnapshot = normalizePortableSetupSnapshot(
@@ -195,9 +169,23 @@ async function normalizeCopiedDemoAgentSchedulers(copiedPath) {
     schedulersPath,
     `${JSON.stringify({ version: 1, schedulers: normalizedSchedulers }, null, 2)}\n`
   );
+  const timezoneNormalization =
+    normalizePortableSchedulerDefinitionsToHostTimezone(copiedPath, {
+      hostTimezone,
+      source: "demo_agent_copy",
+      now: timestamp,
+    });
+  const finalPayload = JSON.parse(await readFile(schedulersPath, "utf8"));
   return {
-    scheduler_count: normalizedSchedulers.length,
-    scheduler_ids: normalizedSchedulers.map((entry) => entry.id),
+    scheduler_count: finalPayload.schedulers.length,
+    scheduler_ids: finalPayload.schedulers.map((entry) => entry.id),
+    timezone_normalization: {
+      status: timezoneNormalization.status,
+      host_timezone: timezoneNormalization.host_timezone,
+      corrected_count: timezoneNormalization.corrected_count,
+    },
+    timezone_correction_count: timezoneNormalization.corrected_count,
+    timezone_corrections: timezoneNormalization.corrections,
   };
 }
 
@@ -523,6 +511,12 @@ export async function copyDemoAgent({
     copied_path: copiedPath,
     portable_scheduler_count: schedulerRegistration.scheduler_count,
     portable_scheduler_ids: schedulerRegistration.scheduler_ids,
+    portable_scheduler_timezone_normalization:
+      schedulerRegistration.timezone_normalization,
+    portable_scheduler_timezone_correction_count:
+      schedulerRegistration.timezone_correction_count || 0,
+    portable_scheduler_timezone_corrections:
+      schedulerRegistration.timezone_corrections || [],
     start_session_available: true,
   };
 }

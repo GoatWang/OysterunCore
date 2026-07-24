@@ -38,6 +38,8 @@ import {
   readRouteCMatrixSQLiteContextWindow,
   readRouteCMatrixSQLiteEvent,
   readRouteCMatrixSQLiteMessagesWindow,
+  readRouteCMatrixSQLiteLatestPreviewRows,
+  readRouteCMatrixSQLiteLatestTimelineSeq,
   readRouteCMatrixSQLiteNextStreamSeq,
   readRouteCMatrixSQLiteRoom,
   readRouteCMatrixSQLiteStateEvent,
@@ -2342,6 +2344,40 @@ export function getRouteCMatrixRoomTimelineReplaySourceProof({
     product_local_transcript_replay_shortcut_used: false,
     direct_matrix_harness_write_used: false,
     routec_host_owned_matrix_storage: true,
+  };
+}
+
+export function readRouteCMatrixRoomLatestPreviewCheckpoint({ binding }) {
+  requireBinding(binding);
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  return {
+    latest_committed_seq: readRouteCMatrixSQLiteLatestTimelineSeq(db, {
+      roomId: binding.matrix_room_id,
+    }),
+    dedicated_preview_query: true,
+    full_transcript_pagination_used: false,
+    room_aggregate_query_used: false,
+    global_sequence_query_used: false,
+  };
+}
+
+export function readRouteCMatrixRoomLatestPreviewRows({ binding, limit = 20 }) {
+  requireBinding(binding);
+  const db = openRouteCMatrixAdapterSQLiteStore();
+  const rows = readRouteCMatrixSQLiteLatestPreviewRows(db, {
+    roomId: binding.matrix_room_id,
+    limit,
+  });
+  return {
+    rows,
+    latest_committed_seq:
+      rows.length > 0 && Number.isSafeInteger(rows[0].stream_seq)
+        ? rows[0].stream_seq
+        : 0,
+    dedicated_preview_query: true,
+    full_transcript_pagination_used: false,
+    room_aggregate_query_used: false,
+    global_sequence_query_used: false,
   };
 }
 

@@ -1777,6 +1777,55 @@ export function readRouteCMatrixSQLiteTimelineStats(db, { roomId }) {
   };
 }
 
+export function readRouteCMatrixSQLiteLatestTimelineSeq(db, { roomId }) {
+  assertSchemaCompatible(db);
+  if (!roomId) {
+    throw new Error("Route C Matrix latest timeline seq read requires room id");
+  }
+  const row = db
+    .prepare(
+      `SELECT stream_seq
+       FROM matrix_events
+       WHERE room_id = ? AND is_state = 0
+       ORDER BY stream_seq DESC
+       LIMIT 1`,
+    )
+    .get(roomId);
+  return Number.isSafeInteger(row?.stream_seq) ? row.stream_seq : 0;
+}
+
+export function readRouteCMatrixSQLiteLatestPreviewRows(
+  db,
+  { roomId, limit = 20 },
+) {
+  assertSchemaCompatible(db);
+  if (!roomId) {
+    throw new Error("Route C Matrix latest preview read requires room id");
+  }
+  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+  return db
+    .prepare(
+      `SELECT event_id,
+              room_id,
+              type,
+              sender,
+              stream_seq,
+              origin_server_ts,
+              semantic_type,
+              json_extract(content_json, '$.body') AS body,
+              json_extract(content_json, '$.filename') AS filename,
+              json_extract(
+                content_json,
+                '$."org.oysterun.semantic.v1".tool_summary'
+              ) AS tool_summary
+       FROM matrix_events
+       WHERE room_id = ? AND is_state = 0
+       ORDER BY stream_seq DESC
+       LIMIT ?`,
+    )
+    .all(roomId, normalizedLimit);
+}
+
 export function readRouteCMatrixSQLiteTimelineEvents(
   db,
   {

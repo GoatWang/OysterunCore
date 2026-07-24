@@ -1,10 +1,22 @@
 import { createHash } from "crypto";
 import { getRouteCMatrixActorByUserId } from "./matrix-room-binding.mjs";
-import { readRouteCMatrixRoomMessages } from "./routec-matrix-storage-adapter.mjs";
+import {
+  readRouteCMatrixRoomLatestPreviewCheckpoint,
+  readRouteCMatrixRoomLatestPreviewRows,
+  readRouteCMatrixRoomMessages,
+} from "./routec-matrix-storage-adapter.mjs";
 import { OYSTERUN_SEMANTIC_NAMESPACE } from "./matrix-event-writer.mjs";
 
 const DEFAULT_MATRIX_TRANSCRIPT_LIMIT = 20;
 const MAX_MATRIX_TRANSCRIPT_LIMIT = 100;
+const LAST_MESSAGE_PREVIEW_MAX_LENGTH = 80;
+const LAST_MESSAGE_PREVIEW_MATRIX_PAGE_LIMIT = 20;
+const LAST_MESSAGE_PREVIEW_SKIPPED_MESSAGE_TYPES = new Set([
+  "control_status",
+  "runtime_error",
+  "session_lifecycle",
+  "transport_error",
+]);
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -255,6 +267,73 @@ function transcriptProof(readResult) {
     preview_read_only: true,
     routec_messages_checkpoint_proof:
       readResult.routec_messages_checkpoint_proof || null,
+  };
+}
+
+function formatLastMessagePreviewText(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.replace(/\s+/g, " ").trim();
+  if (!trimmed) return null;
+  return trimmed.length > LAST_MESSAGE_PREVIEW_MAX_LENGTH
+    ? `${trimmed.slice(0, LAST_MESSAGE_PREVIEW_MAX_LENGTH)}…`
+    : trimmed;
+}
+
+function previewMessageFromRow(binding, row) {
+  const semanticType = semanticString(row?.semantic_type);
+  const actor = getRouteCMatrixActorByUserId(binding, row?.sender);
+  const role = messageRole(semanticType, actor);
+  const type = messageType(semanticType);
+  const directBody = semanticString(row?.body);
+  const filename = semanticString(row?.filename);
+  const fallbackBody =
+    semanticType === "runtime.error" ||
+    semanticType === "session_lifecycle" ||
+    semanticType === "outbox.delivery" ||
+    semanticType?.startsWith("tool.") ||
+    semanticType?.startsWith("control.")
+      ? semanticType
+      : null;
+  return {
+    role,
+    message_type: type,
+    content: directBody || filename || fallbackBody,
+    tool_summary: semanticString(row?.tool_summary),
+    text: directBody || filename || fallbackBody,
+  };
+}
+
+export function readMatrixTranscriptPreviewCheckpoint({ binding }) {
+  return readRouteCMatrixRoomLatestPreviewCheckpoint({ binding });
+}
+
+export function readMatrixTranscriptLatestPreview({
+  binding,
+  limit = LAST_MESSAGE_PREVIEW_MATRIX_PAGE_LIMIT,
+}) {
+  const readResult = readRouteCMatrixRoomLatestPreviewRows({ binding, limit });
+  const rows = Array.isArray(readResult.rows) ? readResult.rows : [];
+  let preview = null;
+  for (const row of rows) {
+    const message = previewMessageFromRow(binding, row);
+    if (
+      LAST_MESSAGE_PREVIEW_SKIPPED_MESSAGE_TYPES.has(message.message_type) ||
+      message.role === "control-status"
+    ) {
+      continue;
+    }
+    preview = formatLastMessagePreviewText(
+      message.content || message.tool_summary || message.text,
+    );
+    if (preview) break;
+  }
+  return {
+    last_message_preview: preview,
+    latest_committed_seq: readResult.latest_committed_seq,
+    dedicated_preview_query: true,
+    full_transcript_pagination_used: false,
+    room_aggregate_query_used: false,
+    global_sequence_query_used: false,
   };
 }
 
